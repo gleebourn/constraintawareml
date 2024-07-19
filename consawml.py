@@ -117,6 +117,6 @@ def evaluate_metric(df,seed,loss='binary_crossentropy',
                     epochs=200,batch_size=32):
   X_train,X_test,y_train,y_test = preproc_bin_class(df,seed)
   m=mk_two_layer_perceptron(X_train,loss)
-  m.fit(training_features,training_labels,
+  m.fit(X_train,y_train,
         epochs=epochs,batch_size=batch_size)
-  m.evaluate(testing_features,testing_labels)
+  m.evaluate(X_test,y_test)
