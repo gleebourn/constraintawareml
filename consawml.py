@@ -73,3 +73,5 @@ def fit_model(m,training_features,training_labels,
   m.fit(training_features,training_labels,
         epochs=epochs,batch_size=batch_size)
 
+def evaluate_model(m,testing_features,testing_labels):
+  m.evaluate(testing_features,testing_labels)
