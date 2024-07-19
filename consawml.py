@@ -26,7 +26,7 @@ def preproc_bin_class(df,seed,label_col='label',label_class='Malicious',
   y = df[label_col]==label_class
 
   #Returns X_train, X_test, y_train, y_test
-  return train_test_split(X,y,test_size,random_state=seed,stratify=y)
+  return train_test_split(X,y,test_size=test_size,random_state=seed,stratify=y)
   
 class FbetaMetric(Metric):
   def __init__(self, beta=1, threshold=0.5, **kwargs):
