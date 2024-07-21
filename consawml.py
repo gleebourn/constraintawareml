@@ -120,3 +120,48 @@ def evaluate_metric(df,seed,loss='binary_crossentropy',
   m.fit(X_train,y_train,
         epochs=epochs,batch_size=batch_size)
   m.evaluate(X_test,y_test)
+
+
+class MatthewsCorrelationCoefficient(tf.keras.metrics.Metric):
+    def __init__(self, name='matthews_correlation', **kwargs):
+        super(MatthewsCorrelationCoefficient, self).__init__(name=name, **kwargs)
+        self.true_positives = self.add_weight(name='tp', initializer='zeros')
+        self.true_negatives = self.add_weight(name='tn', initializer='zeros')
+        self.false_positives = self.add_weight(name='fp', initializer='zeros')
+        self.false_negatives = self.add_weight(name='fn', initializer='zeros')
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = tf.cast(y_true, tf.bool)
+        y_pred = tf.cast(y_pred > 0.5, tf.bool)
+
+        tp = tf.reduce_sum(tf.cast(tf.logical_and(y_true, y_pred), tf.float32))
+        tn = tf.reduce_sum(tf.cast(tf.logical_and(tf.logical_not(y_true),
+                                   tf.logical_not(y_pred)),
+                           tf.float32))
+        fp = tf.reduce_sum(tf.cast(tf.logical_and(tf.logical_not(y_true), y_pred),
+                           tf.float32))
+        fn = tf.reduce_sum(tf.cast(tf.logical_and(y_true, tf.logical_not(y_pred)),
+                           tf.float32))
+
+        self.true_positives.assign_add(tp)
+        self.true_negatives.assign_add(tn)
+        self.false_positives.assign_add(fp)
+        self.false_negatives.assign_add(fn)
+
+    def result(self):
+        mcc = (self.true_positives * self.true_negatives -
+               self.false_positives * self.false_negatives) / (
+              tf.sqrt((self.true_positives + self.false_positives) *
+                      (self.true_positives + self.false_negatives) *
+                      (self.true_negatives + self.false_positives) *
+                      (self.true_negatives + self.false_negatives)) +
+                      tf.keras.backend.epsilon())
+        return mcc
+
+    def reset_states(self):
+        self.true_positives.assign(0)
+        self.true_negatives.assign(0)
+        self.false_positives.assign(0)
+        self.false_negatives.assign(0)
+
+
