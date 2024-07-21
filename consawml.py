@@ -9,7 +9,8 @@ from keras import Input,Sequential
 from keras.metrics import Metric
 from keras.backend import epsilon
 
-from tensorflow import reduce_sum,cast,float32
+from tensorflow import reduce_sum,cast,float32,cast,logical_and,logical_not,sqrt
+from tensorflow import bool as tfbool
 from tensorflow.math import greater_equal
 
 def preproc_bin_class(df,seed,label_col='label',label_class='Malicious',
@@ -122,7 +123,7 @@ def evaluate_metric(df,seed,loss='binary_crossentropy',
   m.evaluate(X_test,y_test)
 
 
-class MatthewsCorrelationCoefficient(tf.keras.metrics.Metric):
+class MatthewsCorrelationCoefficient(Metric):
     def __init__(self, name='matthews_correlation', **kwargs):
         super(MatthewsCorrelationCoefficient, self).__init__(name=name, **kwargs)
         self.true_positives = self.add_weight(name='tp', initializer='zeros')
@@ -131,17 +132,17 @@ class MatthewsCorrelationCoefficient(tf.keras.metrics.Metric):
         self.false_negatives = self.add_weight(name='fn', initializer='zeros')
 
     def update_state(self, y_true, y_pred, sample_weight=None):
-        y_true = tf.cast(y_true, tf.bool)
-        y_pred = tf.cast(y_pred > 0.5, tf.bool)
+        y_true = cast(y_true, tfbool)
+        y_pred = cast(y_pred > 0.5, tfbool)
 
-        tp = tf.reduce_sum(tf.cast(tf.logical_and(y_true, y_pred), tf.float32))
-        tn = tf.reduce_sum(tf.cast(tf.logical_and(tf.logical_not(y_true),
-                                   tf.logical_not(y_pred)),
-                           tf.float32))
-        fp = tf.reduce_sum(tf.cast(tf.logical_and(tf.logical_not(y_true), y_pred),
-                           tf.float32))
-        fn = tf.reduce_sum(tf.cast(tf.logical_and(y_true, tf.logical_not(y_pred)),
-                           tf.float32))
+        tp = reduce_sum(cast(logical_and(y_true, y_pred), float32))
+        tn = reduce_sum(cast(logical_and(logical_not(y_true),
+                                   logical_not(y_pred)),
+                           float32))
+        fp = reduce_sum(cast(logical_and(logical_not(y_true), y_pred),
+                           float32))
+        fn = reduce_sum(cast(logical_and(y_true, logical_not(y_pred)),
+                           float32))
 
         self.true_positives.assign_add(tp)
         self.true_negatives.assign_add(tn)
@@ -151,11 +152,11 @@ class MatthewsCorrelationCoefficient(tf.keras.metrics.Metric):
     def result(self):
         mcc = (self.true_positives * self.true_negatives -
                self.false_positives * self.false_negatives) / (
-              tf.sqrt((self.true_positives + self.false_positives) *
+              sqrt((self.true_positives + self.false_positives) *
                       (self.true_positives + self.false_negatives) *
                       (self.true_negatives + self.false_positives) *
                       (self.true_negatives + self.false_negatives)) +
-                      tf.keras.backend.epsilon())
+                      epsilon())
         return mcc
 
     def reset_states(self):
