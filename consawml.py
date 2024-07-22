@@ -9,9 +9,11 @@ from keras import Input,Sequential
 from keras.metrics import Metric
 from keras.backend import epsilon
 
-from tensorflow import reduce_sum,cast,float32,cast,logical_and,logical_not,sqrt
-from tensorflow import bool as tfbool
+from tensorflow import reduce_sum,cast,float32,\
+                       logical_and,logical_not,sqrt,shape
+from tensorflow import bool as tfbool,print as tfprint
 from tensorflow.math import greater_equal
+
 
 def preproc_bin_class(df,seed,label_col='label',label_class='Malicious',
                       numeric_only=True,test_size=.3,
@@ -58,7 +60,6 @@ class FbetaMetric(Metric):
 
   def update_state(self, y_true, y_pred, sample_weight=None):
     y_pred_binary = cast(greater_equal(y_pred, self.threshold),float32)
-    #self.tp.assign_add(reduce_sum(cast(y_true,float32) * y_pred_binary))
     y_true_float=cast(y_true,float32)
     self.tp.assign_add(reduce_sum(y_true_float * y_pred_binary))
     self.fp.assign_add(reduce_sum((1 - y_true_float) * y_pred_binary))
@@ -164,5 +165,32 @@ class MatthewsCorrelationCoefficient(Metric):
         self.true_negatives.assign(0)
         self.false_positives.assign(0)
         self.false_negatives.assign(0)
+
+def mk_F_beta(beta=1):
+  def f_beta(y_pred,y_true):
+    y_true=cast(y_true,float32)
+    y_pred=cast(y_pred,float32)
+    true_positives=reduce_sum(y_true*y_pred)
+    true_negatives=reduce_sum((1-y_true)*(1-y_pred))
+    false_positives=reduce_sum((1-y_true)*y_pred)
+    #false_negatives=reduce_sum(y_true*(1-y_pred))
+    false_negatives=cast(shape(y_true)[0],float32)-\
+                    (true_positives+true_negatives+false_positives)
+    tfprint(false_negatives)
+    precision = true_positives / (true_positives + false_positives + epsilon())
+    recall = true_positives / (true_positives+false_negatives + epsilon())
+    loss=(1 + beta ** 2) * (precision * recall)/\
+         ((beta ** 2 * precision) + recall + epsilon())
+    return 1-loss
+
+  return f_beta
+
+def mcc(y_pred,y_true):
+  return 0
+
+def rl(): #Helper function for reloading as this library is developed
+  from importlib import reload
+  from consawml.MyDrive import consawml
+  reload(consawml)
 
 
