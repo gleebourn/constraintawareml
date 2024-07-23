@@ -1,3 +1,4 @@
+from typing_extensions import ParamSpecKwargs
 from pandas import read_pickle
 
 from sklearn.model_selection import train_test_split
@@ -9,10 +10,13 @@ from keras import Input,Sequential
 from keras.metrics import Metric
 from keras.backend import epsilon
 
-from tensorflow import reduce_sum,cast,float32,\
-                       logical_and,logical_not,sqrt,shape
+from tensorflow import reduce_sum,cast,float32,int8,GradientTape,\
+                       cast,logical_and,logical_not,sqrt,shape
 from tensorflow import bool as tfbool,print as tfprint
 from tensorflow.math import greater_equal
+from tensorflow.random import set_seed
+#rom tensorflow.debugging import disable_traceback_filtering
+#disable_traceback_filtering()
 
 
 def preproc_bin_class(df,seed,label_col='label',label_class='Malicious',
@@ -36,6 +40,9 @@ def preproc_bin_class(df,seed,label_col='label',label_class='Malicious',
     y_train: Labels for training
     y_test: Labels for testing
   '''
+
+  set_seed(seed)
+
   if isinstance(df,str):
     df = read_pickle(df)
 
@@ -60,6 +67,7 @@ class FbetaMetric(Metric):
 
   def update_state(self, y_true, y_pred, sample_weight=None):
     y_pred_binary = cast(greater_equal(y_pred, self.threshold),float32)
+    #self.tp.assign_add(reduce_sum(cast(y_true,float32) * y_pred_binary))
     y_true_float=cast(y_true,float32)
     self.tp.assign_add(reduce_sum(y_true_float * y_pred_binary))
     self.fp.assign_add(reduce_sum((1 - y_true_float) * y_pred_binary))
@@ -73,8 +81,9 @@ class FbetaMetric(Metric):
     return fbeta
 
 
-def mk_two_layer_perceptron(X,loss,l1_size=128,l2_size=32,optimizer='adam',
-                            metrics=['accuracy','binary_accuracy',FbetaMetric()],
+def mk_two_layer_perceptron(X,loss,seed,l1_size=128,l2_size=32,optimizer='adam',
+                            metrics=['accuracy','binary_accuracy',
+                                     FbetaMetric()],
                             activation=LeakyReLU(alpha=0.01)):
   '''
   Generate the two layer perceptron that we train using loss functions of interest
@@ -82,10 +91,13 @@ def mk_two_layer_perceptron(X,loss,l1_size=128,l2_size=32,optimizer='adam',
   Parameters:
     X: A DataFrame of features - used to figure out the input layer size
     loss: The loss function to train the model on
+    seed: Random seed for the stochastic training algorithm to use
 
   Returns:
     m: A model to be trained by fit_model
   '''
+
+  set_seed(seed)
 
   m=Sequential([Input(shape=X.columns.shape),#,activation=activation),
                 BatchNormalization(),Dense(l1_size,activation=activation),
@@ -96,13 +108,6 @@ def mk_two_layer_perceptron(X,loss,l1_size=128,l2_size=32,optimizer='adam',
 
   return m
 
-#The following are kind of redundant as things stand,
-#but may need to add more complexity for testing certain
-#approaches to dealing with unbalanced classification
-def fit_model(m,training_features,training_labels,
-              epochs=200,batch_size=32):
-  m.fit(training_features,training_labels,
-        epochs=epochs,batch_size=batch_size)
 
 def evaluate_model(m,testing_features,testing_labels):
   '''
@@ -167,6 +172,15 @@ class MatthewsCorrelationCoefficient(Metric):
         self.false_negatives.assign(0)
 
 def mk_F_beta(beta=1):
+  '''
+  Provides an f_beta loss function for fixed beta.
+
+  Parameters:
+    beta: The parameter to be fixed
+
+  Returns:
+    f_beta: The loss function
+  '''
   def f_beta(y_pred,y_true):
     y_true=cast(y_true,float32)
     y_pred=cast(y_pred,float32)
@@ -176,7 +190,6 @@ def mk_F_beta(beta=1):
     #false_negatives=reduce_sum(y_true*(1-y_pred))
     false_negatives=cast(shape(y_true)[0],float32)-\
                     (true_positives+true_negatives+false_positives)
-    tfprint(false_negatives)
     precision = true_positives / (true_positives + false_positives + epsilon())
     recall = true_positives / (true_positives+false_negatives + epsilon())
     loss=(1 + beta ** 2) * (precision * recall)/\
@@ -185,12 +198,47 @@ def mk_F_beta(beta=1):
 
   return f_beta
 
+f_beta_1=mk_F_beta(1)
+
+#Doesn't appear to be smooth so unclear to me that it is a valid tf loss?
 def mcc(y_pred,y_true):
   return 0
 
-def rl(): #Helper function for reloading as this library is developed
-  from importlib import reload
-  from consawml.MyDrive import consawml
-  reload(consawml)
+
+
+def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
+                     p=None,epochs=200,batch_size=32,
+                     metrics=['accuracy','binary_accuracy',f_beta_1]):
+  '''
+  Evaluate various approaches to learning unbalanced data
+
+  Parameters:
+    schemes: A list of tuples a,b where a is a loss function, and
+             b:(X_train,y_train)->(X_sel,y_sel) is a resampled version of the
+             training data.  If b is None there is no resampling
+    X_train: Features for training
+    X_test: Features for testing
+    y_train: Labels for training
+    y_test: Labels for testing
+    seed: Random seed for selection and training algorithms to use
+  
+  Returns:
+    results: A list of tuples corresponding to the metrics for each scheme
+  '''
+  results=[]
+  for scheme in schemes:
+    resampler=lambda a,b:(a.copy(),b.copy()) if scheme[1] is None else scheme[1]
+
+    X_sel,y_sel=resampler(X_train,y_train)
+    m=mk_two_layer_perceptron(X_sel,scheme[0],seed,metrics=metrics)
+
+    m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size)
+    results.append(m.evaluate(X_test,y_test,batch_size=X_test.shape[0]))
+
+  return results
+
+
+
+
 
 
