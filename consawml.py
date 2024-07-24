@@ -225,15 +225,20 @@ def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
   Returns:
     results: A list of tuples corresponding to the metrics for each scheme
   '''
+  set_seed(seed)
   results=[]
   for scheme in schemes:
-    resampler=lambda a,b:(a.copy(),b.copy()) if scheme[1] is None else scheme[1]
+    try:
+      resampler=lambda a,b:(a.copy(),b.copy()) if scheme[1] is None else scheme[1]
 
-    X_sel,y_sel=resampler(X_train,y_train)
-    m=mk_two_layer_perceptron(X_sel,scheme[0],seed,metrics=metrics)
+      X_sel,y_sel=resampler(X_train,y_train)
+      m=mk_two_layer_perceptron(X_sel,scheme[0],seed,metrics=metrics)
 
-    m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size)
-    results.append(m.evaluate(X_test,y_test,batch_size=X_test.shape[0]))
+      m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size)
+      r=m.evaluate(X_test,y_test,batch_size=X_test.shape[0])
+    except Exception as e:
+      r=('Error encountered!',e)
+    results.append(r)
 
   return results
 
