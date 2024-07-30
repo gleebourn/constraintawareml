@@ -7,7 +7,7 @@ from seaborn import heatmap
 
 from keras.layers import Dense,LeakyReLU,BatchNormalization
 from keras import Input,Sequential
-from keras.metrics import Metric
+from keras.metrics import Metric,Precision
 from keras.backend import epsilon
 
 from tensorflow import reduce_sum,cast,float32,int8,GradientTape,\
@@ -17,6 +17,8 @@ from tensorflow.math import greater_equal
 from tensorflow.random import set_seed
 #rom tensorflow.debugging import disable_traceback_filtering
 #disable_traceback_filtering()
+
+from numpy.random import default_rng
 
 
 def preproc_bin_class(df,seed,label_col='label',label_class='Malicious',
@@ -195,6 +197,8 @@ def mk_F_beta(beta=1):
     loss=(1 + beta ** 2) * (precision * recall)/\
          ((beta ** 2 * precision) + recall + epsilon())
     return 1-loss
+  
+  f_beta.__qualname__='f_beta_'+str(beta)
 
   return f_beta
 
@@ -208,7 +212,8 @@ def mcc(y_pred,y_true):
 
 def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
                      p=None,epochs=200,batch_size=32,
-                     metrics=['accuracy','binary_accuracy',f_beta_1]):
+                     metrics=['accuracy','binary_accuracy',
+                              Precision(),f_beta_1]):
   '''
   Evaluate various approaches to learning unbalanced data
 
@@ -237,10 +242,39 @@ def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
       m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size)
       r=m.evaluate(X_test,y_test,batch_size=X_test.shape[0])
     except Exception as e:
-      r=('Error encountered!',e)
+      tfprint('Error encountered!',e)
+      r=[-1]*(len(metrics)+1)
     results.append(r)
 
   return results
+
+def undersample_positive(X,y,seed,p=.5):
+  choice=default_rng(seed=seed).choice
+  '''
+  Undersamples the data X,y so that the proportion in the
+  positive class is p.
+  Parameters:
+    X: Features to undersample
+    y: Labels to undersample
+    seed: Seed for the random choice of positive rows
+    p: Proportion of the output data that is positively labelled
+  
+  Returns:
+    results: A list of tuples corresponding to the metrics for each scheme
+  
+  '''
+  n_rows=len(y)
+  n_positive=y.sum()
+  n_negative=n_rows-n_positive
+  new_n_positive=int((p*n_negative)/(1-p))
+  num_to_drop=n_positive-new_n_positive
+  if num_to_drop<0:
+    raise ValueError('Already too few positive rows!')
+  positive_indices=y.index[y]
+  rows_to_drop=choice(positive_indices,num_to_drop,
+                      replace=False)
+
+  return X.drop(rows_to_drop),y.drop(rows_to_drop)
 
 
 
