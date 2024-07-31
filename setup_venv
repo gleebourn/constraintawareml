@@ -1,5 +1,5 @@
-#!/bin/sh
+#!/bin/bash
 python3 -m venv ~/gleebourn
-source ~/gleebourn/bin/activate
+source ~/gleebourn/bin/activate #doesn't put user into env, just reminds me what to do
 pip install -U pip
 pip install keras tensorflow[and-cuda] seaborn scikit-learn pandas imbalanced-learn

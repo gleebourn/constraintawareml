@@ -201,11 +201,13 @@ def mk_F_beta(beta=1):
          ((beta ** 2 * precision) + recall + epsilon())
     return 1-loss
   
-  f_beta.__qualname__='f_beta_'+str(beta)
+  f_beta.__qualname__='f_b_'+str(beta)
 
   return f_beta
 
-f_beta_1=mk_F_beta(1)
+f_b_1=mk_F_beta(1)
+f_b_2=mk_F_beta(2)
+f_b_3=mk_F_beta(3)
 
 #Doesn't appear to be smooth so unclear to me that it is a valid tf loss?
 def mcc(y_pred,y_true):
@@ -234,8 +236,7 @@ def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,
 
 def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
                      p=None,epochs=200,batch_size=32,
-                     metrics=['accuracy','binary_accuracy',
-                              Precision(),f_beta_1]):
+                     metrics=['accuracy','binary_accuracy',f_b_1,f_b_2,f_b_3]):
   '''
   Evaluate various approaches to learning unbalanced data
 
@@ -254,7 +255,7 @@ def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
   '''
   set_seed(seed)
   results=[]
-  p=ThreadPool(len(schemes))
+  p=ThreadPool()#len(schemes))
   #Parallelised evaluation of schemes
   return p.map(lambda s:evaluate_scheme(s,X_train,X_test,y_train,y_test,seed,
                                         metrics,epochs,batch_size),schemes)
