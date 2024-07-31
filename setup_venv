@@ -1,0 +1,5 @@
+#!/bin/sh
+python3 -m venv ~/gleebourn
+source ~/gleebourn/bin/activate
+pip install -U pip
+pip install keras tensorflow[and-cuda] seaborn scikit-learn pandas

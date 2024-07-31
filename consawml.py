@@ -20,6 +20,7 @@ from tensorflow.random import set_seed
 
 from numpy.random import default_rng
 
+from multiprocessing.pool import ThreadPool
 
 def preproc_bin_class(df,seed,label_col='label',label_class='Malicious',
                       numeric_only=True,test_size=.3,
@@ -208,7 +209,20 @@ f_beta_1=mk_F_beta(1)
 def mcc(y_pred,y_true):
   return 0
 
+def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,
+                    seed,metrics,epochs,batch_size):
+  try:
+    resampler=lambda a,b:(a.copy(),b.copy()) if scheme[1] is None else scheme[1]
 
+    X_sel,y_sel=resampler(X_train,y_train)
+    m=mk_two_layer_perceptron(X_sel,scheme[0],seed,metrics=metrics)
+
+    m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size)
+    r=m.evaluate(X_test,y_test,batch_size=X_test.shape[0])
+  except Exception as e:
+    tfprint('Error encountered!',e)
+    r=[-1]*(len(metrics)+1)
+  return r
 
 def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
                      p=None,epochs=200,batch_size=32,
@@ -232,21 +246,9 @@ def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
   '''
   set_seed(seed)
   results=[]
-  for scheme in schemes:
-    try:
-      resampler=lambda a,b:(a.copy(),b.copy()) if scheme[1] is None else scheme[1]
-
-      X_sel,y_sel=resampler(X_train,y_train)
-      m=mk_two_layer_perceptron(X_sel,scheme[0],seed,metrics=metrics)
-
-      m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size)
-      r=m.evaluate(X_test,y_test,batch_size=X_test.shape[0])
-    except Exception as e:
-      tfprint('Error encountered!',e)
-      r=[-1]*(len(metrics)+1)
-    results.append(r)
-
-  return results
+  p=ThreadPool(len(schemes))
+  return p.map(lambda s:evaluate_scheme(s,X_train,X_test,y_train,y_test,seed,
+                                        metrics,epochs,batch_size),schemes)
 
 def undersample_positive(X,y,seed,p=.5):
   choice=default_rng(seed=seed).choice
