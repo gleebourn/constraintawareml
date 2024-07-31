@@ -23,23 +23,26 @@ print('Testing data shape:',X_test.shape)
 
 print()
 print()
-smote_tomek=SMOTETomek().fit_resample
-f_beta_1=mk_F_beta(1)
-f_beta_2=mk_F_beta(2)
-f_beta_3=mk_F_beta(3)
+f_b_half=mk_F_beta(.5)
+f_b_1=mk_F_beta(1)
+f_b_2=mk_F_beta(2)
+f_b_3=mk_F_beta(3)
+f_b_4=mk_F_beta(4)
+metrics=['accuracy','binary_accuracy',f_b_half,f_b_1,f_b_2,f_b_3,f_b_4]
+
 #Test all combos of loss with resamplers
-schemes=[(a,b) for a in [f_beta_1,f_beta_2,f_beta_3,'binary_crossentropy',
+schemes=[(a,b) for a in [f_b_1,f_b_2,f_b_3,'binary_crossentropy',
                          'mean_squared_logarithmic_error','kl_divergence',
                          'mean_squared_error','cosine_similarity']\
                for b in [None,SMOTETomek().fit_resample,RandomOverSampler().fit_resample,
                          SMOTE().fit_resample,ADASYN().fit_resample,RandomUnderSampler().fit_resample,
                          NearMiss().fit_resample,TomekLinks().fit_resample,
                          EditedNearestNeighbours().fit_resample]]
-a=evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,epochs=30)
+a=evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,epochs=30,
+                   metrics=metrics)
 
 print()
 print()
-print('loss function,resampling scheme,loss value,accuracy,binary accuracy,precision,\
-       F_b_1,F_b_2,F_b_3,')
+print('loss function,resampling scheme,loss value,'+(','.join([str(m) for m in metrics])))
 for s,z in zip(schemes,a):
   print(s[0],',',s[1],',','',','.join([str(t) for t in z]))

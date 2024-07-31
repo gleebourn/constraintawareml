@@ -176,7 +176,7 @@ class MatthewsCorrelationCoefficient(Metric):
         self.false_positives.assign(0)
         self.false_negatives.assign(0)
 
-def mk_F_beta(beta=1):
+def mk_F_beta(b=1):
   '''
   Provides an f_beta loss function for fixed beta.
 
@@ -186,7 +186,7 @@ def mk_F_beta(beta=1):
   Returns:
     f_beta: The loss function
   '''
-  def f_beta(y_pred,y_true):
+  def f_b(y_pred,y_true):
     y_true=cast(y_true,float32)
     y_pred=cast(y_pred,float32)
     true_positives=reduce_sum(y_true*y_pred)
@@ -197,13 +197,13 @@ def mk_F_beta(beta=1):
                     (true_positives+true_negatives+false_positives)
     precision = true_positives / (true_positives + false_positives + epsilon())
     recall = true_positives / (true_positives+false_negatives + epsilon())
-    loss=(1 + beta ** 2) * (precision * recall)/\
-         ((beta ** 2 * precision) + recall + epsilon())
+    loss=(1 + b ** 2) * (precision * recall)/\
+         ((b ** 2 * precision) + recall + epsilon())
     return 1-loss
   
-  f_beta.__qualname__='f_b_'+str(beta)
+  f_b.__qualname__='f_b_'+str(b)
 
-  return f_beta
+  return f_b
 
 f_b_1=mk_F_beta(1)
 f_b_2=mk_F_beta(2)
