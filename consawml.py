@@ -1,6 +1,8 @@
 from typing_extensions import ParamSpecKwargs
 from pandas import read_pickle
 
+from sys import exc_info
+
 from sklearn.model_selection import train_test_split
 
 from seaborn import heatmap
@@ -212,7 +214,7 @@ def mcc(y_pred,y_true):
 def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,
                     seed,metrics,epochs,batch_size):
   try:
-    resampler=lambda a,b:(a.copy(),b.copy()) if scheme[1] is None else scheme[1]
+    resampler=(lambda a,b:(a.copy(),b.copy())) if scheme[1] is None else scheme[1]
 
     X_sel,y_sel=resampler(X_train,y_train)
     m=mk_two_layer_perceptron(X_sel,scheme[0],seed,metrics=metrics)
@@ -220,7 +222,13 @@ def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,
     m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size)
     r=m.evaluate(X_test,y_test,batch_size=X_test.shape[0])
   except Exception as e:
+    print()
+    print('===========================================================')
     tfprint('Error encountered!',e)
+    exinf=exc_info()
+    print('Line',exinf[2].tb_lineno)
+    print('===========================================================')
+    print()
     r=[-1]*(len(metrics)+1)
   return r
 
@@ -247,6 +255,7 @@ def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
   set_seed(seed)
   results=[]
   p=ThreadPool(len(schemes))
+  #Parallelised evaluation of schemes
   return p.map(lambda s:evaluate_scheme(s,X_train,X_test,y_train,y_test,seed,
                                         metrics,epochs,batch_size),schemes)
 
@@ -277,9 +286,4 @@ def undersample_positive(X,y,seed,p=.5):
                       replace=False)
 
   return X.drop(rows_to_drop),y.drop(rows_to_drop)
-
-
-
-
-
 

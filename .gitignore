@@ -2,3 +2,4 @@
 .*.swo
 *.dataset
 *__pycache__
+*.csv
