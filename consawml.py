@@ -11,10 +11,11 @@ from keras.layers import Dense,LeakyReLU,BatchNormalization
 from keras import Input,Sequential
 from keras.metrics import Metric,Precision
 from keras.backend import epsilon
+from keras.losses import Loss
 
-from tensorflow import reduce_sum,cast,float32,int8,GradientTape,\
-                       cast,logical_and,logical_not,sqrt,shape
-from tensorflow import bool as tfbool,print as tfprint
+from tensorflow import reduce_sum,cast,float32,int8,GradientTape,maximum,cast,\
+                       logical_and,logical_not,sqrt,shape,multiply,divide
+from tensorflow import bool as tfbool,print as tfprint,abs as tfabs
 from tensorflow.math import greater_equal
 from tensorflow.random import set_seed
 #rom tensorflow.debugging import disable_traceback_filtering
@@ -201,7 +202,8 @@ def mk_F_beta(b=1):
          ((b ** 2 * precision) + recall + epsilon())
     return 1-loss
   
-  f_b.__qualname__='f_b_'+str(b)
+  f_b.__qualname__='f'+str(b)
+  f_b.__name__='f'+str(b)
 
   return f_b
 
@@ -209,9 +211,113 @@ f_b_1=mk_F_beta(1)
 f_b_2=mk_F_beta(2)
 f_b_3=mk_F_beta(3)
 
-#Doesn't appear to be smooth so unclear to me that it is a valid tf loss?
-def mcc(y_pred,y_true):
-  return 0
+class MCCWithPenaltyAndFixedFN_v2(Loss):
+  def __init__(self, fp_penalty_weight=0.68, fixed_fn_rate=0.2, tradeoff_weight=1.0):
+    super(MCCWithPenaltyAndFixedFN_v2, self).__init__()
+    self.fp_penalty_weight = fp_penalty_weight
+    self.fixed_fn_rate = fixed_fn_rate
+    self.tradeoff_weight = tradeoff_weight
+
+  def call(self, y_true, y_pred):
+    targets = cast(y_true, dtype=float32)
+    inputs = cast(y_pred, dtype=float32)
+    tp = reduce_sum(multiply(inputs, targets))
+    tn = reduce_sum(multiply((1 - inputs), (1 - targets)))
+    fp = reduce_sum(multiply(inputs, (1 - targets)))
+    fn = reduce_sum(multiply((1 - inputs), targets))
+    epsilon = 1e-7
+
+    # Calculate the fixed number of false negatives
+    fixed_fn = self.fixed_fn_rate * reduce_sum(targets)
+
+    # Introduce a penalty term for false positives
+    penalty_term = self.tradeoff_weight * self.fp_penalty_weight * fp
+
+    numerator = tp * tn - fp * fn
+    denominator = sqrt((tp + fp + epsilon) * (tp + fn + epsilon) * (tn + fp + epsilon) * (tn + fn + epsilon))
+    mcc = divide(numerator, denominator)
+
+    # Add the penalty term to the MCC
+
+    penalty_term=0
+    mcc_with_penalty = mcc - penalty_term
+
+    # Add a penalty term to keep false negatives at a fixed rate
+    fn_penalty = maximum(0.0, fn - fixed_fn)
+    fn_penalty=0
+    # Adjust the final loss with the false negative penalty
+    final_loss = -mcc_with_penalty + fn_penalty
+
+
+    return final_loss
+
+class MCCWithPenaltyAndFixedFN_v3(Loss):
+  def __init__(self, fp_penalty_weight=0.8, fixed_fn_rate=0.2, tradeoff_weight=1.0):
+    super(MCCWithPenaltyAndFixedFN_v3, self).__init__()
+    self.fp_penalty_weight = fp_penalty_weight
+    self.fixed_fn_rate = fixed_fn_rate
+    self.tradeoff_weight = tradeoff_weight
+
+  def call(self, y_true, y_pred):
+    targets =cast(y_true, dtype=float32)
+    inputs =cast(y_pred, dtype=float32)
+
+    tp = reduce_sum(multiply(inputs, targets))
+    tn = reduce_sum(multiply((1 - inputs), (1 - targets)))
+    fp = reduce_sum(multiply(inputs, (1 - targets)))
+    fn = reduce_sum(multiply((1 - inputs), targets))
+    epsilon = 1e-7
+
+
+    fixed_fn = self.fixed_fn_rate * fn
+    fn_penalty = maximum(0.0, fn - fixed_fn)
+
+    # Introduce a penalty term for false positives
+    penalty_term = self.tradeoff_weight * self.fp_penalty_weight * fp
+
+    numerator = tp
+    denominator = sqrt((tp + fp + epsilon) * (tp + fn + epsilon))
+    mcc = divide(numerator, denominator)
+
+    # Scale each penalty term to be between -1 and 1
+    max_abs_penalty = maximum(tfabs(penalty_term),tfabs(fn_penalty))
+    scaled_penalty_term = penalty_term / max_abs_penalty
+    scaled_fn_penalty = fn_penalty / max_abs_penalty
+
+    #return scaled_penalty_term, scaled_fn_penalty
+
+    alpha = 0.6
+
+    # Adjust the final loss with the MCC and penalty terms
+    #final_loss = scaled_penalty_term + scaled_fn_penalty                                 # Woks fine No need for the MCC term
+    final_loss = - alpha*mcc + (1-alpha)*(penalty_term + fn_penalty)                     # Original formuula
+    #final_loss = - alpha*mcc + (1-alpha)*(scaled_penalty_term + scaled_fn_penalty)        # Sclaed formuula
+    #final_loss = -mcc + (scaled_penalty_term + scaled_fn_penalty)                        # Sclaed formuula without weight  No so good-Danger =25% FA=1.2%
+
+    #tf.print("mcc value:", mcc)
+    '''
+    tfprint("tp :", tp)
+    tfprint("fp :", fp)
+
+    tfprint("fn :", fn)
+    tfprint("fixed_fn :", fixed_fn)
+
+    tfprint("fn_penalty :", fn_penalty)
+    tfprint("(1-alpha)*(penalty_term + fn_penalty) value:", (1-alpha)*(penalty_term + fn_penalty))
+
+    print("Shape of the mcc:", mcc.shape)
+    print("Shape of the final_loss:", final_loss.shape)
+
+    # Check if the variable is a tensor
+    if tf.is_tensor(mcc):
+        tf.print("mcc: ", mcc)
+
+    else:
+        print("Tmcc =", mcc)
+    print("mcc=",mcc)
+    '''
+
+    return final_loss
 
 def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,
                     seed,metrics,epochs,batch_size):
@@ -223,6 +329,7 @@ def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,
 
     m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size)
     r=m.evaluate(X_test,y_test,batch_size=X_test.shape[0])
+    n=m.metrics
   except Exception as e:
     print()
     print('===========================================================')
@@ -231,8 +338,9 @@ def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,
     print('Line',exinf[2].tb_lineno)
     print('===========================================================')
     print()
-    r=[-1]*(len(metrics)+1)
-  return r
+    r=[]
+    n=[]
+  return r,n
 
 def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
                      p=None,epochs=200,batch_size=32,

@@ -10,7 +10,8 @@ from imblearn.under_sampling import RandomUnderSampler, NearMiss, TomekLinks,\
 from imblearn.combine import SMOTETomek
 
 from consawml import FbetaMetric,mk_two_layer_perceptron,MatthewsCorrelationCoefficient,\
-                     preproc_bin_class,mk_F_beta, evaluate_schemes,undersample_positive
+                     preproc_bin_class,mk_F_beta, evaluate_schemes,undersample_positive,\
+                     MCCWithPenaltyAndFixedFN_v2,MCCWithPenaltyAndFixedFN_v3
 
 print()
 print()
@@ -23,26 +24,29 @@ print('Testing data shape:',X_test.shape)
 
 print()
 print()
-f_b_half=mk_F_beta(.5)
-f_b_1=mk_F_beta(1)
-f_b_2=mk_F_beta(2)
-f_b_3=mk_F_beta(3)
-f_b_4=mk_F_beta(4)
-metrics=['accuracy','binary_accuracy',f_b_half,f_b_1,f_b_2,f_b_3,f_b_4]
+fh=mk_F_beta(.5)
+f1=mk_F_beta(1)
+f2=mk_F_beta(2)
+f3=mk_F_beta(3)
+f4=mk_F_beta(4)
+#metrics=['accuracy','binary_accuracy']
+metrics=['accuracy','binary_accuracy',fh,f1,f2,f3,f4]
 
 #Test all combos of loss with resamplers
-schemes=[(a,b) for a in [f_b_1,f_b_2,f_b_3,'binary_crossentropy',
-                         'mean_squared_logarithmic_error','kl_divergence',
-                         'mean_squared_error','cosine_similarity']\
+schemes=[(a,b) for a in [f1,f2,f3,'binary_crossentropy','mean_squared_logarithmic_error',
+                         'kl_divergence','mean_squared_error','cosine_similarity',
+                         MCCWithPenaltyAndFixedFN_v2(),MCCWithPenaltyAndFixedFN_v3()]\
                for b in [None,SMOTETomek().fit_resample,RandomOverSampler().fit_resample,
                          SMOTE().fit_resample,ADASYN().fit_resample,RandomUnderSampler().fit_resample,
                          NearMiss().fit_resample,TomekLinks().fit_resample,
                          EditedNearestNeighbours().fit_resample]]
+'''
+schemes=[(a,b) for a in [f1,f2] for b in [None,SMOTETomek().fit_resample]]
+'''
 a=evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,epochs=30,
                    metrics=metrics)
 
 print()
-print()
-print('loss function,resampling scheme,loss value,'+(','.join([str(m) for m in metrics])))
+print('loss function,resampling scheme,',a[0][1][0].name,',',','.join([str(t.name) for t in a[0][1][1].metrics]))
 for s,z in zip(schemes,a):
-  print(s[0],',',s[1],',','',','.join([str(t) for t in z]))
+  print(s[0],',',s[1],',',','.join([str(t) for t in z[0]]))

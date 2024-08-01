@@ -1,5 +1,8 @@
 #!/bin/bash
+mkdir ~/gleebourn
 python3 -m venv ~/gleebourn
-source ~/gleebourn/bin/activate #doesn't put user into env, just reminds me what to do
+grep -qxF 'source ~/.bash_aliases' ~/.bashrc || echo 'source ~/.bash_aliases'>>~/.bashrc
+grep -qxF 'alias setuppy="source ~/gleebourn/bin/activate"' ~/.bash_aliases || echo 'alias setuppy="source ~/gleebourn/bin/activate"'>>~/.bash_aliases
+echo 'Type setuppy to get the venv going!'
 pip install -U pip
 pip install keras tensorflow[and-cuda] seaborn scikit-learn pandas imbalanced-learn
