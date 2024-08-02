@@ -1,6 +1,8 @@
 from typing_extensions import ParamSpecKwargs
 from pandas import read_pickle
 
+from traceback import format_exc
+
 from sys import exc_info
 
 from sklearn.model_selection import train_test_split
@@ -13,7 +15,7 @@ from keras.metrics import Metric,Precision
 from keras.backend import epsilon
 from keras.losses import Loss
 
-from tensorflow import reduce_sum,cast,float32,int8,GradientTape,maximum,cast,\
+from tensorflow import reduce_sum,cast,float64,float32,int8,GradientTape,maximum,cast,\
                        logical_and,logical_not,sqrt,shape,multiply,divide,int64
 from tensorflow import bool as tfbool,print as tfprint,abs as tfabs
 from tensorflow.math import greater_equal
@@ -192,14 +194,20 @@ eps=epsilon()
 
 
 def get_tp_tn_fp_fn(y_pred,y_true,data_type=float32):
-    y_true=cast(y_true,data_type)
-    y_pred=cast(y_pred,data_type)
-    tp=reduce_sum(y_true*y_pred)
-    tn=reduce_sum((1-y_true)*(1-y_pred))
-    fp=reduce_sum((1-y_true)*y_pred)
-    #fn=reduce_sum(y_true*(1-y_pred))
-    #fn=cast(shape(y_true)[0],float32)-(tp+tn+fp)
-    return tp,tn,fp,(cast(shape(y_true)[0],data_type)-(tp+tn+fp))
+  if (data_type!=float32 and data_type!=float64):# and y_pred.dtype!=tfbool:
+    y_pred_c=cast(y_pred,float32)>.5
+    y_true_c=cast(y_true,float32)>.5
+  else:
+    y_pred_c=y_pred
+    y_true_c=y_true
+  y_p=cast(y_pred_c,data_type)
+  y_t=cast(y_true_c,data_type)
+  tp=reduce_sum(y_t*y_p)
+  tn=reduce_sum((1-y_t)*(1-y_p))
+  fp=reduce_sum((1-y_t)*y_p)
+  #fn=reduce_sum(y_true*(1-y_pred))
+  #fn=cast(shape(y_true)[0],float32)-(tp+tn+fp)
+  return tp,tn,fp,(cast(shape(y_true)[0],data_type)-(tp+tn+fp))
 
 def weigher(a,b):
   a=cast(a,float32)
@@ -355,25 +363,25 @@ class MCCWithPenaltyAndFixedFN_v3(Loss):
 
 def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,
                     seed,metrics,epochs,batch_size):
-  try:
-    resampler=(lambda a,b:(a.copy(),b.copy())) if scheme[1] is None else scheme[1]
+  #try:
+  resampler=(lambda a,b:(a.copy(),b.copy())) if scheme[1] is None else scheme[1]
 
-    X_sel,y_sel=resampler(X_train,y_train)
-    m=mk_two_layer_perceptron(X_sel,scheme[0],seed,metrics=metrics)
+  X_sel,y_sel=resampler(X_train,y_train)
+  m=mk_two_layer_perceptron(X_sel,scheme[0],seed,metrics=metrics)
 
-    m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size)
-    r=m.evaluate(X_test,y_test,batch_size=X_test.shape[0])
-    n=m.metrics
-  except Exception as e:
-    print()
-    print('===========================================================')
-    tfprint('Error encountered!',e)
-    exinf=exc_info()
-    print('Line',exinf[2].tb_lineno)
-    print('===========================================================')
-    print()
-    r=[]
-    n=[]
+  m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size)
+  r=m.evaluate(X_test,y_test,batch_size=X_test.shape[0])
+  n=m.metrics
+  #except Exception as e:
+  #  print()
+  #  print('===========================================================')
+  #  tfprint('Error encountered!',e)
+  #  exinf=exc_info()
+  #  print('Line',exinf[2].tb_lineno)
+  #  print('===========================================================')
+  #  print()
+  #  r=[]
+  #  n=[]
   return r,n
 
 def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,

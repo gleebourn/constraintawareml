@@ -33,6 +33,7 @@ f3=mk_F_beta(3)
 f4=mk_F_beta(4)
 #metrics=['accuracy','binary_accuracy']
 metrics=['accuracy','binary_accuracy',precision_metric,recall_metric,
+         #fh,f1,f2,f3,f4]
          binary_precision_metric,binary_recall_metric,fh,f1,f2,f3,f4]
 
 #Test all combos of loss with resamplers
