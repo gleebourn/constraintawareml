@@ -1,5 +1,5 @@
 from typing_extensions import ParamSpecKwargs
-from pandas import read_pickle
+from pandas import read_pickle,DataFrame
 
 from traceback import format_exc
 
@@ -362,16 +362,15 @@ class MCCWithPenaltyAndFixedFN_v3(Loss):
     return final_loss
 
 def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,
-                    seed,metrics,epochs,batch_size):
+                    seed,metrics,epochs,batch_size,verbose=0):
   #try:
   resampler=(lambda a,b:(a.copy(),b.copy())) if scheme[1] is None else scheme[1]
 
   X_sel,y_sel=resampler(X_train,y_train)
   m=mk_two_layer_perceptron(X_sel,scheme[0],seed,metrics=metrics)
 
-  m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size)
-  r=m.evaluate(X_test,y_test,batch_size=X_test.shape[0])
-  n=m.metrics
+  m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size,verbose=verbose)
+  r=list(m.evaluate(X_test,y_test,batch_size=X_test.shape[0]))
   #except Exception as e:
   #  print()
   #  print('===========================================================')
@@ -382,10 +381,10 @@ def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,
   #  print()
   #  r=[]
   #  n=[]
-  return r,n
+  return [str(scheme[0]),str(scheme[1])]+r
 
 def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
-                     p=None,epochs=200,batch_size=32,
+                     p=None,epochs=200,batch_size=32,verbose=0,
                      metrics=['accuracy','binary_accuracy',f_b_1,f_b_2,f_b_3]):
   '''
   Evaluate various approaches to learning unbalanced data
@@ -407,8 +406,12 @@ def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
   results=[]
   p=ThreadPool()#len(schemes))
   #Parallelised evaluation of schemes
-  return p.map(lambda s:evaluate_scheme(s,X_train,X_test,y_train,y_test,seed,
-                                        metrics,epochs,batch_size),schemes)
+  bench_scheme=lambda s:evaluate_scheme(s,X_train,X_test,y_train,y_test,seed,
+                                        metrics,epochs,batch_size,verbose=0)
+  return DataFrame(p.map(bench_scheme,schemes),
+                   columns=['loss function','resampling scheme','loss']+
+                          [str(t) for t in metrics])
+  DataFrame(ret)
 
 def undersample_positive(X,y,seed,p=.5):
   choice=default_rng(seed=seed).choice
