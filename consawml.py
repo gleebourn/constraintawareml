@@ -14,7 +14,7 @@ from keras.backend import epsilon
 from keras.losses import Loss
 
 from tensorflow import reduce_sum,cast,float32,int8,GradientTape,maximum,cast,\
-                       logical_and,logical_not,sqrt,shape,multiply,divide
+                       logical_and,logical_not,sqrt,shape,multiply,divide,int64
 from tensorflow import bool as tfbool,print as tfprint,abs as tfabs
 from tensorflow.math import greater_equal
 from tensorflow.random import set_seed
@@ -187,19 +187,53 @@ def mk_F_beta(b=1):
   Returns:
     f_beta: The loss function
   '''
+
+eps=epsilon()
+
+
+def get_tp_tn_fp_fn(y_pred,y_true,data_type=float32):
+    y_true=cast(y_true,data_type)
+    y_pred=cast(y_pred,data_type)
+    tp=reduce_sum(y_true*y_pred)
+    tn=reduce_sum((1-y_true)*(1-y_pred))
+    fp=reduce_sum((1-y_true)*y_pred)
+    #fn=reduce_sum(y_true*(1-y_pred))
+    #fn=cast(shape(y_true)[0],float32)-(tp+tn+fp)
+    return tp,tn,fp,(cast(shape(y_true)[0],data_type)-(tp+tn+fp))
+
+def weigher(a,b):
+  a=cast(a,float32)
+  b=cast(b,float32)
+  return a/(a+b+eps)
+
+def precision(tp,fp):
+  return weigher(tp,fp)
+
+def recall(tp,fn):
+  return weigher(tp,fn)
+
+def precision_metric(y_pred,y_true):
+  tp,_,fp,__=get_tp_tn_fp_fn(y_pred,y_true)
+  return weigher(tp,fp)
+
+def recall_metric(y_pred,y_true):
+  tp,_,__,fn=get_tp_tn_fp_fn(y_pred,y_true)
+  return weigher(tp,fn)
+
+def binary_precision_metric(y_pred,y_true):
+  tp,_,fp,__=get_tp_tn_fp_fn(y_pred,y_true,data_type=int64)
+  return weigher(tp,fp)
+
+def binary_recall_metric(y_pred,y_true):
+  tp,_,__,fn=get_tp_tn_fp_fn(y_pred,y_true,data_type=int64)
+  return weigher(tp,fn)
+
+def mk_F_beta(b):
   def f_b(y_pred,y_true):
-    y_true=cast(y_true,float32)
-    y_pred=cast(y_pred,float32)
-    true_positives=reduce_sum(y_true*y_pred)
-    true_negatives=reduce_sum((1-y_true)*(1-y_pred))
-    false_positives=reduce_sum((1-y_true)*y_pred)
-    #false_negatives=reduce_sum(y_true*(1-y_pred))
-    false_negatives=cast(shape(y_true)[0],float32)-\
-                    (true_positives+true_negatives+false_positives)
-    precision = true_positives / (true_positives + false_positives + epsilon())
-    recall = true_positives / (true_positives+false_negatives + epsilon())
-    loss=(1 + b ** 2) * (precision * recall)/\
-         ((b ** 2 * precision) + recall + epsilon())
+    tp,tn,fp,fn=get_tp_tn_fp_fn(y_pred,y_true)
+    p = weigher(tp,fp)
+    r = weigher(tp,fn)
+    loss=(1 + b ** 2) * (p * r)/((b ** 2 * p) + r + epsilon())
     return 1-loss
   
   f_b.__qualname__='f'+str(b)
