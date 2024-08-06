@@ -1,17 +1,6 @@
 from sys import argv,stdout
-#from csv import writer
-argc=len(argv)
-if argc!=3 and argc!=2:
-  print('''
-  Usage:',argv[0],'[DATASET FILE LOCATION] (OUTPUT CSV LOCATION)
-
-  Benchmarks training algorithms on a given dataset and generates reports.
-
-  May most of this into another function - but one would still want to be able to
-  pass it custom loss and resampling schemes, for example.
-  ''')
-  exit(1)
-seed=42
+from argparse import ArgumentParser
+from pandas import read_csv
 
 from imblearn.over_sampling import RandomOverSampler, SMOTE, ADASYN
 from imblearn.under_sampling import RandomUnderSampler, NearMiss, TomekLinks,\
@@ -23,12 +12,41 @@ from consawml import FbetaMetric,mk_two_layer_perceptron,MatthewsCorrelationCoef
                      MCCWithPenaltyAndFixedFN_v2,MCCWithPenaltyAndFixedFN_v3, precision_metric,\
                      recall_metric,binary_precision_metric,binary_recall_metric
 
+p=ArgumentParser(description='''Benchmarks training algorithms on a given dataset and generates reports.
+
+  May most of this into another function - but one would still want to be able to
+  pass it custom loss and resampling schemes, for example.
+  ''')
+p.add_argument('-s','--seed',type=int,default=42,help='Random seed for reproducibility')
+p.add_argument('-i',help='Input data filename, if data is to be train-test split automatically')
+p.add_argument('-o',type=str,default=None,help='Output file for results, defaults to stdout')
+p.add_argument('-e','--epochs',type=int,default=6,help='Number of epochs for the fitting algorithm')
+p.add_argument('-train',help='Input training data filename')
+p.add_argument('-test',help='Input testing data filename')
+args=p.parse_args()
+seed=args.seed
+out_file=args.o
+input_filename=args.i
+train_filename=args.train
+test_filename=args.test
+epochs=args.epochs
 print()
 print()
 
 #Split into training and testing
 
-X_train,X_test,y_train,y_test = preproc_bin_class(argv[1],seed)
+if input_filename:
+  X_train,X_test,y_train,y_test = preproc_bin_class(input_filename,seed)
+elif train_filename and test_filename:
+  Xy_train,Xy_test=read_csv(train_filename),read_csv(test_filename)
+  P_X=lambda A:A.drop(labels=['id','attack_cat','label'],axis=1).select_dtypes('number')
+  P_y=lambda A:A['label']
+  X_train,X_test,y_train,y_test=P_X(Xy_train),P_X(Xy_test),P_y(Xy_train),P_y(Xy_test)
+else:
+  p.print_help()
+  exit(1)
+  
+
 print('Training data shape:',X_train.shape)
 print('Testing data shape:',X_test.shape)
 
@@ -57,10 +75,10 @@ schemes=[(a,b) for a in losses_to_evaluate for b in resampling_algorithms_to_eva
 '''
 schemes=[(a,b) for a in [f1,f2] for b in [None,SMOTETomek().fit_resample]]
 '''
-a=evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,epochs=30,
+a=evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,epochs=epochs,
                    metrics=metrics)
 
-a.to_csv(None if argc==2 else argv[2])
+a.to_csv(out_file)
   
 
 

@@ -117,17 +117,6 @@ def mk_two_layer_perceptron(X,loss,seed,l1_size=128,l2_size=32,optimizer='adam',
   return m
 
 
-def evaluate_model(m,testing_features,testing_labels):
-  '''
-  Test and score a trained model using the test data
-
-  Parameters:
-    m: The model to be trained
-    testing_features: The features to be queried
-    testing_labels: The correct classifications of the features
-  '''
-  m.evaluate(testing_features,testing_labels)
-
 def evaluate_metric(df,seed,loss='binary_crossentropy',
                     epochs=200,batch_size=32):
   X_train,X_test,y_train,y_test = preproc_bin_class(df,seed)
@@ -361,13 +350,14 @@ class MCCWithPenaltyAndFixedFN_v3(Loss):
 
     return final_loss
 
-def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,
-                    seed,metrics,epochs,batch_size,verbose=0):
+def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,seed,metrics,epochs,
+                    batch_size,l1_size,l2_size,verbose):
   #try:
   resampler=(lambda a,b:(a.copy(),b.copy())) if scheme[1] is None else scheme[1]
 
   X_sel,y_sel=resampler(X_train,y_train)
-  m=mk_two_layer_perceptron(X_sel,scheme[0],seed,metrics=metrics)
+  m=mk_two_layer_perceptron(X_sel,scheme[0],seed,metrics=metrics,
+                            l1_size=l1_size,l2_size=l2_size)
 
   m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size,verbose=verbose)
   r=list(m.evaluate(X_test,y_test,batch_size=X_test.shape[0]))
@@ -381,10 +371,13 @@ def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,
   #  print()
   #  r=[]
   #  n=[]
-  return [str(scheme[0]),str(scheme[1])]+r
+  loss_name=str(scheme[0])
+  resampler_name=str(scheme[1])
+  ret=[loss_name,resampler_name]+r
+  return ret
 
 def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
-                     p=None,epochs=200,batch_size=32,verbose=0,
+                     p=None,epochs=200,batch_size=32,verbose=0,l1_size=64,l2_size=32,
                      metrics=['accuracy','binary_accuracy',f_b_1,f_b_2,f_b_3]):
   '''
   Evaluate various approaches to learning unbalanced data
@@ -406,12 +399,18 @@ def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
   results=[]
   p=ThreadPool()#len(schemes))
   #Parallelised evaluation of schemes
-  bench_scheme=lambda s:evaluate_scheme(s,X_train,X_test,y_train,y_test,seed,
-                                        metrics,epochs,batch_size,verbose=0)
-  return DataFrame(p.map(bench_scheme,schemes),
-                   columns=['loss function','resampling scheme','loss']+
-                          [str(t) for t in metrics])
-  DataFrame(ret)
+  res_col_names=['loss function','resampling scheme','loss']+\
+                [str(t) for t in metrics]
+
+  print(res_col_names)
+  def bench_scheme(s):
+    return evaluate_scheme(s,X_train,X_test,y_train,y_test,seed,metrics,
+                           epochs,batch_size,l1_size,l2_size,verbose)
+
+  results=p.map(bench_scheme,schemes)
+  print(results)
+  return DataFrame(results,columns=res_col_names)
+
 
 def undersample_positive(X,y,seed,p=.5):
   choice=default_rng(seed=seed).choice
