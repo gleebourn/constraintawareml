@@ -26,10 +26,11 @@ args=p.parse_args()
 
 if args.print_algs:
   print()
+  print('====================================')
   print('=======Resampling algorithms:=======')
   for k,v in available_resampling_algorithms.items():
     print(k,':',v)
-  print('Losses:')
+  print('=============Losses:================')
   for k,v in available_losses.items():
     print(k,':',v)
   print('====================================')
