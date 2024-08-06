@@ -1,9 +1,7 @@
 from typing_extensions import ParamSpecKwargs
 from pandas import read_pickle,DataFrame
 
-from traceback import format_exc
-
-from sys import exc_info
+from sys import stderr
 
 from sklearn.model_selection import train_test_split
 
@@ -20,12 +18,15 @@ from tensorflow import reduce_sum,cast,float64,float32,int8,GradientTape,maximum
 from tensorflow import bool as tfbool,print as tfprint,abs as tfabs
 from tensorflow.math import greater_equal
 from tensorflow.random import set_seed
-#rom tensorflow.debugging import disable_traceback_filtering
-#disable_traceback_filtering()
 
 from numpy.random import default_rng
 
 from multiprocessing.pool import ThreadPool
+
+from imblearn.over_sampling import RandomOverSampler, SMOTE, ADASYN
+from imblearn.under_sampling import RandomUnderSampler, NearMiss, TomekLinks,\
+                                    EditedNearestNeighbours
+from imblearn.combine import SMOTETomek
 
 def preproc_bin_class(df,seed,label_col='label',label_class='Malicious',
                       numeric_only=True,test_size=.3,
@@ -168,16 +169,6 @@ class MatthewsCorrelationCoefficient(Metric):
         self.false_positives.assign(0)
         self.false_negatives.assign(0)
 
-def mk_F_beta(b=1):
-  '''
-  Provides an f_beta loss function for fixed beta.
-
-  Parameters:
-    beta: The parameter to be fixed
-
-  Returns:
-    f_beta: The loss function
-  '''
 
 eps=epsilon()
 
@@ -225,7 +216,16 @@ def binary_recall_metric(y_pred,y_true):
   tp,_,__,fn=get_tp_tn_fp_fn(y_pred,y_true,data_type=int64)
   return weigher(tp,fn)
 
-def mk_F_beta(b):
+def mk_F_beta(b=1):
+  '''
+  Provides an f_beta loss function for fixed beta.
+
+  Parameters:
+    beta: The parameter to be fixed
+
+  Returns:
+    f_beta: The loss function
+  '''
   def f_b(y_pred,y_true):
     tp,tn,fp,fn=get_tp_tn_fp_fn(y_pred,y_true)
     p = weigher(tp,fp)
@@ -320,33 +320,7 @@ class MCCWithPenaltyAndFixedFN_v3(Loss):
     alpha = 0.6
 
     # Adjust the final loss with the MCC and penalty terms
-    #final_loss = scaled_penalty_term + scaled_fn_penalty                                 # Woks fine No need for the MCC term
     final_loss = - alpha*mcc + (1-alpha)*(penalty_term + fn_penalty)                     # Original formuula
-    #final_loss = - alpha*mcc + (1-alpha)*(scaled_penalty_term + scaled_fn_penalty)        # Sclaed formuula
-    #final_loss = -mcc + (scaled_penalty_term + scaled_fn_penalty)                        # Sclaed formuula without weight  No so good-Danger =25% FA=1.2%
-
-    #tf.print("mcc value:", mcc)
-    '''
-    tfprint("tp :", tp)
-    tfprint("fp :", fp)
-
-    tfprint("fn :", fn)
-    tfprint("fixed_fn :", fixed_fn)
-
-    tfprint("fn_penalty :", fn_penalty)
-    tfprint("(1-alpha)*(penalty_term + fn_penalty) value:", (1-alpha)*(penalty_term + fn_penalty))
-
-    print("Shape of the mcc:", mcc.shape)
-    print("Shape of the final_loss:", final_loss.shape)
-
-    # Check if the variable is a tensor
-    if tf.is_tensor(mcc):
-        tf.print("mcc: ", mcc)
-
-    else:
-        print("Tmcc =", mcc)
-    print("mcc=",mcc)
-    '''
 
     return final_loss
 
@@ -361,19 +335,13 @@ def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,seed,metrics,epochs,
 
   m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size,verbose=verbose)
   r=list(m.evaluate(X_test,y_test,batch_size=X_test.shape[0]))
-  #except Exception as e:
-  #  print()
-  #  print('===========================================================')
-  #  tfprint('Error encountered!',e)
-  #  exinf=exc_info()
-  #  print('Line',exinf[2].tb_lineno)
-  #  print('===========================================================')
-  #  print()
-  #  r=[]
-  #  n=[]
   loss_name=str(scheme[0])
   resampler_name=str(scheme[1])
   ret=[loss_name,resampler_name]+r
+
+  if verbose:
+    print('Task done after',epochs,' epochs!','Results:',ret,file=stderr)
+
   return ret
 
 def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
@@ -440,3 +408,21 @@ def undersample_positive(X,y,seed,p=.5):
 
   return X.drop(rows_to_drop),y.drop(rows_to_drop)
 
+
+fh=mk_F_beta(.5)
+f1=mk_F_beta(1)
+f2=mk_F_beta(2)
+f3=mk_F_beta(3)
+f4=mk_F_beta(4)
+available_losses={'fh':fh,'f1':f1,'f2':f2,'f3':f3,'f4':f4,'binary_crossentropy':'binary_crossentropy',
+                  'mean_squared_logarithmic_error':'mean_squared_logarithmic_error',
+                  'kl_divergence':'kl_divergence','mean_squared_error':'mean_squared_error',
+                  'mcc_fixed_p_fn2':MCCWithPenaltyAndFixedFN_v2(),
+                  'mcc_fixed_p_fn3':MCCWithPenaltyAndFixedFN_v3()}
+
+available_resampling_algorithms={'None':None,'SMOTETomek':SMOTETomek().fit_resample,
+                                 'random_oversampler':RandomOverSampler().fit_resample,
+                                 'SMOTE':SMOTE().fit_resample,'ADASYN':ADASYN().fit_resample,
+                                 'random_undersampler':RandomUnderSampler().fit_resample,
+                                 'near_miss':NearMiss().fit_resample,'Tomek_links':TomekLinks().fit_resample,
+                                 'edited_nearest_neighbours':EditedNearestNeighbours().fit_resample}
