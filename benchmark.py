@@ -21,7 +21,9 @@ p.add_argument('-l',nargs='+',default=[],help='Loss functions to train on')
 p.add_argument('-r',nargs='+',default=[],help='Resampling schemes to train on')
 p.add_argument('-p','--print-algs',action='store_true',help='Print available algorithms')
 p.add_argument('-n1',type=int,default=128,help='Layer 1 size')
-p.add_argument('-n2',type=int,default=16,help='Layer 2 size')
+p.add_argument('-n2',type=int,default=128,help='Layer 2 size')
+p.add_argument('-v',type=int,default=0,help='Verbosity')
+p.add_argument('-b',type=int,default=32,help='Batch size')
 args=p.parse_args()
 
 if args.print_algs:
@@ -46,14 +48,15 @@ losses_to_evaluate=args.l
 resampling_algorithms_to_evaluate=args.r
 l1_size=args.n1
 l2_size=args.n2
+verbosity=args.v
+batch_size=args.b
 
 print()
 
-#Split into training and testing
 
-if input_filename:
+if input_filename: #We split the data into training and testing ourselves
   X_train,X_test,y_train,y_test = preproc_bin_class(input_filename,seed)
-elif train_filename and test_filename:
+elif train_filename and test_filename: #Data already split into test and train
   Xy_train,Xy_test=read_csv(train_filename),read_csv(test_filename)
   P_X=lambda A:A.drop(labels=['id','attack_cat','label'],axis=1).select_dtypes('number')
   P_y=lambda A:A['label']
@@ -74,8 +77,8 @@ metrics=['accuracy','binary_accuracy',precision_metric,recall_metric,
 schemes=[(available_losses[a],available_resampling_algorithms[b])\
         for a in losses_to_evaluate for b in resampling_algorithms_to_evaluate]
 
-a=evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,epochs=epochs,
-                   metrics=metrics,l1_size=l1_size,l2_size=l2_size)
+a=evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,epochs=epochs,batch_size=batch_size,
+                   metrics=metrics,l1_size=l1_size,l2_size=l2_size,verbose=verbosity)
 
 if isinstance(out_file,str):
   out_file+='_e_'+str(epochs)+'_l1_'+str(l1_size)+'_l2_'+str(l2_size)+'.csv'
