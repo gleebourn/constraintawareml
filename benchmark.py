@@ -67,6 +67,8 @@ else:
   
 print('Training data shape:',X_train.shape)
 print('Testing data shape:',X_test.shape)
+print('Training data positive proportion:',y_train.sum()/y_train.shape[0])
+print('Testing data positive proportion:',y_test.sum()/y_test.shape[0])
 
 print()
 
