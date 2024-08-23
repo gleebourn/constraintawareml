@@ -2,10 +2,13 @@
 #include <iostream>
 
 int main(){
-  std::tuple<int,int> a;
-  a=std::tuple(4,5);
-  std::cout<<std::get<0>(a)<<"\n";
-  std::cout<<std::get<1>(a)<<"\n";
-  std::cout<<"Hi there!\n";
+  int8_t a=(int8_t)128;
+  int8_t b=-127;
+  std::cout<<(int)a;
+  std::cout<<"\n";
+  std::cout<<(int)b;
+  std::cout<<"\n";
+  std::cout<<(int)(int8_t)(a+b);
+  std::cout<<"\n";
   return 0;
 }
