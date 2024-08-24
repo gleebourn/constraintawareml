@@ -4,6 +4,8 @@
 #include<math.h>
 #include<optional>
 #include<array>
+#include<cstddef>
+#include<functional>
 #include<format>
 
 template <typename P,typename X,typename Y>
@@ -77,6 +79,35 @@ auto operator+(Learner<P,W,X> a,Learner<Q,Y,Z> b){
   return TensoredLearner(a,b);
 }
 
+template<typename F,typename G,int N>
+class Caster:public Learner<std::nullptr_t,std::array<F,N>,std::array<G,N>>{
+  public:
+    Caster(){};
+    std::tuple<std::nullptr_t,std::optional<std::array<F,N>>,std::optional<std::array<G,N>>>
+    process(std::nullptr_t p,std::optional<std::array<F,N>>x,
+            std::optional<std::array<G,N>>y)const{
+      std::cout<<"Here\n";
+      auto cast_back=std::array<F,N>();
+      auto cast_forward=std::array<G,N>();
+      std::cout<<"Here\n";
+      if(y.has_value()){
+        std::cout<<"Here\n";
+        auto yv=y.value();
+        std::transform(yv.begin(),yv.end(),cast_back.begin(),
+                       [](const G g){return (F)(g);});
+        std::cout<<"Here\n";
+      }
+      std::cout<<"Here\n";
+      if(x.has_value()){
+        auto xv=x.value();
+        std::transform(xv.begin(),xv.end(),cast_forward.begin(),
+                       [](const F f){return (G)(f);});
+
+      }
+      return std::tuple(nullptr,cast_back,cast_forward);
+    }
+};
+
 template<typename F,typename T,int N>
 class BiasLearner:public Learner<std::tuple<F,std::array<T,N>>,
                                  std::array<T,N>,
@@ -101,20 +132,20 @@ class BiasLearner:public Learner<std::tuple<F,std::array<T,N>>,
         xo[i]=ry[i]-p[i];
         po[i]=(T)f*p[i]+(1-f)*(ry[i]-rx[i]);
       }
-      return std::tuple(std::tuple(f,po),std::optional(xo),std::optional(yo));
+      return std::tuple(std::tuple(f,po),xo,yo);
     }
 };
 
 template<typename F,typename T,int M,int N>
 class ArtificialUnbiasedReluNeuron:
-public Learner<std::tuple<F,std::array<std::array<T,M>,N>>,
+public Learner<std::tuple<F,std::vector<std::array<T,M>>>,
                std::array<T,M>,
                std::array<T,N>>{
   public:
-    std::tuple<std::tuple<F,std::array<std::array<T,M>,N>>,
+    std::tuple<std::tuple<F,std::vector<std::array<T,M>>>,
                std::optional<std::array<T,M>>,
                std::optional<std::array<T,N>>>
-    process(std::tuple<F,std::array<std::array<T,M>,N>> ep,
+    process(std::tuple<F,std::vector<std::array<T,M>>> ep,
             std::optional<std::array<T,M>> x,
             std::optional<std::array<T,N>>y)const{
 
@@ -131,7 +162,7 @@ public Learner<std::tuple<F,std::array<std::array<T,M>,N>>,
           yo[i]=0;
       }
 
-      std::array<std::array<T,M>,N> po;
+      std::vector<std::array<T,M>> po(N);
       auto ry=y.value_or(std::array<T,N>());
       for(int i=0;i<M;i++){
         xo[i]=rx[i];
@@ -142,20 +173,11 @@ public Learner<std::tuple<F,std::array<std::array<T,M>,N>>,
         }
       }
 
-      return std::tuple(std::tuple(energy,po),std::optional(xo),std::optional(yo));
+      return std::tuple(std::tuple(energy,po),xo,yo);
     };
 };
 
-//template<typename A,typenam B,typenam C,typename T,char M1,char M2,char N1,char N2>
-//class FlattenedLearner: Learner{
-//  private:
-//    unflattenedLearner
-//  public:
-//      FlattenedLearner(
-//}
-
 #define HEADER_LENGTH 18
-
 #define N_CHARS 62
 #define SAMPLES_PER_CHAR 55
 #define N_PICS N_CHARS*SAMPLES_PER_CHAR
@@ -165,8 +187,8 @@ public Learner<std::tuple<F,std::array<std::array<T,M>,N>>,
 #define EPOCHS 10
 
 auto load_data(){
-  std::array<std::array<int8_t,PIC_SIZE>,N_PICS> X;
-  std::array<int8_t,N_PICS> y;
+  std::vector<std::array<int8_t,PIC_SIZE>> X(N_PICS);
+  std::vector<int8_t> y(N_PICS);
   for(int i=0;i<N_CHARS;i++){
     for(int j=0;j<SAMPLES_PER_CHAR;j++){
       auto fn=std::format("/home/glee/Downloads/archive/Img_resized/img{:03}-{:03}.tga",i+1,j+1);
@@ -175,12 +197,13 @@ auto load_data(){
 
       is.seekg(HEADER_LENGTH,std::ios_base::beg);
 
-      for(int row=0;row<PIC_HEIGHT;row++){
-        //for(int cn=0;cn<3;cn++)
-        for(int col=0;col<PIC_WIDTH;col++)
-          X[i*SAMPLES_PER_CHAR+j][row*PIC_WIDTH+col]=(int8_t)is.get();
+      //for(int row=0;row<PIC_HEIGHT;row++){
+      //  //for(int cn=0;cn<3;cn++)
+      //  for(int col=0;col<PIC_WIDTH;col++)
+      for(int pixel=0;pixel<PIC_SIZE;pixel++)
+        X[i*SAMPLES_PER_CHAR+j][pixel]=(int8_t)is.get();
 
-      }
+      //}
 
       y[i * SAMPLES_PER_CHAR + j] = i;
     }
@@ -202,62 +225,81 @@ void print_img(std::array<int8_t,M*N>img){
 }
 
 #define L_IN 768
-#define L_1 64
-#define L_2 16
+#define L_1 2
+#define L_2 2
 
+#define HEAT 127
 template<typename T,int N>
-std::array<T,N> one_hot(int t){
+std::array<T,N> hot_encoding(int t){
   auto ret=std::array<T,N>();
-  ret[t]=T(1);
+  ret[t]=T(HEAT);
   return ret;
 }
 
+
 int main(){
 
-  auto f=ArtificialUnbiasedReluNeuron<float,int8_t,L_IN,L_1>();
-  std::tuple<float,std::array<std::array<int8_t,L_IN>,L_1>>
-    pf=std::tuple(.1,std::array<std::array<int8_t,L_IN>,L_1>());
+  auto c=Caster<int8_t,float,L_IN>();
+  auto pc=nullptr;
 
-  auto g=ArtificialUnbiasedReluNeuron<float,int8_t,L_1,L_2>();
-  std::tuple<float,std::array<std::array<int8_t,L_1>,L_2>>
-    pg=std::tuple(.2,std::array<std::array<int8_t,L_1>,L_2>());
+  auto f=ArtificialUnbiasedReluNeuron<float,float,L_IN,L_1>();
+  std::tuple<float,std::vector<std::array<float,L_IN>>>
+    pf=std::tuple((float).1,std::vector<std::array<float,L_IN>>(L_1));
+
+  auto g=ArtificialUnbiasedReluNeuron<float,float,L_1,L_2>();
+  std::tuple<float,std::vector<std::array<float,L_1>>>
+    pg=std::tuple(.2,std::vector<std::array<float,L_1>>(L_2));
   
-  auto h=ArtificialUnbiasedReluNeuron<float,int8_t,L_2,N_CHARS>();
-  std::tuple<float,std::array<std::array<int8_t,L_2>,N_CHARS>>
-    ph=std::tuple(.3,std::array<std::array<int8_t,L_2>,N_CHARS>());
+  auto h=ArtificialUnbiasedReluNeuron<float,float,L_2,N_CHARS>();
+  std::tuple<float,std::vector<std::array<float,L_2>>>
+    ph=std::tuple(.3,std::vector<std::array<float,L_2>>(N_CHARS));
 
-  auto b=BiasLearner<float,int8_t,N_CHARS>();
-  std::tuple<float,std::array<int8_t,N_CHARS>>
-    pb=std::tuple(.05,std::array<int8_t,N_CHARS>());
+  auto b=BiasLearner<float,float,N_CHARS>();
+  std::tuple<float,std::array<float,N_CHARS>>
+    pb=std::tuple(.05,std::array<float,N_CHARS>());
 
-  auto multi_layer=b*h*g*f;
+  auto multi_layer=b*h*g*f*c;
 
-  auto p0=std::tuple(std::tuple(std::tuple(pb,ph),pg),pf);
-  auto x0=std::optional(std::array<int8_t,L_IN>());
-  auto y0=std::optional(std::array<int8_t,N_CHARS>());
+  auto p0=std::tuple(
+          std::tuple(
+            std::tuple(
+              std::tuple(pb,ph),
+              pg),
+            pf),
+          pc);
 
-  std::cout<<"\n";
+
   auto d=load_data();
+
+  std::cout<<"Here\n";
   auto X=std::get<0>(d);
   auto y=std::get<1>(d);
-  std::cout<<"\n\n\n\n";
+  std::cout<<"\n\nRead in ";
+  std::cout<<X.size();
+  std::cout<<" images.\n\n";
   print_img<PIC_WIDTH,PIC_HEIGHT>(X[5]);
-  
   for(int e=0;e<EPOCHS;e++){
     for(int i=0;i<N_PICS;i++){
-      p0=std::get<0>(multi_layer.process(p0,X[i],one_hot<int8_t,N_CHARS>(y[i])));
+
+      std::cout<<"Here\n";
+      auto y_current=hot_encoding<float,N_CHARS>(y[i]);
+      auto X_current=X[i];
+      auto proc=multi_layer.process(p0,X_current,y_current);
+      p0=std::get<0>(proc);
     };
     std::cout<<"Epoch over!\n";
   }
   std::cout<<"\nTesting (of course we have likely overfit if this even works at all)\n";
-  int loss=0;
+  float loss=0;
   for(int i=0;i<N_PICS;i++){
     auto y_pred=std::get<2>
       (multi_layer.process(p0, X[i], std::nullopt)).value();
     for(int j=0;j<N_CHARS;j++){//Check we have the one-hot encoding we want, this is L1 loss I guess
-      loss+=(y_pred[j]!=(y[i]==j));
+      loss+=(y_pred[j]/((float)HEAT)-(y[i]==j))*(y_pred[j]/((float)HEAT)-(y[i]==j));
     }
   }
+  loss=std::sqrt(loss)/N_PICS;
+  std::cout<<"Effective rmse ";
   std::cout<<loss;
   std::cout<<"\n";
   std::cout<<"\n";
