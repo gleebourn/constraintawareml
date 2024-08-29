@@ -24,6 +24,7 @@ p.add_argument('-n1',type=int,default=128,help='Layer 1 size')
 p.add_argument('-n2',type=int,default=128,help='Layer 2 size')
 p.add_argument('-v',type=int,default=0,help='Verbosity')
 p.add_argument('-b',type=int,default=32,help='Batch size')
+p.add_argument('-u',type=float,default=None,help='Undersample the training and test data to balance u')
 args=p.parse_args()
 
 if args.print_algs:
@@ -50,6 +51,7 @@ l1_size=args.n1
 l2_size=args.n2
 verbosity=args.v
 batch_size=args.b
+synthetic_undersample=args.u
 
 print()
 
@@ -70,6 +72,11 @@ print('Testing data shape:',X_test.shape)
 print('Training data positive proportion:',y_train.sum()/y_train.shape[0])
 print('Testing data positive proportion:',y_test.sum()/y_test.shape[0])
 
+if synthetic_undersample:
+  print('Undersampling to make positive proportion=',synthetic_undersample)
+  X_train,y_train=undersample_positive(X_train,y_train,seed,synthetic_undersample)
+  X_test,y_test=undersample_positive(X_test,y_test,seed,synthetic_undersample)
+
 print()
 
 metrics=['accuracy','binary_accuracy',precision_metric,recall_metric,
@@ -77,13 +84,16 @@ metrics=['accuracy','binary_accuracy',precision_metric,recall_metric,
 
 #Test all combos of loss with resamplers
 schemes=[(available_losses[a],available_resampling_algorithms[b])\
-        for a in losses_to_evaluate for b in resampling_algorithms_to_evaluate]
+         for a in losses_to_evaluate for b in resampling_algorithms_to_evaluate]
 
 a=evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,epochs=epochs,batch_size=batch_size,
                    metrics=metrics,l1_size=l1_size,l2_size=l2_size,verbose=verbosity)
 
 if isinstance(out_file,str):
-  out_file+='_e_'+str(epochs)+'_l1_'+str(l1_size)+'_l2_'+str(l2_size)+'.csv'
+  out_file+='_e_'+str(epochs)+'_l1_'+str(l1_size)+'_l2_'+str(l2_size)
+  if synthetic_undersample:
+    out_file+='_u_'+str(synthetic_undersample)
+  out_file+='.csv'
 
 a.to_csv(out_file)
   

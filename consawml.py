@@ -370,17 +370,15 @@ def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
   res_col_names=['loss function','resampling scheme','loss']+\
                 [str(t) for t in metrics]
 
-  print(res_col_names)
   def bench_scheme(s):
     return evaluate_scheme(s,X_train,X_test,y_train,y_test,seed,metrics,
                            epochs,batch_size,l1_size,l2_size,verbose)
 
   results=p.map(bench_scheme,schemes)
-  print(results)
   return DataFrame(results,columns=res_col_names)
 
 
-def undersample_positive(X,y,seed,p=.5):
+def undersample_positive(X,y,seed,p):
   choice=default_rng(seed=seed).choice
   '''
   Undersamples the data X,y so that the proportion in the
