@@ -1,36 +1,150 @@
+from numpy.random import default_rng
+from multiprocessing import Pool
 
-class ComposedLearner:
-  pass
+class Job:
+  def __init__(self,l,x=None,y=None,y_pred=None):
+    self.learners_x=dict()
+    self.learners_y=dict()
+    self.learners_y_pred=dict()
+    self.set_x(l,x)
+    self.set_y(l,y)
+    self.set_y_pred(l,y_pred)
+
+  def set_x(self,l,x):
+    self.learners_x[l]=x
+
+  def set_y(self,l,y):
+    self.learners_y[l]=y
+
+  def set_y_pred(self,l,y_pred):
+    self.learners_y_pred[l]=y_pred
+
+
+  def x(self,l):
+    return self.learners_x[l] if\
+           l in self.learners_x else None
+
+  def y(self,l):
+    return self.learners_y[l] if\
+           l in self.learners_y else None
+
+  def y_pred(self,l):
+    return self.learners_y_pred[l] if\
+           l in self.learners_y_pred else None
+
+
+
+
+  def set_y_pred(self,l,y):
+    self.learners_y_pred[l]=y
 
 class Learner:
-  
   def __init__(self):
-    self.depth=0
-  def __add__(self,other):
-    return ComposedLearner(self,other)
-
-  def step(self,p,x,y):
-    return (p,x,y)
-
-  def infer(self,p,x):
-    return self.step(p,x,0)[2]
-  def request(self,p,x,y):
-    return self.step(p,x,y)[1]
-  def update(self,p,x,y):
-    return self.step(p,x,y)[0]
+    pass
 
 class ComposedLearner(Learner):
-  def __init__(self,args):
-    super().__init__()
-    self.atomic_learners[]
-    for a in args:
-      if isinstance(a,ComposerLearner):
-        self.atomic_learners+=a.atomic_learners
-      else:
-        self.atomic_learners.append(a)
-  def step(self,p,x,y):
-    for i in range(len(p)-1):
-      _,y,z=self.atomic_learners[i+1].step(p[i+1],self.atomic_learners[i](p[i],x,None),z)
-      p,x,_=self.first.step(pq[0],x,y)
-    return (p_out,q_out),x_out,z_out
+  def __init__(self,composees):
 
+    #super().__init__(None,None,None)
+
+    self._gen=default_rng(seed=seed)
+    self.composite_learners=[]
+
+    for a in composees:
+      if isinstance(a,ComposedLearner):
+        self.composite_learners+=a.composite_learners
+      else:
+        self.composite_learners.append(a)
+
+  def infer(self,j):
+    #Set the x of the first composee
+    j.set_x(self.composees[0],j.x(self))
+
+    for a in self.composite_learners:
+      y=a.infer(j)
+
+    j.set_y(self,y)
+    return y
+  
+  def request(self,j,update=True):
+    j.set_focus(self)
+    #Set the y of the last composee
+    j.set_y(self.composees[-1],j.y())
+    for a in reversed(self.composite_learners):
+      y=a.request(y,j,update=update)
+    return y
+  
+  def update(self,j):
+    self.infer(j)
+    self.request(j,update=True)
+
+class FunctionalLearner(Learner):
+  
+  # Inspired by Spivak's work in https://arxiv.org/abs/1711.10455
+  
+  # Depending on the details though, if parallelised updates may not
+  # be performed in a preictable order.  This may be fine if
+  # they are somehow roughly independent of each other - eg, if each
+  # update gives a p_new with p_new  still fairly close to p_pold.
+
+  def __init__(self,inf,req,upd,p,seed=None):
+    self.p=p
+    self._inf=inf
+    self._req=req
+    self._upd=upd
+
+  def __add__(self,other):
+    return ComposedLearner([self,other])
+
+  # When we make an inference, we may or may not store
+  # x, and we may in addition story y_pred if it is used
+  # for the update and request methods.
+  def infer(self,j):
+    j.set_y_pred(self,self._inf(self.p,j.x(self)))
+    return j.y_pred(self)
+
+  def request(self,j,update=True): #x already saved
+    req=self._req(self.p,j.x(self),j.y(self),y_pred=j.y_pred(self))
+    if update:
+      self.update(j)
+    return req
+  
+  def update(self,j):
+    y_pred=j.y_pred(self)
+    if y_pred is None:
+      self.p=self._upd(self.p,j.x(self),j.y(self))
+    else:
+      self.p=self._upd(self.p,j.x(self),j.y(self),y_pred=y_pred)
+
+class TensoredLearner(Learner):
+  def __init__(self,tensees):
+    self.tensored_learners=[]
+
+    for a in tensees:
+      if isinstance(a,TensoredLearner):
+        self.tensored_learners+=a.tensored_learners
+      else:
+        self.tensored_learners.append(a)
+  
+  def infer(self,j):
+    with Pool(len(self.tensored_learners)) as p:
+      def subjob(l):
+        k=Job(l)
+        k.set_x(l,j.x(l))
+        l.infer(k)
+        j.set_y_pred(l,k.y_pred(l))
+
+      p.map(subjob,self.tensored_learners)
+
+  def request(self,j,update=True):
+    with Pool(len(self.tensored_learners)) as p:
+      def subjob(l):
+        k=Job(l)
+        k.set_x(j.x(l))
+        k.set_y(j.y(l))
+        l.request(k,update=update)
+        j.set_y_pred(l,k.y_pred(l))
+
+      p.map(subjob,self.tensored_learners)
+
+    
