@@ -16,7 +16,7 @@ from keras.losses import Loss
 from tensorflow import reduce_sum,cast,float64,float32,int8,GradientTape,maximum,cast,\
                        logical_and,logical_not,sqrt,shape,multiply,divide,int64
 from tensorflow import bool as tfbool,print as tfprint,abs as tfabs
-from tensorflow.math import greater_equal
+from tensorflow.math import greater_equal,log
 from tensorflow.random import set_seed
 
 from numpy.random import default_rng
@@ -238,9 +238,35 @@ def mk_F_beta(b=1):
 
   return f_b
 
+def mk_log_F_beta(b=1):
+  '''
+  Provides log f_beta loss function for fixed beta.
+
+  Parameters:
+    beta: The parameter to be fixed
+
+  Returns:
+    log_f_beta: The loss function
+  '''
+  def f_b(y_pred,y_true):
+    tp,tn,fp,fn=get_tp_tn_fp_fn(y_pred,y_true)
+    p = weigher(tp,fp)
+    r = weigher(tp,fn)
+    loss=log(1 + b ** 2) + log(p)+log(r)-2*log((b ** 2 * p) + r + epsilon())
+    return 1-loss
+  
+  f_b.__qualname__='lf'+str(b)
+  f_b.__name__='lf'+str(b)
+
+  return f_b
+
 f_b_1=mk_F_beta(1)
 f_b_2=mk_F_beta(2)
 f_b_3=mk_F_beta(3)
+l_f_b_h=mk_log_F_beta(.5)
+l_f_b_1=mk_log_F_beta(1)
+l_f_b_2=mk_log_F_beta(2)
+l_f_b_3=mk_log_F_beta(3)
 
 class MCCWithPenaltyAndFixedFN_v2(Loss):
   def __init__(self, fp_penalty_weight=0.68, fixed_fn_rate=0.2, tradeoff_weight=1.0):
@@ -412,7 +438,8 @@ f1=mk_F_beta(1)
 f2=mk_F_beta(2)
 f3=mk_F_beta(3)
 f4=mk_F_beta(4)
-available_losses={'fh':fh,'f1':f1,'f2':f2,'f3':f3,'f4':f4,'binary_crossentropy':'binary_crossentropy',
+available_losses={'lfh':l_f_b_h,'lf1':l_f_b_1,'lf2':l_f_b_2,'lf3':l_f_b_3,'fh':fh,'f1':f1,
+                  'f2':f2,'f3':f3,'f4':f4,'binary_crossentropy':'binary_crossentropy',
                   'mean_squared_logarithmic_error':'mean_squared_logarithmic_error',
                   'kl_divergence':'kl_divergence','mean_squared_error':'mean_squared_error',
                   'mcc_fixed_p_fn2':MCCWithPenaltyAndFixedFN_v2(),
