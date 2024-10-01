@@ -1,4 +1,4 @@
-from numpy import ones, int32,prod,pi,cos,vectorize,array,sort
+from numpy import ones, int32,prod,pi,cos,vectorize,array,sort,cumsum,square
 from numpy.random import default_rng
 
 
@@ -25,6 +25,30 @@ def iterate_small_prods(k,N):
 
       if i==k-1:
         return
+
+def additive_brownian_motion(dim,std,l,seed=None,regularity=1,torus=True,rand_init=True):
+  r=default_rng(seed)
+  ret=r.normal(size=(l,dim),scale=std)
+  for i in range(regularity):
+    ret=cumsum(ret,axis=1)
+    if rand_init:
+      ret+=r.uniform(size=dim)
+  if torus:
+    return ret%1
+  return ret
+
+def mk_near_points_region(points,data,p):
+  dists=[min([sum(square(d-p)) for p in points]) for d in data]
+  thresh=sorted(dists)[int(data.shape[0]*p)]
+  return array([x>thresh for x in dists])
+
+def near_random_path(dim,std,path_len,data_len,p,seed=None,regularity=1,torus=True):
+  r=default_rng(seed=seed)
+
+  B=additive_brownian_motion(dim,std,path_len,seed=seed,regularity=regularity,torus=torus)
+  X=r.uniform(size=(data_len,dim))
+
+  return X,mk_near_points_region(B,X,p)
 
 def mk_brownian_sheet(dim,std,fidelity,seed=None):
   r=default_rng(seed=seed)

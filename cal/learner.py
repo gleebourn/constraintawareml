@@ -2,13 +2,18 @@ from numpy.random import default_rng
 from multiprocessing import Pool
 
 class Job:
-  def __init__(self,l,x=None,y=None,y_pred=None):
+  def __init__(self,l,p=None,x=None,y=None,y_pred=None):
+    self.learners_p=dict()
     self.learners_x=dict()
     self.learners_y=dict()
     self.learners_y_pred=dict()
+    self.set_p(l,p)
     self.set_x(l,x)
     self.set_y(l,y)
     self.set_y_pred(l,y_pred)
+
+  def set_p(self,l,p):
+    self.learners_p[l]=p
 
   def set_x(self,l,x):
     self.learners_x[l]=x
@@ -19,6 +24,10 @@ class Job:
   def set_y_pred(self,l,y_pred):
     self.learners_y_pred[l]=y_pred
 
+
+  def p(self,l):
+    return self.learners_p[l] if\
+           l in self.learners_p else None
 
   def x(self,l):
     return self.learners_x[l] if\
@@ -33,21 +42,19 @@ class Job:
            l in self.learners_y_pred else None
 
 
-
-
   def set_y_pred(self,l,y):
     self.learners_y_pred[l]=y
 
 class Learner:
   def __init__(self):
     pass
+  
+  def init_p(self):
+    return None
 
 class ComposedLearner(Learner):
   def __init__(self,composees):
 
-    #super().__init__(None,None,None)
-
-    self._gen=default_rng(seed=seed)
     self.composite_learners=[]
 
     for a in composees:
@@ -88,7 +95,6 @@ class FunctionalLearner(Learner):
   # update gives a p_new with p_new  still fairly close to p_pold.
 
   def __init__(self,inf,req,upd,p,seed=None):
-    self.p=p
     self._inf=inf
     self._req=req
     self._upd=upd
@@ -100,11 +106,11 @@ class FunctionalLearner(Learner):
   # x, and we may in addition story y_pred if it is used
   # for the update and request methods.
   def infer(self,j):
-    j.set_y_pred(self,self._inf(self.p,j.x(self)))
+    j.set_y_pred(self,self._inf(j.p(self),j.x(self)))
     return j.y_pred(self)
 
   def request(self,j,update=True): #x already saved
-    req=self._req(self.p,j.x(self),j.y(self),y_pred=j.y_pred(self))
+    req=self._req(j.p(self),j.x(self),j.y(self),y_pred=j.y_pred(self))
     if update:
       self.update(j)
     return req
@@ -112,9 +118,9 @@ class FunctionalLearner(Learner):
   def update(self,j):
     y_pred=j.y_pred(self)
     if y_pred is None:
-      self.p=self._upd(self.p,j.x(self),j.y(self))
+      j.set_p(self,self._upd(j.p(self),j.x(self),j.y(self)))
     else:
-      self.p=self._upd(self.p,j.x(self),j.y(self),y_pred=y_pred)
+      j.set_p(self,self._upd(j.p(self),j.x(self),j.y(self),y_pred=y_pred))
 
 class TensoredLearner(Learner):
   def __init__(self,tensees):
@@ -139,12 +145,11 @@ class TensoredLearner(Learner):
   def request(self,j,update=True):
     with Pool(len(self.tensored_learners)) as p:
       def subjob(l):
-        k=Job(l)
-        k.set_x(j.x(l))
-        k.set_y(j.y(l))
+        k=Job(l,j.p(l),j.x(l),j.y(l))
         l.request(k,update=update)
         j.set_y_pred(l,k.y_pred(l))
+        return k.p(l)
 
-      p.map(subjob,self.tensored_learners)
-
-    
+      new_params=p.map(subjob,self.tensored_learners)
+      if update:
+        j.set_p(new_params)

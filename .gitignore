@@ -6,3 +6,7 @@
 *__pycache__
 *.csv
 *.~lock*
+*.text
+*.bbl
+*.blg
+*.aux

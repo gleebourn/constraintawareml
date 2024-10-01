@@ -252,7 +252,7 @@ def mk_log_F_beta(b=1):
     tp,tn,fp,fn=get_tp_tn_fp_fn(y_pred,y_true)
     p = weigher(tp,fp)
     r = weigher(tp,fn)
-    loss=log(1 + b ** 2) + log(p)+log(r)-2*log((b ** 2 * p) + r + epsilon())
+    loss=log(p)+log(r)-2*log((b ** 2 * p) + r + epsilon()) #log(1 + b ** 2) + 
     return 1-loss
   
   f_b.__qualname__='lf'+str(b)

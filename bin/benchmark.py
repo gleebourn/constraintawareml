@@ -1,13 +1,18 @@
-from sys import argv,stdout
 from argparse import ArgumentParser,ArgumentDefaultsHelpFormatter
-from pandas import read_csv
+from pandas import read_csv,DataFrame
 
-from consawml import FbetaMetric,mk_two_layer_perceptron,MatthewsCorrelationCoefficient,\
-                     preproc_bin_class,mk_F_beta, evaluate_schemes,undersample_positive,\
-                     MCCWithPenaltyAndFixedFN_v2,MCCWithPenaltyAndFixedFN_v3, precision_metric,\
-                     recall_metric,binary_precision_metric,binary_recall_metric,available_losses,\
-                     available_resampling_algorithms,precision_metric,recall_metric,\
-                     binary_precision_metric,binary_recall_metric,fh,f1,f2,f3,f4
+from sys import path
+from pathlib import Path
+path.append(str(Path('.').absolute()))
+
+from cal.rsynth import near_random_path
+
+from cal.consawml import FbetaMetric,mk_two_layer_perceptron,MatthewsCorrelationCoefficient,\
+                        preproc_bin_class,mk_F_beta, evaluate_schemes,undersample_positive,\
+                        MCCWithPenaltyAndFixedFN_v2,MCCWithPenaltyAndFixedFN_v3, precision_metric,\
+                        recall_metric,binary_precision_metric,binary_recall_metric,available_losses,\
+                        available_resampling_algorithms,precision_metric,recall_metric,\
+                        binary_precision_metric,binary_recall_metric,fh,f1,f2,f3,f4
 
 p=ArgumentParser(description='Benchmarks training algorithms on a given dataset.',
                  formatter_class=ArgumentDefaultsHelpFormatter)
@@ -19,12 +24,13 @@ p.add_argument('-train',help='Input training data filename')
 p.add_argument('-test',help='Input testing data filename')
 p.add_argument('-l',nargs='+',default=[],help='Loss functions to train on')
 p.add_argument('-r',nargs='+',default=[],help='Resampling schemes to train on')
-p.add_argument('-p','--print-algs',action='store_true',help='Print available algorithms')
+p.add_argument('-a','--print-algs',action='store_true',help='Print available algorithms')
 p.add_argument('-n1',type=int,default=128,help='Layer 1 size')
 p.add_argument('-n2',type=int,default=128,help='Layer 2 size')
 p.add_argument('-v',type=int,default=0,help='Verbosity')
 p.add_argument('-b',type=int,default=32,help='Batch size')
 p.add_argument('-u',type=float,default=None,help='Undersample the training and test data to balance u')
+p.add_argument('-p',type=float,default=False,help='Generate a synthetic dataset with proportion p')
 args=p.parse_args()
 
 if args.print_algs:
@@ -52,6 +58,7 @@ l2_size=args.n2
 verbosity=args.v
 batch_size=args.b
 synthetic_undersample=args.u
+generate_synthetic=args.p
 
 print()
 
@@ -63,6 +70,19 @@ elif train_filename and test_filename: #Data already split into test and train
   P_X=lambda A:A.drop(labels=['id','attack_cat','label'],axis=1).select_dtypes('number')
   P_y=lambda A:A['label']
   X_train,X_test,y_train,y_test=P_X(Xy_train),P_X(Xy_test),P_y(Xy_train),P_y(Xy_test)
+elif generate_synthetic:
+  print('Generating synthetic data...')
+  synth_dim=64
+  synth_std=.1
+  path_len=200
+  data_len=100000
+  X,y=near_random_path(synth_dim,synth_std,path_len,data_len,
+                       generate_synthetic,seed=seed,regularity=2)
+  X_train=DataFrame(X[:int(.7*data_len)])
+  X_test=DataFrame(X[int(.7*data_len):])
+  y_train=y[:int(.7*data_len)]
+  y_test=y[int(.7*data_len):]
+  print('Done generating!')
 else:
   p.print_help()
   exit(1)
@@ -96,4 +116,9 @@ if isinstance(out_file,str):
   out_file+='.csv'
 
 a.to_csv(out_file)
-  
+
+if generate_synthetic:
+  X_train['y']=y_train
+  X_test['y']=y_test
+  X_train.to_csv('train_'+out_file)
+  X_test.to_csv('test_'+out_file)
