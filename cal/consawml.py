@@ -1,32 +1,21 @@
-from typing_extensions import ParamSpecKwargs
 from pandas import read_pickle,DataFrame
 
 from sys import stderr
+from time import thread_time
 
 from sklearn.model_selection import train_test_split
 
-from seaborn import heatmap
-
 from keras.layers import Dense,LeakyReLU,BatchNormalization
 from keras import Input,Sequential
-from keras.metrics import Metric,Precision
 from keras.backend import epsilon
-from keras.losses import Loss
 
-from tensorflow import reduce_sum,cast,float64,float32,int8,GradientTape,maximum,cast,\
-                       logical_and,logical_not,sqrt,shape,multiply,divide,int64
-from tensorflow import bool as tfbool,print as tfprint,abs as tfabs
-from tensorflow.math import greater_equal,log
+from tensorflow import reduce_sum,cast,float64,float32,cast,shape
+from tensorflow.math import log
 from tensorflow.random import set_seed
 
 from numpy.random import default_rng
 
 from multiprocessing.pool import ThreadPool
-
-from imblearn.over_sampling import RandomOverSampler, SMOTE, ADASYN
-from imblearn.under_sampling import RandomUnderSampler, NearMiss, TomekLinks,\
-                                    EditedNearestNeighbours
-from imblearn.combine import SMOTETomek
 
 def preproc_bin_class(df,seed,label_col='label',label_class='Malicious',
                       numeric_only=True,test_size=.3,
@@ -60,39 +49,26 @@ def preproc_bin_class(df,seed,label_col='label',label_class='Malicious',
     X = X.select_dtypes(include='number')
   else:
     raise NotImplementedError('Only dealing with numerical types for now')
-  y = df[label_col]==label_class
+  y = cast(df[label_col]==label_class,float64)
 
   #Returns X_train, X_test, y_train, y_test
   return train_test_split(X,y,test_size=test_size,random_state=seed,stratify=y)
+
+#Algebraic definitions of false/true positives/negatives
+flo1=cast(1,float64)
+def cts_fp(y_t,y_p): return reduce_sum((flo1-cast(y_t,float64))*cast(y_p,float64))
+def cts_fn(y_t,y_p): return reduce_sum((flo1-cast(y_p,float64))*cast(y_t,float64))
+def cts_tp(y_t,y_p): return reduce_sum(cast(y_t,float64)*cast(y_p,float64))
+def cts_tn(y_t,y_p): return reduce_sum((flo1-cast(y_t,float64))*(flo1-cast(y_p,float64)))
+
+#Algebraic definitions of false/true positives/negatives
+def bin_fp(y_t,y_p): return cts_fp(y_t,y_p>.5)
+def bin_fn(y_t,y_p): return cts_fn(y_t,y_p>.5)
+def bin_tp(y_t,y_p): return cts_tp(y_t,y_p>.5)
+def bin_tn(y_t,y_p): return cts_tn(y_t,y_p>.5)
   
-class FbetaMetric(Metric):
-  def __init__(self, beta=1, threshold=0.5, **kwargs):
-    super(FbetaMetric, self).__init__(**kwargs)
-    self.beta = beta
-    self.threshold = threshold
-    self.tp = self.add_weight(name='true_positives', initializer='zeros')
-    self.fp = self.add_weight(name='false_positives', initializer='zeros')
-    self.fn = self.add_weight(name='false_negatives', initializer='zeros')
-
-  def update_state(self, y_true, y_pred, sample_weight=None):
-    y_pred_binary = cast(greater_equal(y_pred, self.threshold),float32)
-    #self.tp.assign_add(reduce_sum(cast(y_true,float32) * y_pred_binary))
-    y_true_float=cast(y_true,float32)
-    self.tp.assign_add(reduce_sum(y_true_float * y_pred_binary))
-    self.fp.assign_add(reduce_sum((1 - y_true_float) * y_pred_binary))
-    self.fn.assign_add(reduce_sum(y_true_float * (1 - y_pred_binary)))
-
-  def result(self):
-    precision = self.tp / (self.tp + self.fp + epsilon())
-    recall = self.tp / (self.tp + self.fn + epsilon())
-    fbeta = (1 + self.beta ** 2) * (precision * recall)/\
-           ((self.beta ** 2 * precision) + recall + epsilon())
-    return fbeta
-
-
 def mk_two_layer_perceptron(X,loss,seed,l1_size=128,l2_size=32,optimizer='adam',
-                            metrics=['accuracy','binary_accuracy',
-                                     FbetaMetric()],
+                            metrics=['accuracy','binary_accuracy'],
                             activation=LeakyReLU(alpha=0.01)):
   '''
   Generate the two layer perceptron that we train using loss functions of interest
@@ -109,10 +85,12 @@ def mk_two_layer_perceptron(X,loss,seed,l1_size=128,l2_size=32,optimizer='adam',
   set_seed(seed)
 
   m=Sequential([Input(shape=X.columns.shape),#,activation=activation),
-                BatchNormalization(),Dense(l1_size,activation=activation),
+                Dense(l1_size,activation=activation),
+                #BatchNormalization(),Dense(l1_size,activation=activation),
                 BatchNormalization(),Dense(l2_size,activation=activation),
                 #Just use sigmoid on last step,nicer
                 Dense(1,activation='sigmoid')])
+                #Dense(1,activation=activation)])
   m.compile(optimizer=optimizer, loss=loss, metrics=metrics)
 
   return m
@@ -126,117 +104,91 @@ def evaluate_metric(df,seed,loss='binary_crossentropy',
         epochs=epochs,batch_size=batch_size)
   m.evaluate(X_test,y_test)
 
+def cts_precision(y_true,y_pred):
+  y_true_cts=cast(y_true,float64) #!?!?!
+  y_pred_cts=cast(y_true,float64)
+  tp=cts_tp(y_true_cts,y_pred_cts)
+  fp=cts_fp(y_true_cts,y_pred_cts)
+  return tp/(tp+fp+epsilon())
 
-class MatthewsCorrelationCoefficient(Metric):
-    def __init__(self, name='matthews_correlation', **kwargs):
-        super(MatthewsCorrelationCoefficient, self).__init__(name=name, **kwargs)
-        self.true_positives = self.add_weight(name='tp', initializer='zeros')
-        self.true_negatives = self.add_weight(name='tn', initializer='zeros')
-        self.false_positives = self.add_weight(name='fp', initializer='zeros')
-        self.false_negatives = self.add_weight(name='fn', initializer='zeros')
+def cts_recall(y_true,y_pred):#,data_type=float64):
+  y_true_cts=cast(y_true,float64) #!?!?!
+  y_pred_cts=cast(y_true,float64)
+  tp=cts_tp(y_true_cts,y_pred_cts)
+  fn=cts_fn(y_true_cts,y_pred_cts)
+  return tp/(tp+fn+epsilon())
 
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        y_true = cast(y_true, tfbool)
-        y_pred = cast(y_pred > 0.5, tfbool)
+def binary_precision(y_true,y_pred):
+  return cts_precision(y_true,cast(y_pred>.5,float64))
 
-        tp = reduce_sum(cast(logical_and(y_true, y_pred), float32))
-        tn = reduce_sum(cast(logical_and(logical_not(y_true),
-                                   logical_not(y_pred)),
-                           float32))
-        fp = reduce_sum(cast(logical_and(logical_not(y_true), y_pred),
-                           float32))
-        fn = reduce_sum(cast(logical_and(y_true, logical_not(y_pred)),
-                           float32))
-
-        self.true_positives.assign_add(tp)
-        self.true_negatives.assign_add(tn)
-        self.false_positives.assign_add(fp)
-        self.false_negatives.assign_add(fn)
-
-    def result(self):
-        mcc = (self.true_positives * self.true_negatives -
-               self.false_positives * self.false_negatives) / (
-              sqrt((self.true_positives + self.false_positives) *
-                      (self.true_positives + self.false_negatives) *
-                      (self.true_negatives + self.false_positives) *
-                      (self.true_negatives + self.false_negatives)) +
-                      epsilon())
-        return mcc
-
-    def reset_states(self):
-        self.true_positives.assign(0)
-        self.true_negatives.assign(0)
-        self.false_positives.assign(0)
-        self.false_negatives.assign(0)
-
-
-eps=epsilon()
-
-
-def get_tp_tn_fp_fn(y_pred,y_true,data_type=float32):
-  if (data_type!=float32 and data_type!=float64):# and y_pred.dtype!=tfbool:
-    y_pred_c=cast(y_pred,float32)>.5
-    y_true_c=cast(y_true,float32)>.5
-  else:
-    y_pred_c=y_pred
-    y_true_c=y_true
-  y_p=cast(y_pred_c,data_type)
-  y_t=cast(y_true_c,data_type)
-  tp=reduce_sum(y_t*y_p)
-  tn=reduce_sum((1-y_t)*(1-y_p))
-  fp=reduce_sum((1-y_t)*y_p)
-  #fn=reduce_sum(y_true*(1-y_pred))
-  #fn=cast(shape(y_true)[0],float32)-(tp+tn+fp)
-  return tp,tn,fp,(cast(shape(y_true)[0],data_type)-(tp+tn+fp))
-
-def weigher(a,b):
-  a=cast(a,float32)
-  b=cast(b,float32)
-  return a/(a+b+eps)
-
-def precision(tp,fp):
-  return weigher(tp,fp)
-
-def recall(tp,fn):
-  return weigher(tp,fn)
-
-def precision_metric(y_pred,y_true):
-  tp,_,fp,__=get_tp_tn_fp_fn(y_pred,y_true)
-  return weigher(tp,fp)
-
-def recall_metric(y_pred,y_true):
-  tp,_,__,fn=get_tp_tn_fp_fn(y_pred,y_true)
-  return weigher(tp,fn)
-
-def binary_precision_metric(y_pred,y_true):
-  tp,_,fp,__=get_tp_tn_fp_fn(y_pred,y_true,data_type=int64)
-  return weigher(tp,fp)
-
-def binary_recall_metric(y_pred,y_true):
-  tp,_,__,fn=get_tp_tn_fp_fn(y_pred,y_true,data_type=int64)
-  return weigher(tp,fn)
+def binary_recall(y_true,y_pred):
+  return cts_recall(y_true,cast(y_pred>.5,float64))
 
 def mk_F_beta(b=1):
   '''
   Provides an f_beta loss function for fixed beta.
 
   Parameters:
-    beta: The parameter to be fixed
+    b: The parameter to be fixed
 
   Returns:
-    f_beta: The loss function
+    f_b: The loss function
   '''
-  def f_b(y_pred,y_true):
-    tp,tn,fp,fn=get_tp_tn_fp_fn(y_pred,y_true)
-    p = weigher(tp,fp)
-    r = weigher(tp,fn)
-    loss=(1 + b ** 2) * (p * r)/((b ** 2 * p) + r + epsilon())
-    return 1-loss
+  b2=b**2
+  def f_b(y_true,y_pred):
+    tp=cts_tp(y_true,y_pred)
+    fp=cts_fp(y_true,y_pred)
+    fn=cts_fn(y_true,y_pred)
+    a=fp+b2*fn
+    b=(1+b2)*tp
+    return a/(a+b)
   
   f_b.__qualname__='f'+str(b)
   f_b.__name__='f'+str(b)
 
   return f_b
+
+def mk_rebalanced_ls(b=1):
+  '''
+  Provides a rebalanced least squares loss
+
+  Parameters:
+    b: The parameter to be fixed
+
+  Returns:
+    fr_b: The loss function
+  '''
+  b2=b**2
+  def fr_b(y_t,y_p):
+    fp=cts_fp(y_t,y_p)
+    fn=cts_fn(y_t,y_p)
+    return fp+b2*fn
+  
+  fr_b.__qualname__='fr'+str(b)
+  fr_b.__name__='fr'+str(b)
+
+  return fr_b
+
+def mk_rebalanced_lq(b=1):
+  '''
+  Provides a rebalanced least quartic loss
+
+  Parameters:
+    b: The parameter to be fixed
+
+  Returns:
+    fq_b: The loss function
+  '''
+  b2=b**2
+  def fq_b(y_t,y_p):
+    fp=cts_fp(y_t,y_p)
+    fn=cts_fn(y_t,y_p)
+    return fp+b2*fn
+  
+  fq_b.__qualname__='fq'+str(b)
+  fq_b.__name__='fq'+str(b)
+
+  return fq_b
 
 def mk_log_F_beta(b=1):
   '''
@@ -248,118 +200,31 @@ def mk_log_F_beta(b=1):
   Returns:
     log_f_beta: The loss function
   '''
-  def f_b(y_pred,y_true):
-    tp,tn,fp,fn=get_tp_tn_fp_fn(y_pred,y_true)
-    p = weigher(tp,fp)
-    r = weigher(tp,fn)
-    loss=log(p)+log(r)-2*log((b ** 2 * p) + r + epsilon()) #log(1 + b ** 2) + 
-    return 1-loss
+  f_beta=mk_F_beta(b)
+  def f_b(y_true,y_pred): return log(f_beta(y_true,y_pred))
   
   f_b.__qualname__='lf'+str(b)
   f_b.__name__='lf'+str(b)
 
   return f_b
 
-f_b_1=mk_F_beta(1)
-f_b_2=mk_F_beta(2)
-f_b_3=mk_F_beta(3)
-l_f_b_h=mk_log_F_beta(.5)
-l_f_b_1=mk_log_F_beta(1)
-l_f_b_2=mk_log_F_beta(2)
-l_f_b_3=mk_log_F_beta(3)
-
-class MCCWithPenaltyAndFixedFN_v2(Loss):
-  def __init__(self, fp_penalty_weight=0.68, fixed_fn_rate=0.2, tradeoff_weight=1.0):
-    super(MCCWithPenaltyAndFixedFN_v2, self).__init__()
-    self.fp_penalty_weight = fp_penalty_weight
-    self.fixed_fn_rate = fixed_fn_rate
-    self.tradeoff_weight = tradeoff_weight
-
-  def call(self, y_true, y_pred):
-    targets = cast(y_true, dtype=float32)
-    inputs = cast(y_pred, dtype=float32)
-    tp = reduce_sum(multiply(inputs, targets))
-    tn = reduce_sum(multiply((1 - inputs), (1 - targets)))
-    fp = reduce_sum(multiply(inputs, (1 - targets)))
-    fn = reduce_sum(multiply((1 - inputs), targets))
-    epsilon = 1e-7
-
-    # Calculate the fixed number of false negatives
-    fixed_fn = self.fixed_fn_rate * reduce_sum(targets)
-
-    # Introduce a penalty term for false positives
-    penalty_term = self.tradeoff_weight * self.fp_penalty_weight * fp
-
-    numerator = tp * tn - fp * fn
-    denominator = sqrt((tp + fp + epsilon) * (tp + fn + epsilon) * (tn + fp + epsilon) * (tn + fn + epsilon))
-    mcc = divide(numerator, denominator)
-
-    # Add the penalty term to the MCC
-
-    penalty_term=0
-    mcc_with_penalty = mcc - penalty_term
-
-    # Add a penalty term to keep false negatives at a fixed rate
-    fn_penalty = maximum(0.0, fn - fixed_fn)
-    fn_penalty=0
-    # Adjust the final loss with the false negative penalty
-    final_loss = -mcc_with_penalty + fn_penalty
-
-
-    return final_loss
-
-class MCCWithPenaltyAndFixedFN_v3(Loss):
-  def __init__(self, fp_penalty_weight=0.8, fixed_fn_rate=0.2, tradeoff_weight=1.0):
-    super(MCCWithPenaltyAndFixedFN_v3, self).__init__()
-    self.fp_penalty_weight = fp_penalty_weight
-    self.fixed_fn_rate = fixed_fn_rate
-    self.tradeoff_weight = tradeoff_weight
-
-  def call(self, y_true, y_pred):
-    targets =cast(y_true, dtype=float32)
-    inputs =cast(y_pred, dtype=float32)
-
-    tp = reduce_sum(multiply(inputs, targets))
-    tn = reduce_sum(multiply((1 - inputs), (1 - targets)))
-    fp = reduce_sum(multiply(inputs, (1 - targets)))
-    fn = reduce_sum(multiply((1 - inputs), targets))
-    epsilon = 1e-7
-
-
-    fixed_fn = self.fixed_fn_rate * fn
-    fn_penalty = maximum(0.0, fn - fixed_fn)
-
-    # Introduce a penalty term for false positives
-    penalty_term = self.tradeoff_weight * self.fp_penalty_weight * fp
-
-    numerator = tp
-    denominator = sqrt((tp + fp + epsilon) * (tp + fn + epsilon))
-    mcc = divide(numerator, denominator)
-
-    # Scale each penalty term to be between -1 and 1
-    max_abs_penalty = maximum(tfabs(penalty_term),tfabs(fn_penalty))
-    scaled_penalty_term = penalty_term / max_abs_penalty
-    scaled_fn_penalty = fn_penalty / max_abs_penalty
-
-    #return scaled_penalty_term, scaled_fn_penalty
-
-    alpha = 0.6
-
-    # Adjust the final loss with the MCC and penalty terms
-    final_loss = - alpha*mcc + (1-alpha)*(penalty_term + fn_penalty)                     # Original formuula
-
-    return final_loss
-
 def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,seed,metrics,epochs,
                     batch_size,l1_size,l2_size,verbose):
   #try:
   resampler=(lambda a,b:(a.copy(),b.copy())) if scheme[1] is None else scheme[1]
 
+  print(resampler)
+  print(X_train.shape,y_train.shape)
   X_sel,y_sel=resampler(X_train,y_train)
+  print(X_sel.shape,y_sel.shape)
   m=mk_two_layer_perceptron(X_sel,scheme[0],seed,metrics=metrics,
                             l1_size=l1_size,l2_size=l2_size)
 
+  t0=thread_time()
+  if len(X_sel)!=len(y_sel):
+    raise Exception('len(X_sel)=='+str(len(X_sel))+' but len(y_sel)=='+str(len(y_sel))+'!')
   m.fit(X_sel,y_sel,epochs=epochs,batch_size=batch_size,verbose=verbose)
+  te=thread_time()-t0
   r=list(m.evaluate(X_test,y_test,batch_size=X_test.shape[0]))
   loss_name=str(scheme[0])
   resampler_name=str(scheme[1])
@@ -368,11 +233,11 @@ def evaluate_scheme(scheme,X_train,X_test,y_train,y_test,seed,metrics,epochs,
   if verbose:
     print('Task done after',epochs,' epochs!','Results:',ret,file=stderr)
 
-  return ret
+  return ret+[te]
 
 def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
                      p=None,epochs=200,batch_size=32,verbose=0,l1_size=64,l2_size=32,
-                     metrics=['accuracy','binary_accuracy',f_b_1,f_b_2,f_b_3]):
+                     metrics=['accuracy','binary_accuracy']):
   '''
   Evaluate various approaches to learning unbalanced data
 
@@ -394,14 +259,23 @@ def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
   p=ThreadPool()#len(schemes))
   #Parallelised evaluation of schemes
   res_col_names=['loss function','resampling scheme','loss']+\
-                [str(t) for t in metrics]
+                [str(t) for t in metrics]+['thread time']
 
   def bench_scheme(s):
     return evaluate_scheme(s,X_train,X_test,y_train,y_test,seed,metrics,
                            epochs,batch_size,l1_size,l2_size,verbose)
 
   results=p.map(bench_scheme,schemes)
-  return DataFrame(results,columns=res_col_names)
+  ret=DataFrame(results,columns=res_col_names)
+  try:
+    ret['cts_precision']=ret[str(cts_tp)]/(ret[str(cts_tp)]+ret[str(cts_fp)])
+    ret['cts_recall']=ret[str(cts_tp)]/(ret[str(cts_tp)]+ret[str(cts_fn)])
+    ret['bin_precision']=ret[str(bin_tp)]/(ret[str(bin_tp)]+ret[str(bin_fp)])
+    ret['bin_recall']=ret[str(bin_tp)]/(ret[str(bin_tp)]+ret[str(bin_fn)])
+    return ret
+  except Exception as e:
+    ret['error']=True
+    return ret
 
 
 def undersample_positive(X,y,seed,p):
@@ -431,23 +305,3 @@ def undersample_positive(X,y,seed,p):
                       replace=False)
 
   return X.drop(rows_to_drop),y.drop(rows_to_drop)
-
-
-fh=mk_F_beta(.5)
-f1=mk_F_beta(1)
-f2=mk_F_beta(2)
-f3=mk_F_beta(3)
-f4=mk_F_beta(4)
-available_losses={'lfh':l_f_b_h,'lf1':l_f_b_1,'lf2':l_f_b_2,'lf3':l_f_b_3,'fh':fh,'f1':f1,
-                  'f2':f2,'f3':f3,'f4':f4,'binary_crossentropy':'binary_crossentropy',
-                  'mean_squared_logarithmic_error':'mean_squared_logarithmic_error',
-                  'kl_divergence':'kl_divergence','mean_squared_error':'mean_squared_error',
-                  'mcc_fixed_p_fn2':MCCWithPenaltyAndFixedFN_v2(),
-                  'mcc_fixed_p_fn3':MCCWithPenaltyAndFixedFN_v3()}
-
-available_resampling_algorithms={'None':None,'SMOTETomek':SMOTETomek().fit_resample,
-                                 'random_oversampler':RandomOverSampler().fit_resample,
-                                 'SMOTE':SMOTE().fit_resample,'ADASYN':ADASYN().fit_resample,
-                                 'random_undersampler':RandomUnderSampler().fit_resample,
-                                 'near_miss':NearMiss().fit_resample,'Tomek_links':TomekLinks().fit_resample,
-                                 'edited_nearest_neighbours':EditedNearestNeighbours().fit_resample}

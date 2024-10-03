@@ -16,5 +16,5 @@ def linear_upd(p,x,y,y_pred=None):
   eta=loss/l2
   return p+eta*y.T.dot(x)
   
-def linear_req(p,x,y,y_pred=None)
+def linear_req(p,x,y,y_pred=None):
  return x+(y-y_pred).dot(p.T)

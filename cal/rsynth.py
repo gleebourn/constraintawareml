@@ -30,9 +30,10 @@ def additive_brownian_motion(dim,std,l,seed=None,regularity=1,torus=True,rand_in
   r=default_rng(seed)
   ret=r.normal(size=(l,dim),scale=std)
   for i in range(regularity):
-    ret=cumsum(ret,axis=1)
-    if rand_init:
-      ret+=r.uniform(size=dim)
+    ret=cumsum(ret,axis=0)
+
+  if rand_init:
+    ret+=r.uniform(size=dim)
   if torus:
     return ret%1
   return ret
