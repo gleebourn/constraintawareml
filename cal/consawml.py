@@ -1,21 +1,23 @@
-from pandas import read_pickle,DataFrame
-
 from sys import stderr
 from time import thread_time
-
-from sklearn.model_selection import train_test_split
-
-from keras.layers import Dense,LeakyReLU,BatchNormalization
-from keras import Input,Sequential
-from keras.backend import epsilon
-
-from tensorflow import reduce_sum,cast,float64,float32,cast,shape
-from tensorflow.math import log
-from tensorflow.random import set_seed
+from multiprocessing.pool import ThreadPool
 
 from numpy.random import default_rng
 
-from multiprocessing.pool import ThreadPool
+from pandas import read_pickle,DataFrame
+
+from sklearn.model_selection import train_test_split
+
+from keras.losses import Loss
+from keras import Input,Sequential
+from keras.layers import Dense,LeakyReLU,BatchNormalization
+from keras.backend import epsilon
+
+from tensorflow import reduce_sum,divide,cast,float64,float32,cast,shape,maximum,sqrt,\
+                       multiply,abs as tfabs
+from tensorflow.math import log
+from tensorflow.random import set_seed
+
 
 def preproc_bin_class(df,seed,label_col='label',label_class='Malicious',
                       numeric_only=True,test_size=.3,
@@ -55,6 +57,7 @@ def preproc_bin_class(df,seed,label_col='label',label_class='Malicious',
   return train_test_split(X,y,test_size=test_size,random_state=seed,stratify=y)
 
 #Algebraic definitions of false/true positives/negatives
+#Less efficient to calculate if we know y_t is going to be one-hot encoded.
 flo1=cast(1,float64)
 def cts_fp(y_t,y_p): return reduce_sum((flo1-cast(y_t,float64))*cast(y_p,float64))
 def cts_fn(y_t,y_p): return reduce_sum((flo1-cast(y_p,float64))*cast(y_t,float64))
@@ -81,7 +84,6 @@ def mk_two_layer_perceptron(X,loss,seed,l1_size=128,l2_size=32,optimizer='adam',
   Returns:
     m: A model to be trained by fit_model
   '''
-
   set_seed(seed)
 
   m=Sequential([Input(shape=X.columns.shape),#,activation=activation),
@@ -94,7 +96,6 @@ def mk_two_layer_perceptron(X,loss,seed,l1_size=128,l2_size=32,optimizer='adam',
   m.compile(optimizer=optimizer, loss=loss, metrics=metrics)
 
   return m
-
 
 def evaluate_metric(df,seed,loss='binary_crossentropy',
                     epochs=200,batch_size=32):
@@ -148,6 +149,51 @@ def mk_F_beta(b=1):
 
   return f_b
 
+#def mk_g_beta(b=1):
+def mk_gp_beta(b=1):
+  '''
+  Provides a simplified F_beta metric
+
+  Parameters:
+    b: The parameter to be fixed
+
+  Returns:
+    fr_b: The loss function
+  '''
+  b2=b**2
+  def fr_b(y_t,y_p):
+    fp=cts_fp(y_t,y_p)
+    fn=cts_fn(y_t,y_p)
+    tp=cts_tp(y_t,y_p)
+    return (fp+b2*fn)/tp
+  
+  fr_b.__qualname__='g'+str(b)
+  fr_b.__name__='g'+str(b)
+
+  return fr_b
+
+def mk_gn_beta(b=1):
+  '''
+  Provides a simplified F_beta metric
+
+  Parameters:
+    b: The parameter to be fixed
+
+  Returns:
+    fr_b: The loss function
+  '''
+  b2=b**2
+  def fr_b(y_t,y_p):
+    fp=cts_fp(y_t,y_p)
+    fn=cts_fn(y_t,y_p)
+    tn=cts_tp(y_t,y_p)
+    return (fp+b2*fn)/tn
+  
+  fr_b.__qualname__='g'+str(b)
+  fr_b.__name__='g'+str(b)
+
+  return fr_b
+
 def mk_rebalanced_ls(b=1):
   '''
   Provides a rebalanced least squares loss
@@ -200,7 +246,7 @@ def mk_log_F_beta(b=1):
   Returns:
     log_f_beta: The loss function
   '''
-  f_beta=mk_F_beta(b)
+  b2=b**2
   def f_b(y_true,y_pred): return log(f_beta(y_true,y_pred))
   
   f_b.__qualname__='lf'+str(b)
@@ -277,7 +323,6 @@ def evaluate_schemes(schemes,X_train,X_test,y_train,y_test,seed,
     ret['error']=True
     return ret
 
-
 def undersample_positive(X,y,seed,p):
   choice=default_rng(seed=seed).choice
   '''
@@ -305,3 +350,110 @@ def undersample_positive(X,y,seed,p):
                       replace=False)
 
   return X.drop(rows_to_drop),y.drop(rows_to_drop)
+
+# the is the f-beta Im using in this study
+#     FbetaSurrogatePenalty
+class FbetaSurrogatePenalty(Loss):
+    def __init__(self, beta, thresh=0.5, fp_penalty=1.0, fn_rate=0.1):
+        super(FbetaSurrogatePenalty, self).__init__()
+        self.beta = beta
+        self.thresh = thresh
+        self.fp_penalty = fp_penalty
+        self.fn_rate = fn_rate
+        self.__name__='FbetaSurrogatePenalty'
+
+    def call(self, y_true, y_pred):
+        # Calculate additional metrics and terms
+        P = reduce_sum(cast(y_true, float32))  # Ensure y_true is cast to float32
+        N = reduce_sum(cast(1 - y_true, float32))  # Ensure 1 - y_true is cast to float32
+        theta = (1 - P) * 1.0 / P
+
+        if y_pred is not None:
+            pred = cast(y_pred > self.thresh, dtype=float32)
+            TP = reduce_sum(pred * cast(y_true, float32) * y_pred) / P
+            TN = reduce_sum((1 - pred) * (1 - cast(y_true, float32)) * (1 - y_pred)) / N
+            FP = reduce_sum(pred * (1 - cast(y_true, float32)) * y_pred) / P
+
+            # Apply penalty for false positives
+            penalty = self.fp_penalty * FP
+
+            # Calculate the desired fixed rate of false negatives
+            fixed_FN = self.fn_rate * P
+
+            # Calculate F-measure with penalty for false positives
+            f_measure = (1 + self.beta**2) * TP / (self.beta**2 + theta + TP - theta * TN + penalty)
+            #f_measure = (1 + self.beta**2) * TP / (self.beta**2 + theta + TP - theta * TN )
+
+            # Add a penalty term to maintain the fixed rate of false negatives
+            fn_penalty = maximum(0.0, P - fixed_FN)
+            f_measure += fn_penalty
+
+        return -f_measure
+
+class FbetaTPFP(Loss):
+    def __init__(self, beta, thresh=0.5):
+        super(FbetaTPFP, self).__init__()
+        self.beta = beta
+        self.thresh = thresh
+        self.__name__='CombinedLoss'
+
+    def call(self, y_true, y_pred):
+        # Calculate additional metrics and terms
+        P = reduce_sum(cast(y_true, float32))  # Ensure y_true is cast to float32
+        N = reduce_sum(cast(1 - y_true, float32))  # Ensure 1 - y_true is cast to float32
+        theta = (1 - P) * 1.0 / P
+
+        if y_pred is not None:
+            pred = cast(y_pred > self.thresh, dtype=float32)
+            TP = reduce_sum(pred * cast(y_true, float32) * y_pred) / P
+            TN = reduce_sum((1 - pred) * (1 - cast(y_true, float32)) * (1 - y_pred)) / N
+
+            f_measure = (1 + self.beta**2) * TP / (self.beta**2 + theta + TP - theta * TN)
+
+        return -f_measure
+
+# MCC correlation coefficient Surrogate Loss
+class MCC_Loss(Loss):
+    def __init__(self):
+        super(MCC_Loss, self).__init__()
+
+    def call(self, y_true, y_pred):
+        targets = cast(y_true, dtype=float32)
+        inputs = cast(y_pred, dtype=float32)
+        tp = reduce_sum(multiply(inputs, targets))
+        tn = reduce_sum(multiply((1 - inputs), (1 - targets)))
+        fp = reduce_sum(multiply(inputs, (1 - targets)))
+        fn = reduce_sum(multiply((1 - inputs), targets))
+        epsilon = 1e-7
+
+        numerator = tp * tn - fp * fn
+        denominator = sqrt((tp + fp + epsilon) * (tp + fn + epsilon) * (tn + fp + epsilon) * (tn + fn + epsilon))
+        fpr = fp / (fp + tn + epsilon)  # False Positive Rate calculation
+
+        penalty_term = tfabs(fpr - 0.2)
+        mcc = divide(numerator, denominator)
+        #mcc = mcc + 1.0 * penalty_term
+
+        return -mcc
+
+
+# Combined MCC and Fbeta Loss
+class CombinedLoss(Loss):
+    def __init__(self,fbeta_weight, mcc_weight=1.0,):
+        super(CombinedLoss, self).__init__()
+        self.mcc_weight = mcc_weight
+        self.fbeta_weight = fbeta_weight
+        self.mcc_loss = MCC_Loss()
+        self.fbeta_loss = FbetaTPFP(beta=2, thresh=0.6)
+        self.__name__='CombinedLoss'
+
+    def call(self, y_true, y_pred):
+        mcc_term = self.mcc_weight * self.mcc_loss(y_true, y_pred)
+        fbeta_term = self.fbeta_weight * self.fbeta_loss(y_true, y_pred)
+        combined_loss = mcc_term + fbeta_term
+        #tf.print("Fbeta term=", fbeta_term)
+        #tf.print("Mcc term=", mcc_term)
+        #tf.print(" combined_loss=", combined_loss)
+        #print("... ")
+        #return combined_loss
+        return fbeta_term

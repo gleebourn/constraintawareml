@@ -1,8 +1,9 @@
 from argparse import ArgumentParser,ArgumentDefaultsHelpFormatter
 
 from cal.consawml import evaluate_schemes,mk_two_layer_perceptron,preproc_bin_class,\
-                         mk_F_beta,mk_rebalanced_lq,mk_rebalanced_ls,mk_log_F_beta,\
-                         cts_precision,cts_recall,\
+                         mk_F_beta,mk_rebalanced_lq,mk_rebalanced_ls,\
+                         mk_log_F_beta,mk_gp_beta,mk_gn_beta,\
+                         FbetaSurrogatePenalty,CombinedLoss,\
                          cts_fp,cts_fn,cts_tp,cts_tn,bin_fp,bin_fn,bin_tp,bin_tn
 
 from cal.mmet import FbetaMetric,MCCWithPenaltyAndFixedFN_v2,MCCWithPenaltyAndFixedFN_v3
@@ -19,7 +20,9 @@ available_losses={'binary_crossentropy':'binary_crossentropy',
                   'mcc_fixed_p_fn3':MCCWithPenaltyAndFixedFN_v3()}
 
 available_param_losses={'mk_F_beta':mk_F_beta,'mk_rebalanced_ls':mk_rebalanced_ls,
-                        'mk_rebalanced_lq':mk_rebalanced_lq,'mk_log_F_beta':mk_log_F_beta}
+                        'mk_gp_beta':mk_gp_beta,'mk_gn_beta':mk_gn_beta,
+                        'mk_rebalanced_lq':mk_rebalanced_lq,'mk_log_F_beta':mk_log_F_beta,
+                        'FbetaSurrogatePenalty':FbetaSurrogatePenalty,'Combinedloss':CombinedLoss}
 
 beta_vals=[.5,1.,2.,3.,4.]
 
