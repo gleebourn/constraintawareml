@@ -1,0 +1,23 @@
+#!/usr/bin/env python
+from sys import path
+from pathlib import Path
+path.append(str(Path('.').absolute()))
+
+from jax.numpy import array
+from cal.jaxn import hidden_layer_perceptron
+
+X=array([[1.,2,4,5,8],[.1,3,2,6,2]])
+y=array([1.,0.])
+
+hlp=hidden_layer_perceptron(5,1)
+
+print('X=',X)
+print('y=',y)
+print('Infer(X)=',hlp.multi_infer(X))
+print('Score(X,y)=',hlp.loss_batch(X,y))
+
+print('"training"...')
+hlp.repeated_desc_step(X,y,.3,noise=0,n_runs=10000,verbose=1)
+
+print('Infer(X)=',hlp.multi_infer(X))
+print('Loss(X,y)=',hlp.loss_batch(X,y))
