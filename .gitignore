@@ -1,4 +1,4 @@
-*.ipynb
+dev_*.ipynb
 *.ipynb_checkpoints
 .*.swp
 .*.swo
