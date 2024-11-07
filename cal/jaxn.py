@@ -128,7 +128,9 @@ class bin_optimiser:
     y_pred=self.infer(X)
     self.update_fp_w(y,y_pred)
 
-    upd=self.dfp if self.fp_weight>0 else self.dfn
+    #upd=self.dfp if self.fp_weight>0 else self.dfn
+    #Only update one of two, if borderline do it randomly
+    upd=self.dfp if self.fp_weight>normal(self.key) else self.dfn
     upd=upd(X,y)
     self.v*=self.beta2
     for key in upd:
@@ -160,7 +162,7 @@ class bin_optimiser:
       print('...done')
       return y_pred
 
-  def run_epoch(self,X_all,y_all,batch_size=32):
+  def run_epoch(self,X_all,y_all,batch_size=32,verbose=True):
     n_rows=len(y_all)
     n_batches=n_rows//batch_size #May miss 0<=t<32 rows
     perm=permutation(self.key,n_rows)
@@ -168,8 +170,12 @@ class bin_optimiser:
     X_all=X_all[perm]
     y_all=y_all[perm]
 
+    report_interval=n_batches//10
     for i in range(n_batches):
       self.adam_step(X_all[i:i+batch_size],y_all[i:i+batch_size])
+      if verbose and not(i%report_interval):
+        print('Epoch',100*(i/n_batches),'% complete... training performance:')
+        self.bench(X_all,y_all)
 
   def bench(self,X,y):
     y_pred=self.infer(X)
@@ -183,15 +189,16 @@ class bin_optimiser:
     print(f'|{tp:.5f}|{fp:.5f}|{fn:.5f}|{fp/fn:10.5f}|{bt2:10.5f}|{cts_fp:.5f}|{cts_fn:.5f}|'+\
           f'{tp/(tp+fp):.5f}|{tp/(tp+fn):.5f}|{self.fp_weight:.5f}|')
 
-  def run_epochs(self,X_train,y_train,X_test=None,y_test=None,batch_size=32,n_epochs=100):
+  def run_epochs(self,X_train,y_train,X_test=None,y_test=None,batch_size=32,n_epochs=100,verbose=2):
     for i in range(1,n_epochs+1):
-      print('Beginning epoch',i,'...')
-      self.run_epoch(X_train,y_train,batch_size=batch_size)
-      print('...done!')
-      print('Training performance:')
-      self.bench(X_train,y_train)
-      if not(X_test is None):
-        print('Testing performance:')
-        self.bench(X_test,y_test)
+      if verbose: print('Beginning epoch',i,'...')
+      self.run_epoch(X_train,y_train,batch_size=batch_size,verbose=verbose==2)
+      if verbose:
+        print('...done!')
+        print('Training performance:')
+        self.bench(X_train,y_train)
+        if not(X_test is None):
+          print('Testing performance:')
+          self.bench(X_test,y_test)
 
 
