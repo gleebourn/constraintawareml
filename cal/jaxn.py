@@ -21,9 +21,52 @@ def hlp_infer(x,params):
   l1=sigmoid(dot(A1,x)+b1)
   return sigmoid(dot(A2,l1)+b2)
 
-hlp_infer_v=vectorize(hlp_infer,excluded=[1],signature='(n)->()')
+@jit
+def tlp_infer(x,params):
+  A0=params['A0']
+  b0=params['b0']
+  A1=params['A1']
+  b1=params['b1']
+  A2=params['A2']
+  b2=params['b2']
+  assert len(x.shape)==1 and x.shape[0]==A0.shape[1],\
+         'input shape of '+ str(x.shape)+' != '+\
+         'required input shape of ('+str(A1.shape[1])+',)' 
+  l1=sigmoid(dot(A0,x)+b0)
+  l2=sigmoid(dot(A1,l1)+b1)
+  return sigmoid(dot(A2,l2)+b2)
 
-def hlp_init_params(input_dim,l_dim):
+@jit
+def nlp_infer(x,params):
+  i=0
+  for k in params.keys():
+    if k==('A',i):
+      l=sigmoid(dot(params[('A',i)],x)+params[('b',i)])
+      i+=1
+  return l
+
+def nlp_init_params(input_dim,layer_dims=[64,32,32,32,32,32,1]):
+  ret=dict(l=len(layer_dims))
+  in_dim=input_dim
+  for i,out_dim in zip(range(len(layer_dims)),layer_dims):
+    ret[('A',i)]=zeros(shape=(out_dim,in_dim))
+    ret[('b',i)]=zeros(shape=out_dim)
+    in_dim=out_dim
+  return ret
+
+nlp_infer_v=vectorize(nlp_infer,excluded=[1],signature='(n)->()')
+hlp_infer_v=vectorize(hlp_infer,excluded=[1],signature='(n)->()')
+tlp_infer_v=vectorize(tlp_infer,excluded=[1],signature='(n)->()')
+
+def tlp_init_params(input_dim,l_dim=128,l2_dim=64):
+  return dict(A0=zeros(shape=(l_dim,input_dim)),
+              b0=zeros(shape=l_dim),
+              A1=zeros(shape=(l2_dim,l_dim)),
+              b1=zeros(shape=l2_dim),
+              A2=zeros(shape=l2_dim),
+              b2=0.)
+
+def hlp_init_params(input_dim,l_dim=64):
   return dict(A1=zeros(shape=(l_dim,input_dim)),
               b1=zeros(shape=l_dim),
               A2=zeros(shape=l_dim),
@@ -35,7 +78,6 @@ def gsum(y):
   except JaxRuntimeError as e:
     return sum(y)
 
-
 #Assume both y and y_pred are floats but y always 1. or 0.
 def b_tp(y,y_pred):
   return gsum((y==1.)&(y_pred>.5))
@@ -46,6 +88,21 @@ def b_fp(y,y_pred):
 def b_fn(y,y_pred):
   return gsum((y==1.)&(y_pred<=.5))
 
+##Want a count that reflects binary count well
+##Continuous function which looks like step function at .5
+#K=8
+#def coerce(x):
+#  xp=x**K
+#  return xp/(xp+(1-x)**K)
+#
+#coerce_v=vectorize(coerce)
+#
+#def c_fp(y,y_pred):
+#  return gsum(coerce_v((1-y)*y_pred))
+#
+#def c_fn(y,y_pred):
+#  return gsum(coerce_v(y*(1-y_pred)))
+
 def c_fp(y,y_pred):
   return gsum((1-y)*y_pred)
 
@@ -54,15 +111,13 @@ def c_fn(y,y_pred):
 
 class bin_optimiser:
 
-  def __init__(self,input_dim,l_dim,lr=.001,seed=0,init_params=hlp_init_params,
-               implementation=hlp_infer_v,beta1=.9,beta2=.999,eps=.00000001,
-               kappa=.99,beta=1,nu=50):
+  def __init__(self,input_dim,init_params=tlp_init_params,lr=.001,seed=0,implementation=tlp_infer_v,
+               beta1=.9,beta2=.999,eps=.00000001,kappa=.99,beta=1,nu=50):
     self.key=key(seed)
     self.lr=lr
     self.input_dim=input_dim
-    self.l_dim=l_dim
     self.init_params=init_params
-    self.params=init_params(input_dim,l_dim)
+    self.params=init_params(input_dim)
     self.randomise_params()
     self.implementation=implementation
 
@@ -89,7 +144,7 @@ class bin_optimiser:
     self.beta2=beta2
     self.gamma1=1-beta1
     self.gamma2=1-beta2
-    self.m=self.init_params(self.input_dim,self.l_dim)
+    self.m=self.init_params(self.input_dim)
     self.v=0
     self.eps=eps
 
@@ -128,9 +183,9 @@ class bin_optimiser:
     y_pred=self.infer(X)
     self.update_fp_w(y,y_pred)
 
-    #upd=self.dfp if self.fp_weight>0 else self.dfn
+    upd=self.dfp if self.fp_weight>0 else self.dfn
     #Only update one of two, if borderline do it randomly
-    upd=self.dfp if self.fp_weight>normal(self.key) else self.dfn
+    #upd=self.dfp if self.fp_weight>normal(self.key) else self.dfn
     upd=upd(X,y)
     self.v*=self.beta2
     for key in upd:
@@ -142,16 +197,16 @@ class bin_optimiser:
     mult=self.lr/(self.eps+sqrt(self.v))
     for key in upd:
       self.params[key]-=mult*self.m[key]
+    #self.params['A2']=self.params['A2'].sort()
 
   def randomise_params(self,amount=1):
-    self.params['A1']*=1-amount
-    self.params['b1']*=1-amount
-    self.params['A2']*=1-amount
-    self.params['b2']*=1-amount
-    self.params['A1']+=amount*normal(self.key,shape=(self.l_dim,self.input_dim))
-    self.params['b1']+=amount*normal(self.key,shape=self.l_dim)
-    self.params['A2']+=amount*normal(self.key,shape=self.l_dim)
-    self.params['b2']+=amount*normal(self.key)
+    for k in self.params:
+      self.params[k]*=1-amount
+      try:
+        shape=self.params[k].shape
+      except AttributeError as e:
+        shape=()
+      self.params[k]+=amount*normal(self.key,shape=shape)
 
   def infer(self,x):
     try:
@@ -200,5 +255,33 @@ class bin_optimiser:
         if not(X_test is None):
           print('Testing performance:')
           self.bench(X_test,y_test)
+
+class learner:
+  def __init__(self):
+    pass
+
+  def fd(self,x):
+    return x
+
+  def bk(self,x,y):
+    return x
+
+class vneuron(learner):
+  def __init__(self,in_dim,out_dim,seed=0,activation=sigmoid):
+    self.key=key(seed)
+    self.activation=activation
+    self.params=dict(A=normal(self.key,shape=(out_dim,in_dim)),
+                     b=normal(self.key,shape=(out_dim,)))
+
+  def fd(self,x):
+    return self.activation(dot(self.params['A'],x)+self.params['b'])
+
+  def bk(self,x,y):
+    return x
+
+
+
+
+
 
 
