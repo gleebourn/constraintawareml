@@ -1,3 +1,6 @@
+import jax
+jax.config.update('jax_traceback_filtering', 'off')
+
 from jax.nn import sigmoid,relu
 from jax.numpy import dot,vectorize,zeros,square,sqrt,array,sum as jsum
 from jax.random import normal,key,randint,permutation
@@ -36,25 +39,32 @@ def tlp_infer(x,params):
   l2=sigmoid(dot(A1,l1)+b1)
   return sigmoid(dot(A2,l2)+b2)
 
-@jit
-def nlp_infer(x,params):
-  i=0
-  for k in params.keys():
-    if k==('A',i):
-      l=sigmoid(dot(params[('A',i)],x)+params[('b',i)])
-      i+=1
-  return l
+#dflt_layer_dims=[128,64,64,32,32,16,16,16]
+#dflt_layer_dims=[32,32,32,16,16,16,8,8,8]
+dflt_layer_dims=[256,256,256,256,128,128,128,128,64,64,64,64]
+#dflt_layer_dims=[256,256,256,256,256,256,256,256,128,128,128,128,64,64,64,64]
+#dflt_layer_dims=[256,256,256,256,128,128,128,128,128,128,128,128,64,64,64,64,64,64,64,64]
+#@jit
+def mk_nlp_infer(layer_dims=dflt_layer_dims):
+  layer_dims.append(1)
+  l=len(layer_dims)
+  def nlp_infer(x,params):
+    for i in range(l):
+      x=sigmoid(dot(params[('A',i)],x)+params[('b',i)])
+    return x[0]
+  return vectorize(nlp_infer,excluded=[1],signature='(n)->()')
 
-def nlp_init_params(input_dim,layer_dims=[64,32,32,32,32,32,1]):
-  ret=dict(l=len(layer_dims))
-  in_dim=input_dim
-  for i,out_dim in zip(range(len(layer_dims)),layer_dims):
-    ret[('A',i)]=zeros(shape=(out_dim,in_dim))
-    ret[('b',i)]=zeros(shape=out_dim)
-    in_dim=out_dim
-  return ret
+def mk_nlp_init_params(layer_dims=dflt_layer_dims):
+  layer_dims.append(1)
+  def nlp_init_params(input_dim):
+    ret=dict()
+    for i,out_dim in zip(range(len(layer_dims)),layer_dims):
+      ret[('A',i)]=zeros(shape=(out_dim,input_dim))
+      ret[('b',i)]=zeros(shape=out_dim)
+      input_dim=out_dim
+    return ret
+  return nlp_init_params
 
-nlp_infer_v=vectorize(nlp_infer,excluded=[1],signature='(n)->()')
 hlp_infer_v=vectorize(hlp_infer,excluded=[1],signature='(n)->()')
 tlp_infer_v=vectorize(tlp_infer,excluded=[1],signature='(n)->()')
 
@@ -103,6 +113,9 @@ def b_fn(y,y_pred):
 #def c_fn(y,y_pred):
 #  return gsum(coerce_v(y*(1-y_pred)))
 
+def c_tp(y,y_pred):
+  return gsum(y*y_pred)
+
 def c_fp(y,y_pred):
   return gsum((1-y)*y_pred)
 
@@ -112,7 +125,7 @@ def c_fn(y,y_pred):
 class bin_optimiser:
 
   def __init__(self,input_dim,init_params=tlp_init_params,lr=.001,seed=0,implementation=tlp_infer_v,
-               beta1=.9,beta2=.999,eps=.00000001,kappa=.99,beta=1,nu=50):
+               beta1=.9,beta2=.999,eps=.00000001,kappa=.9,beta=1,nu=50):
     self.key=key(seed)
     self.lr=lr
     self.input_dim=input_dim
@@ -157,6 +170,9 @@ class bin_optimiser:
   def b_fn(self,y,y_pred):
     return b_fn(y,y_pred)/len(y)
                   
+  def c_tp(self,y,y_pred):
+    return c_tp(y,y_pred)/len(y)
+                  
   def c_fp(self,y,y_pred):
     return c_fp(y,y_pred)/len(y)
                   
@@ -168,7 +184,8 @@ class bin_optimiser:
     #We are aiming for fp/fn=beta**2.
     #u>0 -> too many fp
     #u<0 -> too many fn
-    u=self.c_fp(y,y_pred)/self.beta-self.c_fn(y,y_pred)*self.beta
+    #u=self.c_fp(y,y_pred)/self.beta-self.c_fn(y,y_pred)*self.beta
+    u=self.b_fp(y,y_pred)/self.beta-self.b_fn(y,y_pred)*self.beta
     #u=sigmoid(self.nu*u)
     self.fp_weight=self.kappa*self.fp_weight+u#self.om_kappa*u
     #self.fn_weight=1-self.fp_weight
@@ -183,6 +200,7 @@ class bin_optimiser:
     y_pred=self.infer(X)
     self.update_fp_w(y,y_pred)
 
+    '''
     upd=self.dfp if self.fp_weight>0 else self.dfn
     #Only update one of two, if borderline do it randomly
     #upd=self.dfp if self.fp_weight>normal(self.key) else self.dfn
@@ -193,9 +211,19 @@ class bin_optimiser:
       #upd=self.fp_weight*dfp[key]+self.fn_weight*dfn[key]
       self.m[key]+=self.gamma1*upd[key]
       self.v+=self.gamma2*jsum(square(upd[key]))
+    '''
+    updp,updn=self.dfp(X,y),self.dfn(X,y)
+    self.v*=self.beta2
+    U=sigmoid(self.fp_weight)
+    V=1-U
+    for key in updp:
+      self.m[key]*=self.beta1
+      upd=U*updp[key]/(self.eps+sqrt(jsum(square(updp[key]))))+V*updn[key]/(self.eps+sqrt(jsum(square(updn[key]))))
+      self.m[key]+=self.gamma1*upd
+      self.v+=self.gamma2*jsum(square(upd))
 
     mult=self.lr/(self.eps+sqrt(self.v))
-    for key in upd:
+    for key in updp:
       self.params[key]-=mult*self.m[key]
     #self.params['A2']=self.params['A2'].sort()
 
@@ -228,7 +256,7 @@ class bin_optimiser:
     report_interval=n_batches//10
     for i in range(n_batches):
       self.adam_step(X_all[i:i+batch_size],y_all[i:i+batch_size])
-      if verbose and not(i%report_interval):
+      if verbose and not((i%report_interval)and((i-10)%report_interval)):
         print('Epoch',100*(i/n_batches),'% complete... training performance:')
         self.bench(X_all,y_all)
 
@@ -237,12 +265,17 @@ class bin_optimiser:
     tp=self.b_tp(y,y_pred)
     fp=self.b_fp(y,y_pred)
     fn=self.b_fn(y,y_pred)
+    cts_tp=self.c_tp(y,y_pred)
     cts_fp=self.c_fp(y,y_pred)
     cts_fn=self.c_fn(y,y_pred)
     bt2=self.beta**2
-    print('|bin tp |bin fp |bin fn |bin fp:fn |tgt fp:fn |cts fp |cts fn |bin pr |bin rc |fp wgt |')
-    print(f'|{tp:.5f}|{fp:.5f}|{fn:.5f}|{fp/fn:10.5f}|{bt2:10.5f}|{cts_fp:.5f}|{cts_fn:.5f}|'+\
-          f'{tp/(tp+fp):.5f}|{tp/(tp+fn):.5f}|{self.fp_weight:.5f}|')
+    print(f'[bin,cts] tp: [{tp:.5f},{cts_tp:.5f}]')
+    print(f'[bin,cts] fp: [{fp:.5f},{cts_fp:.5f}]')
+    print(f'[bin,cts] fn: [{fn:.5f},{cts_fn:.5f}]')
+    print(f'[bin,cts,tgt] fp/fn: [{fp/fn:10.5f},{cts_fp/cts_fn:10.5f},{bt2:10.5f}]')
+    print(f'bin pr:{tp/(tp+fp):.5f}')
+    print(f'bin rc:{tp/(tp+fn):.5f}')
+    print(f'fp wgt: {self.fp_weight:.5f}')
 
   def run_epochs(self,X_train,y_train,X_test=None,y_test=None,batch_size=32,n_epochs=100,verbose=2):
     for i in range(1,n_epochs+1):
