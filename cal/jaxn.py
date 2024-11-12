@@ -9,8 +9,8 @@ def rand_batch(X,y,batch_size,key):
   indices=randint(key,batch_size,0,y.shape[0])
   return X[indices],y[indices]
 
-dflt_layer_dims=[128,64]
-def mk_nlp_infer(layer_dims=dflt_layer_dims):
+default_layer_dims=[128,64]
+def mk_nlp_infer(layer_dims=default_layer_dims):
   layer_dims.append(1)
   l=len(layer_dims)
 
@@ -21,7 +21,7 @@ def mk_nlp_infer(layer_dims=dflt_layer_dims):
     return x[0]
   return vectorize(nlp_infer,excluded=[1],signature='(n)->()')
 
-def mk_nlp_init_params(layer_dims=dflt_layer_dims):
+def mk_nlp_init_params(layer_dims=default_layer_dims):
   layer_dims.append(1)
   def nlp_init_params(input_dim):
     ret=dict()
