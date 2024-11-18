@@ -1,0 +1,91 @@
+\documentclass[10pt,a4paper]{article}
+\pdfoutput=1
+\usepackage[margin=1in,footskip=0.25in]{geometry}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{mathtools}
+\usepackage{xparse}
+\usepackage{cite}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{geometry}
+\usepackage{pgfplots}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{positioning}
+%\usepackage[X2,T1]{fontenc}
+
+\pgfplotsset{compat=1.16}
+
+\newtheorem{claim}{Claim}
+\newtheorem{rmk}{Remark}
+\newtheorem{defn}[claim]{Definition}
+\newtheorem{eg}[claim]{Example}
+\newtheorem{lem}[claim]{Lemma}
+\newtheorem{thm}[claim]{Theorem}
+\newtheorem{cor}[claim]{Corollary}
+
+\DeclareMathOperator{\spn}{span}
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\prj}{Proj}
+\DeclareMathOperator{\mat}{Mat}
+\DeclareMathOperator{\codim}{codim}
+
+\DeclareMathOperator{\be}{\text{\fontencoding{X2}\selectfont б}}
+\DeclareMathOperator{\ve}{\text{\fontencoding{X2}\selectfont в}}
+\DeclareMathOperator{\ghe}{\text{\fontencoding{X2}\selectfont г}}
+
+\newcommand{\xrightarrowdbl}[2][]{
+  \xrightarrow[#1]{#2}\mathrel{\mkern-14mu}\rightarrow
+}
+
+\NewDocumentCommand \bern { O{k} }{
+    \rho_{#1}
+}
+
+\NewDocumentCommand \calLp { O{n} O{\omega} }{
+    {\mathcal L'}^{(#1)}_{#2}
+}
+\NewDocumentCommand \calL { O{n} O{\alpha^{-n}\omega} }{
+    \mathcal L^{(#1)}_{#2}
+}
+\NewDocumentCommand \Lab { O{a} O{b} }{
+    \mathcal L_{#1\rightarrow#2}
+}
+
+\newcommand{\ubar}[1]{\text{\b{$#1$}}}
+
+\title{Learning Ising parameters for nonbinary classification}
+\author{George Lee}
+\begin{document}
+\maketitle
+\subsection*{Ising Likelihood maximisation}
+Let $(X,y)\in\mathcal X^N\times\mathcal Y^N$, where $\mathcal X$ is some measure space and $\mathcal Y\subset_\text{finite}\mathbb R$.
+Let $\sigma:\mathcal X\rightarrow\mathcal Y$.
+
+For fixed $J:\mathcal X^2\rightarrow\mathbb R$ let
+
+$$
+H_J(X,y)=\sum_{i,j}J(X_i,X_j)y_iy_j.
+$$
+Given such an $H$ there is an associated probability distribution
+$$
+\widetilde{\mathbb P}_J(X,y)=e^{H_J(X,y)}~\text{and}~\mathbb P_J(X,y)=\frac{\widetilde{\mathbb P}(X,y)}{\sum_{\mathcal Y^N}\int_{\mathcal X^N}{\widetilde{\mathbb P}(X,y)}}=\frac{\widetilde{\mathbb P}(X,y)}{\mathcal Z_J},
+$$
+though the latter expression only makes sense where $\mathcal X$ is finite or with some infinitesimal interpretation.
+
+This may be related to the usual Ising potential on a lattice $\Lambda$ by letting $\mathcal X=\Lambda$, letting $J(X,X')=1_{\{X~\text{is a neighbour of}~X'\}}$ and $\mathcal Y=\{\pm\}$.
+Choosing some enumeration of $\Lambda$, a configuration
+$$
+\sigma:\Lambda\cong\{1,\cdots,|\Lambda|\}\rightarrow\{\pm\}
+$$
+has potential
+$$
+H(\sigma)=H_J\left((1,\cdots,|\Lambda|),\sigma\right).
+$$
+
+\bibliographystyle{plain}
+\bibliography{imbalanced}
+\end{document}

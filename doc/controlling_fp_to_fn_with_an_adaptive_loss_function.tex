@@ -1,0 +1,217 @@
+\documentclass[10pt,a4paper]{article}
+\pdfoutput=1
+\usepackage[margin=1in,footskip=0.25in]{geometry}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{mathtools}
+\usepackage{xparse}
+\usepackage{cite}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{geometry}
+\usepackage{pgfplots}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{positioning}
+%\usepackage[X2,T1]{fontenc}
+
+\pgfplotsset{compat=1.16}
+
+\newtheorem{claim}{Claim}
+\newtheorem{rmk}{Remark}
+\newtheorem{defn}[claim]{Definition}
+\newtheorem{eg}[claim]{Example}
+\newtheorem{lem}[claim]{Lemma}
+\newtheorem{thm}[claim]{Theorem}
+\newtheorem{cor}[claim]{Corollary}
+
+\DeclareMathOperator{\spn}{span}
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\prj}{Proj}
+\DeclareMathOperator{\mat}{Mat}
+\DeclareMathOperator{\codim}{codim}
+
+\DeclareMathOperator{\be}{\text{\fontencoding{X2}\selectfont б}}
+\DeclareMathOperator{\ve}{\text{\fontencoding{X2}\selectfont в}}
+\DeclareMathOperator{\ghe}{\text{\fontencoding{X2}\selectfont г}}
+
+\newcommand{\xrightarrowdbl}[2][]{
+  \xrightarrow[#1]{#2}\mathrel{\mkern-14mu}\rightarrow
+}
+
+\NewDocumentCommand \bern { O{k} }{
+    \rho_{#1}
+}
+
+\NewDocumentCommand \calLp { O{n} O{\omega} }{
+    {\mathcal L'}^{(#1)}_{#2}
+}
+\NewDocumentCommand \calL { O{n} O{\alpha^{-n}\omega} }{
+    \mathcal L^{(#1)}_{#2}
+}
+\NewDocumentCommand \Lab { O{a} O{b} }{
+    \mathcal L_{#1\rightarrow#2}
+}
+
+\newcommand{\ubar}[1]{\text{\b{$#1$}}}
+
+\title{Controlling $\tfrac{FP}{FN}$ with an adaptive loss function}
+\author{George Lee}
+\begin{document}
+\maketitle
+\section{Overview of imbalanced binary classification}
+\subsection{Introducton}
+In this work we study binary classification.
+This is an important problem in its own right, but also a useful ``toy'' problem in learning where associated methods may be useful in very general situations.
+Given an observation in some state space $\mathcal X$, the problem is to decide whether $x$ belongs to one of two populations, which we may denote by $+$ and $-$ or by $1$ and $0$.
+unfortunately 0 isn't negative, but the latter convention is useful when writing mathematical expressions.
+One important situation which we are interested in handling is that of \textbf{imbalanced classification}, in which most of the observations belong to $-$ and a minority to $+$.
+Simplifying further, we investigate the supervised learning of such a model: the data consists of the training set
+$$
+(x,y)\in\mathcal X^m\times\{\pm\}^m
+$$
+and testing set
+$$
+(a,b)\in\mathcal X^n\times\{\pm\}^n.
+$$
+
+The bulk of popular models use neural networks and we largely focus on this approach here.
+One working conjecture is that almost regardless of choice of loss function in such a situation, the gradient updates are likely to fall in a narrow range of possibilities for a fixed batch of training data.
+We identify a surface on which we can expect such an update to lie, and propose an algorithm that selects a direction on this surface that forces a particular ratio of false positive and false negatives.
+\subsection{A reminder of some performance metrics}
+When evaluating the model's performance, each binary prediction and label $(\widetilde\upsilon_i,\upsilon_i)$ is either a true positive $(+,+)$, a false positive $(+,-)$, a false negative $(-,+)$ or a true negative $(-,-)$.
+
+When a batch of these observations are made, denote the counts of these corresponding cases by $TP$, $FP$, $FN$ and $TN$ respectively.
+Standard associated statistics are
+\begin{itemize}
+  \item the $\textbf{sample(/batch) precision}=\frac{TP}{TP+FP}$,
+  \item the $\textbf{sample recall}=\frac{TP}{TP+FN}$ and
+  \item the $\textbf{sample accuracy}=\frac{TP+TN}{TP+FP+TN+FN}$.
+\end{itemize}
+
+These quantities are easily understood by someone working on a wide range of possible problems.
+In the context of spam filtering, when differentiating between ham and spam, we don't necessarily mind if we sometimes classify ham as spam, but we really should try to insist that spam never makes it through.
+
+You could achieve this by blocking everything, so we can't merely focus on preventing false negatives.
+We should try and insist instead on some combination of accuracy and minimising false negatives.
+
+One may also worry about this sort of problem when testing for rare diseases.
+Not running any test at all may be highly accurate and possibly preferable to a test with too many false positives.
+
+If we assume that the data is drawn from fixed distributions, then these sample statistics approximate true rates associated to some model with parameter $\boldsymbol\theta$.
+Write $\mathbb P_{\boldsymbol\theta}$ for the probabilities of events for such a fixed model.
+\begin{itemize}
+\item The $\textbf{precision}=\mathbb P_{\boldsymbol\theta}(+|\text{We predicted }+)$, and
+\item the $\textbf{recall}=\mathbb P_{\boldsymbol\theta}(\text{we predicted }+|+)$.
+\end{itemize}
+
+\subsection{Passing to a continuous-valued classifier}
+For any $\lambda\in[0,1]$ the quantity $(\lambda FP+(1-\lambda)FN$ is analogous to a least squares loss where the cost for a false negative versus a false positive is controlled by $\lambda$.
+However, this function takes discrete values so doesn't have a useful gradient and it is impossible to apply backpropogation directly.
+
+The ubiquitous solution here is to work with a model $f_\theta:\mathcal X\rightarrow(0,1)$ that outputs a number that may be interpreted as a likelihood of an observation being in the $+$ class.
+With this approach, the practical use of such an $f_\theta$ is to fix a threshold $\alpha\in(0,1)$ such that the actual classification is given by $+$ if $f_\theta(x)>\alpha$ and $-$ otherwise.
+Correspondingly, a trained neural network provides a family of different possible models indexed by $\alpha$ which is monotonic in the proportion of data that is classified as $-$.
+As we approach the extreme cases $\alpha\rightarrow0$ and $\alpha\rightarrow1$ the model tends towards interpreting all points as $+$ and $-$ respectively.
+Commonly such models are then evaluated by their performance over a range of these alpha variables, resulting in metrics that give an overview of the performance of the family of generated models, and the guarantee of monotonicity as a threshold is fixed allows for a particular choice of $FP:FN$ that suits the training dataset..
+In the case of imbalanced data the precision-recall curve or PRC is pertinent for imbalanced classification: one traces out the function $(\textbf{Precision}(\alpha),\textbf{Recall}(\alpha))$ and computes the area under the curve in the unit square.
+Similar metrics in the literature include the ``AUC'' and ``ROC''.
+We will be able to generate an analogous metric when varying a threshold in out loss function, so can produce comparable performances of the families of models that we can generate.
+One should however note that for classification on big datasets where we are only interested in $\tfrac{FP}{FN}$ very big or small, such an area isn't the relevant statistic.
+\section{Controlling $\tfrac{FP}{FN}$ with parameterised loss functions}
+
+In this work we are focused on influencing the behaviour of the model at the training stage - we will largely fix our threshold at $\alpha=\tfrac12$ and make the loss function do the work of forcing a desired $\tfrac{FP}{FN}$ tradeoff.
+
+We consider families of loss functions depending upon a parameter that constrains the model at the training stage.
+This approach ensures that only the problem of interest is being solved, at the cost of needing to retrain a model if constraints are changed.
+For the sake of comparison we may generate similar AUC metrics but note that these methods are only useful if we care about all possible $\tfrac{FP}{FN}$ ratios, which is unrealistic in highly imbalanced classification.
+
+\subsection{Smoothed statistics}
+
+Fix a batch of observations $\mathcal F=\{(x_i,y_i)\}_{i=1}^N\subseteq X\times\{0,1\}$ and write $\hat y_i=f_{\boldsymbol\theta}(x_i)$ for $1\leq i\leq N$.
+We can approximate the counts of the four different outcomes algebraically by
+\begin{itemize}
+  \item $\texttt{tp}_\mathcal F(\boldsymbol\theta)=\sum_{i=1}^N y_i\hat y_i$,
+  \item $\texttt{tn}_\mathcal F(\boldsymbol\theta)=\sum_{i=1}^N(1-y_i)(1-\hat y_i)$,
+  \item $\texttt{fp}_\mathcal F(\boldsymbol\theta)=\sum_{i=1}^N(1-y_i)\hat y_i$ and
+  \item $\texttt{fn}_\mathcal F(\boldsymbol\theta)=\sum_{i=1}^Ny_i(1-\hat y_i)$.
+\end{itemize}
+
+Then the estimates for precision and recall are given by
+\begin{itemize}
+  \item The $\textbf{surrogate precision}=\frac{\texttt{tp}_\mathcal F(\boldsymbol\theta)}{\texttt{tp}_\mathcal F(\boldsymbol\theta)+\texttt{fp}_\mathcal F(\boldsymbol\theta)}$ and
+  \item the $\textbf{surrogate recall}=\frac{\texttt{tp}_\mathcal F(\boldsymbol\theta)}{\texttt{tp}_\mathcal F(\boldsymbol\theta)+\texttt{fn}_\mathcal F(\boldsymbol\theta)}$.
+\end{itemize}
+Where clear we may suppress $\boldsymbol\theta$ and $\mathcal F$ dependence.
+Analogously to the binary statistics, writing $|y|=\#\{i:y_i=1\}$ we also have $\texttt{tp}=|y|-\texttt{fn}$ and $\texttt{tn}=|1-y|-\texttt{fp}$.
+\subsection{A general form for candidate loss functions}
+Given a batch at some point in training, we may seek to update the weights of the network to decrease $\texttt{fn}$ and $\texttt{fp}$ while increasing $\texttt{tn}$ and $\texttt{tp}$.
+Write $\partial_{\boldsymbol\theta}$ for derivatives with respect to the parameters.
+One may readily verify that
+\begin{align*}
+  \partial_{\boldsymbol\theta}\texttt{tp}_{\mathcal F}(\boldsymbol\theta)=&\sum_{i:y_i=1}\partial_{\boldsymbol\theta}f_{\boldsymbol\theta}(x_i)=-\partial_{\boldsymbol\theta}\texttt{fn}_{\mathcal F}(\boldsymbol\theta)~\text{and}\\
+  \partial_{\boldsymbol\theta}\texttt{tn}_{\mathcal F}(\boldsymbol\theta)=&-\sum_{i:y_i=0}\partial_{\boldsymbol\theta}f_{\boldsymbol\theta}(x_i)=-\partial_{\boldsymbol\theta}\texttt{fp}_{\mathcal F}(\boldsymbol\theta).
+\end{align*}
+
+We observe that for a fixed batch, we generally expect that we will make an update to the parameters in the direction spanned by $\partial_{\boldsymbol\theta}\texttt{tp}_{\mathcal F}(\boldsymbol\theta)$ and $\partial_{\boldsymbol\theta}\texttt{tn}_{\mathcal F}(\boldsymbol\theta)$.
+We may write such an update for the batch at time $t$ as
+$$
+\varphi(t)=-U_t\partial_{\boldsymbol\theta}\texttt{fp}_{\mathcal F_t}(\boldsymbol\theta_t)-V_t\partial_{\boldsymbol\theta}\texttt{fn}_{\mathcal F_t}(\boldsymbol\theta_t)=\partial_{\boldsymbol\theta}(-U_t\texttt{fp}_t-V_t\texttt{fn}_t)=\partial_{\boldsymbol\theta}\Phi(\texttt{fp}_t,\texttt{fn}_t,U_t,V_t).
+$$
+Here $U_t$ and $V_t>0$ are weights corresponding to the relative amount that the model needs to improve on the rates of false positives and false negatives.
+\lstinputlisting[language=python,basicstyle=\small,caption=A dynamic choice of gradient weights]{snippets/d_l.py}
+The loss function $\Psi$ or equivalently the gradient $\varphi(t)$ may then be taken as the input to stochastic gradient descent or a related method, such as Adam.
+
+In the next subsection we consider an existing loss function designed to control $\tfrac{FP}{FN}$, and relate it to this observation about the form of the gradient update.
+\subsection{Comparison with an existing loss function based approach}
+
+In order to control both false positives and false negatives at a specific relative desired rate, one may consider the family of quantities discussed by Rijsbergen in \cite{van1979information}, though here are looking for quantities to minimise so we we modify conventions and use $1-$ the original figure:
+$$
+F_\beta=1-(1+\beta^2)\frac{\textbf{precision}\cdot\textbf{recall}}{\beta^2\cdot\textbf{precision}+\textbf{recall}}.
+$$
+This quantity can't be found directly but may be approximated based on a sample, but this won't yield a function to which we can apply gradient descent methods.
+
+swapping out for the surrogates defined above we arrive at wwidetilde is referred to in \cite{lee2021surrogate} as the macro soft $F_\beta$ score, up to the same modification of convention as before:
+\begin{align*}
+\texttt F_\beta=&1-(1+\beta^2)\frac{\textbf{surrogate precision}\cdot\textbf{surrogate recall}}{\beta^2\cdot\textbf{surrogate precision}+\textbf{surrogate recall}}\\
+=&1-(1+\beta^2)\frac{\texttt{tp}}{\beta^2(\texttt{tp}+\texttt{fn})+\texttt{tp}+\texttt{fp}}\\
+  =&\frac{\left(\tfrac{\beta^2}{1+\beta^2}\right)\texttt{fn}+\left(\tfrac1{1+\beta^2}\right)\texttt{fp}}{\texttt{tp}+\left(\tfrac{\beta^2}{1+\beta^2}\right)\texttt{fn}+\left(\tfrac1{1+\beta^2}\right)\texttt{fp}}\\
+  =&\frac{\lambda\texttt{fn}+(1-\lambda)\texttt{fp}}{\texttt{tp}+\left(\lambda\texttt{fn}+(1-\lambda)\texttt{fp}\right)}=\frac{\lambda\texttt{fn}+(1-\lambda)\texttt{fp}}{|y|+\left((\lambda-1)\texttt{fn}+(1-\lambda)\texttt{fp}\right)}=\Psi(\texttt{fp},\texttt{fn},\lambda,|y|),
+\end{align*}
+where $\lambda=\tfrac{\beta^2}{1+\beta^2}$.
+One can see from this that the role of $\lambda$ or equivalently $\beta$ is to control the relative cost of a false positive versus a false negative, just as Rijsbergen explains the role of the original $F_\beta$ function in \cite{van1979information}.
+Write $\partial_i$ for the partial derivative of a function with respect to its $i$th argument.
+The gradient of this loss then is given by
+$$
+\partial_{\boldsymbol\theta}\texttt{F}_\beta=(\partial_1\Psi)\partial_{\boldsymbol\theta}\texttt{fp}+(\partial_2\Psi)\partial_{\boldsymbol\theta}\texttt{fn}.
+$$
+If we assume that the performance of a model is already good, so that $|y|\gg\texttt{fp}$ and $\texttt{fn}$, then it is easy to verify that we roughly have
+$$
+\partial_1\Psi,\partial_2\Psi>0~\text{and}~\frac{\partial_2\Psi}{\partial_1\Psi}\approx\tfrac\lambda{1-\lambda}=\beta^2,
+$$
+in other words, the relative weighting reflects the target ratio of false positives to false negatives.
+This then is an example of a loss that perturbs in a direction in the positive cone spanned by $\partial_{\boldsymbol\theta}\texttt{fp}$ and $\partial_{\boldsymbol\theta}\texttt{fn}$.
+
+In the present work we instead seek to dynamically choose the relative weighting $U_t$ and $V_t$ depending on the performance of the model.
+The magnitude of the gradient is relatively immaterial when passed to Adam, so we take $U_t\in(0,1)$ and $V_t=1-U_t$ for simplicity.
+\subsection{An adaptive weighting scheme}
+Here we give a possible method for choice of weights $U_t$ and $V_t$.
+When the model has $\tfrac{FP}{FN}$ much larger than intended, we want $1\approx U_t\gg V_t\approx0$ and vice versa when $\tfrac{FP}{FN}$ is much smaller than intended.
+Fix hyperparameters $\kappa$ and $\nu$ which represent the timescale of the moving average over which $\tfrac{FP}{FN}$ is evaluated and the degree to which the weighting scales accoridng to how off-target the model is.
+Let $\sigma(t)=\tfrac1{1+e^{-t}}$.
+Write $\widetilde{FP}=\tfrac{FP}{\#\mathcal F}$ and similarly for other quantities to denote the respective rates within a batch of size $N$.
+Let $u_0=0$ and at batch $t$ define $U$ and $V$ via the rule
+$$
+u_{t+1}=\frac{\kappa u_t}N+N(1-\kappa)(\tfrac{\widetilde{FP}}\beta-\beta\widetilde{FN})~\text{and}~U_t=\sigma(\nu u_t),V_t=1-U_t.
+$$
+This choice allows the loss function to reflect the binary predictions that the model has been making.
+When there are too many false positives, $u_t>0$ and so $U_t>\tfrac12$ causing the loss to depend more upon the false positive rate, and vice versa in the case of too many false negatives.
+\lstinputlisting[language=python,basicstyle=\small,caption=Loss weight updating subroutine]{snippets/update_fp_w.py}
+This is implemented via a modified adam type gradient descent step.
+In fact, $dl$ needn't be computed by computing a single gradient, but may also take weighted sums of $d\texttt{fp}$ and $d\texttt{fn}$ computed by other means.
+\lstinputlisting[language=python,basicstyle=\small,caption=A stochastic gradient routine with binary prediction derived weighting updates]{snippets/adam_step.py}
+\bibliographystyle{plain}
+\bibliography{imbalanced}
+\end{document}

@@ -10,4 +10,8 @@ dev_*.ipynb
 *.bbl
 *.blg
 *.aux
+*.log
+*.out
+*.pdf
 b/*
+doc/snippets/*
