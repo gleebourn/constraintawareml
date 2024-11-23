@@ -130,7 +130,7 @@ For the sake of comparison we may generate similar AUC metrics but note that the
 
 \subsection{Smoothed statistics}
 
-Fix a batch of observations $\mathcal F=\{(x_i,y_i)\}_{i=1}^N\subseteq X\times\{0,1\}$ and write $\hat y_i=f_{\boldsymbol\theta}(x_i)$ for $1\leq i\leq N$.
+Fix a batch of observations $\mathcal F=\{(x_i,y_i)\}_{i=1}^N\subseteq\mathcal X\times\{0,1\}$ and write $\hat y_i=f_{\boldsymbol\theta}(x_i)$ for $1\leq i\leq N$.
 We can approximate the counts of the four different outcomes algebraically by
 \begin{itemize}
   \item $\texttt{tp}_\mathcal F(\boldsymbol\theta)=\sum_{i=1}^N y_i\hat y_i$,

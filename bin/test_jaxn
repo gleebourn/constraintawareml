@@ -3,28 +3,33 @@ from sys import path,argv
 from pathlib import Path
 path.append(str(Path('.').absolute()))
 
-from pandas import read_csv
 from jax.numpy import array
+from cal.jaxn import bin_optimiser,controller,nlp_params,nlp_infer,\
+                     conv_params,conv_infer
 
-from cal.jaxn import hidden_layer_perceptron
+from tensorflow.keras.datasets import mnist
 
-Xy=read_csv('~/data/UNSW_NB15_training-set.csv').select_dtypes(include='number')
-X=array(Xy.drop(columns='label'),dtype=float)
-y=array(Xy['label'],dtype=float)
-print('X.shape=',X.shape)
-print('y.shape=',y.shape)
-print('X=',X)
-print('y=',y)
+from numpy import float32,reshape
+d=mnist.load_data()
 
-hlp=hidden_layer_perceptron(X.shape[1],32)
+X,y,X_test,y_test=d[0][0].astype(float32),(d[0][1]==0).astype(float32),\
+                  d[1][0].astype(float32),(d[1][1]==0).astype(float32)
 
-batch_size=64
+if argv[1]=='nlp':
+  X=X.reshape((X.shape[0],X.shape[1]*X.shape[2]))
+  X_test=X_test.reshape((X_test.shape[0],X_test.shape[1]*X_test.shape[2]))
+print(X.shape)
+print(y.shape)
 
-n_epochs=30
-#Just randomly sample forever, after a few epochs each point samples ~#epochs times anyway
-n_batches=int((len(y)/batch_size)*n_epochs)
+c=controller(X,y,X_test,y_test)
 
-for i in range(n_batches):
-  hlp.gradient_desc_step(X,y,.1,mk_batch=batch_size)
-  if not(i%10000):
-    print('Batch',i,'whole test set loss:',hlp.loss_batch(X,y))
+for b in [1.]:#[.7,1,1.4]:
+  if argv[1]=='nlp':
+    h=bin_optimiser(X.shape[1],beta=b,outf='log/beta_'+str(b)+'.log',
+                    implementation=nlp_infer,
+                    init_params=nlp_params)
+  elif argv[1]=='conv':
+    h=bin_optimiser(X[0].shape,beta=b,outf='log/beta_'+str(b)+'.log',
+                    implementation=conv_infer,
+                    init_params=conv_params)
+  c.init_job(h,50,32,'beta_'+str(b))
