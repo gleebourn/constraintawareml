@@ -81,7 +81,7 @@ class bin_optimiser:
 
   def __init__(self,input_dims,init_params=nlp_params,lr=.001,seed=0,
                implementation=nlp_infer,beta1=.9,beta2=.999,
-               eps=.00000001,kappa=.5,beta=1,nu=100,outf=stderr):
+               eps=.00000001,kappa=.9,beta=1,nu=100,outf=stderr):
     self.outf=open(outf,'w') if isinstance(outf,str) else outf
     self.key=key(seed)
     self.lr=lr
@@ -162,7 +162,7 @@ class bin_optimiser:
     u=self.b_fp(y,y_pred)/self.beta-self.b_fn(y,y_pred)*self.beta
     #self.fp_weight=self.kappa*self.fp_weight/len(y)+self.one_minus_kappa*u*len(y)
     self.fp_weight=self.kappa*self.fp_weight+self.one_minus_kappa*u
-    self.fp_weight=self.fp_weight+u
+    #self.fp_weight=self.fp_weight+u
 
     self.U=sigmoid(self.nu*self.fp_weight)
     self.V=1-self.U
@@ -226,9 +226,9 @@ class bin_optimiser:
           f'\n[bin,cts] fp: [{fp:.5f},{cts_fp:.5f}], bin/cts:{fp/cts_fp:.5f}',
           f'\n[bin,cts] fn: [{fn:.5f},{cts_fn:.5f}], bin/cts:{fn/cts_fn:.5f}',
           f'\n[bin,cts,tgt] fp/fn: [{fp/fn:10.5f},',
-          f'\n{cts_fp/cts_fn:10.5f},{self.beta**2:10.5f}]\n',
-          f'\nP(+|predicted +)=bin precision~{tp/(tp+fp):.5f}\n',
-          f'\nP(predicted +|+)=bin recall~{tp/(tp+fn):.5f}\n',
+          f'{cts_fp/cts_fn:10.5f},{self.beta**2:10.5f}]',
+          f'\nP(+|predicted +)=bin precision~{tp/(tp+fp):.5f}',
+          f'\nP(predicted +|+)=bin recall~{tp/(tp+fn):.5f}',
           f'\nfp wgt: {self.fp_weight:.5f}',file=outf,flush=True)
 
   def run_epochs(self,X_train,y_train,X_test=None,y_test=None,
@@ -244,41 +244,3 @@ class bin_optimiser:
           print('Testing performance:',file=self.outf,flush=True)
           self.bench(X_test,y_test)
 
-class controller:
-  def __init__(self,X_train,y_train,X_test,y_test,outf=stderr):
-
-    self.X_train,self.y_train,self.X_test,self.y_test=X_train,y_train,X_test,y_test
-    self.jobs=dict()
-    self.outf=outf
-    #self.e=ProcessPoolExecutor()
-  
-  def init_job(self,optimiser,n_epochs,batch_size,label):
-    snapshots=[]
-    mem_per_snapshot=0
-    for k in optimiser.params:
-      mem_per_snapshot+=optimiser.params[k].nbytes
-    print('Param memory usage (GB):',mem_per_snapshot/1000000000)
-    print('Required memory for snapshots (GB):',mem_per_snapshot*n_epochs/1000000000)
-    def job():
-      
-      for i in range(1,n_epochs+1):
-        s=dict()
-        for k in optimiser.params:
-          s[k]=optimiser.params[k].copy()
-        snapshots.append(s)
-        print('Starting epoch',i,'...',file=self.outf,flush=True)
-        optimiser.run_epoch(self.X_train,self.y_train,batch_size=batch_size)
-        print('====================================================',
-              file=self.outf,flush=True)
-        print('Epoch complete, test data performance for',label,':',
-              file=self.outf,flush=True)
-        optimiser.bench(self.X_test,self.y_test,outf=self.outf)
-        print('====================================================',
-              file=self.outf,flush=True)
-
-      snapshots.append(optimiser.params)
-      self.jobs[2]=True
-        
-    job()
-    #self.e.submit(job)
-    
