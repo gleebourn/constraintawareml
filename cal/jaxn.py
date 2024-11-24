@@ -1,13 +1,15 @@
 from jax.nn import sigmoid,relu
 from jax.numpy import dot,vectorize,zeros,square,sqrt,array,\
                       sum as jsum,max as jmax
+def relu1(x): return relu(1-relu(.5-x))
+def mixsr(x): return .9*relu1(x)+.1*sigmoid(x)
 from jax.scipy.signal import convolve
 from jax.random import normal,key,randint,permutation
 from jax import grad,jit
 from jax.errors import JaxRuntimeError
 
 from sys import stderr
-from threading import Thread
+#from concurrent.futures import ProcessPoolExecutor
 
 #@jit #jitting this causes an iteration over 0d array error!!!!
 def rand_batch(X,y,batch_size,key):
@@ -19,7 +21,7 @@ def mk_nlp(layer_dims=default_layer_dims):
   layer_dims=layer_dims+[1]
   l=len(layer_dims)
 
-  #@jit
+  @jit
   def nlp_infer(x,params):
     for i in range(l):
       x=sigmoid(dot(params[('A',i)],x)+params[('b',i)])
@@ -37,23 +39,24 @@ def mk_nlp(layer_dims=default_layer_dims):
 
 nlp_params,nlp_infer=mk_nlp()
 
-#default_conv_sizes=[5,5,5,5]
-default_conv_sizes=[3,3,3,3,3,3]
-default_dense_dims=[32,16]
-def mk_conv(conv_sizes=default_conv_sizes,dense_dims=default_dense_dims):
+#default_conv_sizes=[5,5,3]
+default_conv_sizes=[5,4,3,3]
+default_dense_dims=[128,64,32]
+def mk_conv(conv_sizes=default_conv_sizes,dense_dims=default_dense_dims,
+            activation=sigmoid):
   dense_dims=dense_dims+[1]
 
-  #@jit
+  @jit
   def conv_infer(x,params):
     #for i in len(conv_sizes):
     i=0
     while ('K',i) in params:
-      x=sigmoid(convolve(x,params[('K',i)],mode='valid'))
+      x=activation(convolve(x,params[('K',i)],mode='valid'))
       i+=1
     x=x.flatten()
     i=0
     while ('A',i) in params:
-      x=sigmoid(dot(params[('A',i)],x)+params[('b',i)])
+      x=activation(dot(params[('A',i)],x)+params[('b',i)])
       i+=1
     return x[0]
 
@@ -78,7 +81,7 @@ class bin_optimiser:
 
   def __init__(self,input_dims,init_params=nlp_params,lr=.001,seed=0,
                implementation=nlp_infer,beta1=.9,beta2=.999,
-               eps=.00000001,kappa=.99,beta=1,nu=10,outf=stderr):
+               eps=.00000001,kappa=.5,beta=1,nu=100,outf=stderr):
     self.outf=open(outf,'w') if isinstance(outf,str) else outf
     self.key=key(seed)
     self.lr=lr
@@ -198,7 +201,7 @@ class bin_optimiser:
       print('...done',file=self.outf,flush=True)
       return y_pred
 
-  def run_epoch(self,X_all,y_all,batch_size=32,verbose=True,reports_per_batch=10):
+  def run_epoch(self,X_all,y_all,batch_size=32,verbose=True,reports_per_batch=4):
     n_rows=len(y_all)
     n_batches=n_rows//batch_size #May miss 0<=t<32 rows
 
@@ -209,7 +212,7 @@ class bin_optimiser:
     for i in range(n_batches):
       self.adam_step(X_all[i:i+batch_size],y_all[i:i+batch_size])
       if verbose and not(i%report_interval):
-        print(f'Epoch {100*(i/n_batches):8.0f}% complete... training performance:',
+        print(f'Epoch {100*(i/n_batches):.0f}% complete... training performance:',
               file=self.outf,flush=True)
         self.bench(X_all,y_all)
 
@@ -219,14 +222,14 @@ class bin_optimiser:
     y_pred=self.infer(X)
     tp,fp,fn=self.b_tp(y,y_pred),self.b_fp(y,y_pred),self.b_fn(y,y_pred)
     cts_tp,cts_fp,cts_fn=self.c_tp(y,y_pred),self.c_fp(y,y_pred),self.c_fn(y,y_pred)
-    print(f'[bin,cts] tp: [{tp:.5f},{cts_tp:.5f}]\n',
-          f'[bin,cts] fp: [{fp:.5f},{cts_fp:.5f}]\n',
-          f'[bin,cts] fn: [{fn:.5f},{cts_fn:.5f}]\n',
-          f'[bin,cts,tgt] fp/fn: [{fp/fn:10.5f},',
-          f'{cts_fp/cts_fn:10.5f},{self.beta**2:10.5f}]\n',
-          f'bin precision:{tp/(tp+fp):.5f}\n',
-          f'bin recall:{tp/(tp+fn):.5f}\n',
-          f'fp wgt: {self.fp_weight:.5f}',file=outf,flush=True)
+    print(f'[bin,cts] tp: [{tp:.5f},{cts_tp:.5f}], bin/cts:{tp/cts_tp:.5f}',
+          f'\n[bin,cts] fp: [{fp:.5f},{cts_fp:.5f}], bin/cts:{fp/cts_fp:.5f}',
+          f'\n[bin,cts] fn: [{fn:.5f},{cts_fn:.5f}], bin/cts:{fn/cts_fn:.5f}',
+          f'\n[bin,cts,tgt] fp/fn: [{fp/fn:10.5f},',
+          f'\n{cts_fp/cts_fn:10.5f},{self.beta**2:10.5f}]\n',
+          f'\nP(+|predicted +)=bin precision~{tp/(tp+fp):.5f}\n',
+          f'\nP(predicted +|+)=bin recall~{tp/(tp+fn):.5f}\n',
+          f'\nfp wgt: {self.fp_weight:.5f}',file=outf,flush=True)
 
   def run_epochs(self,X_train,y_train,X_test=None,y_test=None,
                  batch_size=32,n_epochs=100,verbose=2):
@@ -247,6 +250,7 @@ class controller:
     self.X_train,self.y_train,self.X_test,self.y_test=X_train,y_train,X_test,y_test
     self.jobs=dict()
     self.outf=outf
+    #self.e=ProcessPoolExecutor()
   
   def init_job(self,optimiser,n_epochs,batch_size,label):
     snapshots=[]
@@ -266,7 +270,7 @@ class controller:
         optimiser.run_epoch(self.X_train,self.y_train,batch_size=batch_size)
         print('====================================================',
               file=self.outf,flush=True)
-        print('Epoch complete, Test data performance for',label,':',
+        print('Epoch complete, test data performance for',label,':',
               file=self.outf,flush=True)
         optimiser.bench(self.X_test,self.y_test,outf=self.outf)
         print('====================================================',
@@ -275,6 +279,6 @@ class controller:
       snapshots.append(optimiser.params)
       self.jobs[2]=True
         
-    j=Thread(target=job)
-    self.jobs[label]=j,snapshots,False
-    j.start()
+    job()
+    #self.e.submit(job)
+    
