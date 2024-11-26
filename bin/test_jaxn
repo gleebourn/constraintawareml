@@ -2,8 +2,13 @@
 from sys import path,argv
 from pathlib import Path
 path.append(str(Path('.').absolute()))
+from os import mkdir
+try:
+  mkdir('log')
+except FileExistsError:
+  pass
 
-from jax.numpy import array
+from jax.numpy import array,geomspace
 from cal.jaxn import bin_optimiser,nlp_params,nlp_infer,conv_params,conv_infer
 
 from tensorflow.keras.datasets import mnist
@@ -25,13 +30,17 @@ if argv[1]=='nlp':
 print(X.shape)
 print(y.shape)
 
-for b in [1.]:#[.7,1,1.4]:
-  if argv[1]=='nlp':
-    o=bin_optimiser(X.shape[1],beta=b,outf='log/beta_'+str(b)+'.log',
-                    implementation=nlp_infer,
-                    init_params=nlp_params)
-  elif argv[1]=='conv':
-    o=bin_optimiser(X[0].shape,beta=b,outf='log/beta_'+str(b)+'.log',
-                    implementation=conv_infer,
-                    init_params=conv_params)
-  o.run_epochs(X,y,X_test,y_test)
+if argv[1]=='nlp':
+  in_shape=X.shape[1]
+  implementation=nlp_infer
+  init_params=nlp_params
+elif argv[1]=='conv':
+  in_shape=X[0].shape
+  implementation=conv_infer
+  init_params=conv_params
+
+for b in geomspace(.1,10,20):
+  o=bin_optimiser(in_shape,outf='log/beta_'+str(b)+'.log',beta=b,
+                  implementation=implementation,init_params=init_params)
+  
+  o.run_epochs(X,y,X_test,y_test,verbose=1)

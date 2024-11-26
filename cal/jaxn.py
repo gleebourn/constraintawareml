@@ -1,5 +1,5 @@
 from jax.nn import sigmoid,relu
-from jax.numpy import dot,vectorize,zeros,square,sqrt,array,\
+from jax.numpy import dot,vectorize,zeros,square,sqrt,array,inf,logical_not,\
                       sum as jsum,max as jmax
 def relu1(x): return relu(1-relu(.5-x))
 def mixsr(x): return .9*relu1(x)+.1*sigmoid(x)
@@ -81,7 +81,7 @@ class bin_optimiser:
 
   def __init__(self,input_dims,init_params=nlp_params,lr=.001,seed=0,
                implementation=nlp_infer,beta1=.9,beta2=.999,
-               eps=.00000001,kappa=.9,beta=1,nu=100,outf=stderr):
+               eps=.00000001,kappa=.999,beta=.1,nu=10,outf=stderr):
     self.outf=open(outf,'w') if isinstance(outf,str) else outf
     self.key=key(seed)
     self.lr=lr
@@ -98,10 +98,11 @@ class bin_optimiser:
     self.d_fp,self.d_fn=grad(_c_fp,argnums=2),grad(_c_fn,argnums=2)
 
     self.beta=beta
+    self.beta_sq=beta**2
     self.kappa=kappa
     self.one_minus_kappa=1-kappa
     self.nu=nu
-    self.fp_weight=0
+    self.threshold=.5
 
     ##Adam params
     #Don't implement time dependent bias removal
@@ -115,7 +116,7 @@ class bin_optimiser:
     self.v=0
     self.eps=eps
 
-  def d_l(self,X,y,U,V,params):
+  def d_l(self,X,y,params):
     ret=dict()
     dfp=self.d_fp(X,y,params)
     dfn=self.d_fn(X,y,params)
@@ -131,16 +132,16 @@ class bin_optimiser:
     #  ret[k]=U*dfp[k]/(self.beta*dfp_frob_sq)+self.beta*V*dfn[k]/dfn_frob_sq
 
     for k in dfp:
-      ret[k]=U*dfp[k]/self.beta+self.beta*V*dfn[k]
+      ret[k]=self.U*dfp[k]+self.V*dfn[k]
 
     return ret
 
-  #Ajsume both y and y_pred are floats but y always 1. or 0.
-  def b_tp(self,y,y_pred): return jsum((y==1.)&(y_pred>.5))/len(y)
+  #Assume both y and y_pred are floats but y always 1. or 0.
+  def b_tp(self,y,y_pred): return jsum((y==1.)&y_pred)/len(y)
   
-  def b_fp(self,y,y_pred): return jsum((y==0.)&(y_pred>.5))/len(y)
+  def b_fp(self,y,y_pred): return jsum((y==0.)&y_pred)/len(y)
   
-  def b_fn(self,y,y_pred): return jsum((y==1.)&(y_pred<=.5))/len(y)
+  def b_fn(self,y,y_pred): return jsum((y==1.)&logical_not(y_pred))/len(y)
 
   def c_tp(self,y,y_pred): return jsum(y_pred[y==1.])/len(y)
 
@@ -154,23 +155,43 @@ class bin_optimiser:
    
   #def c_fn(self,y,y_pred): return jsum(relu(2*(1-y_pred[y==1.])-1))/len(y)
                     
-  def update_fp_w(self,y,y_pred):
-    #Check which way the skew is.
-    #We are aiming for fp/fn=beta**2.
-    #u>0 -> too many fp
-    #u<0 -> too many fn
-    u=self.b_fp(y,y_pred)/self.beta-self.b_fn(y,y_pred)*self.beta
-    #self.fp_weight=self.kappa*self.fp_weight/len(y)+self.one_minus_kappa*u*len(y)
-    self.fp_weight=self.kappa*self.fp_weight+self.one_minus_kappa*u
-    #self.fp_weight=self.fp_weight+u
+  def update_fp_w(self,y,y_pseudolikelihoods):
+    thresh_lb=0
+    thresh_ub=1
+    fp_fn_thresh_lb=inf
+    fp_fn_thresh_ub=0
 
-    self.U=sigmoid(self.nu*self.fp_weight)
+    while thresh_ub-thresh_lb>self.eps:
+      avg=(thresh_ub+thresh_lb)/2
+      y_pred_bin=y_pseudolikelihoods>avg
+      fp_fn=self.b_fp(y,y_pred_bin)/(self.b_fn(y,y_pred_bin)+self.eps)
+      if abs(fp_fn-self.beta_sq)<self.eps: break
+      if fp_fn>self.beta_sq:
+        fp_fn_thresh_lb,thresh_lb=fp_fn,avg
+      else :
+        fp_fn_thresh_ub,thresh_ub=fp_fn,avg
+
+    self.threshold*=self.kappa
+    self.threshold+=self.one_minus_kappa*avg
+
+    ##We want threshold to be about .5 really.
+    #self.threshold>.5 -> we are cutting off what would be false positive
+    #                  -> want model to make fewer false positives
+    #self.U=sigmoid(self.nu*(self.threshold-.5))
+    self.U=sigmoid(self.nu*(avg-.5))
+
     self.V=1-self.U
+
+    #When on target, FP/beta=FN*beta
+    #Want to decrease FP by 1/beta for every time FN decreases by beta
+    self.U*=self.beta
+    self.V/=self.beta
+
 
   def adam_step(self,X,y):
     y_pred=self.infer(X)
     self.update_fp_w(y,y_pred)
-    upd=self.d_l(X,y,self.U,self.V,self.params)
+    upd=self.d_l(X,y,self.params)
 
     self.v*=self.beta2
     for k in upd:
@@ -220,7 +241,9 @@ class bin_optimiser:
     if outf is None:
       outf=self.outf
     y_pred=self.infer(X)
-    tp,fp,fn=self.b_tp(y,y_pred),self.b_fp(y,y_pred),self.b_fn(y,y_pred)
+    y_pred_bin=y_pred>self.threshold
+    tp=self.b_tp(y,y_pred_bin)
+    fp,fn=self.b_fp(y,y_pred_bin),self.b_fn(y,y_pred_bin)
     cts_tp,cts_fp,cts_fn=self.c_tp(y,y_pred),self.c_fp(y,y_pred),self.c_fn(y,y_pred)
     print(f'[bin,cts] tp: [{tp:.5f},{cts_tp:.5f}], bin/cts:{tp/cts_tp:.5f}',
           f'\n[bin,cts] fp: [{fp:.5f},{cts_fp:.5f}], bin/cts:{fp/cts_fp:.5f}',
@@ -229,7 +252,7 @@ class bin_optimiser:
           f'{cts_fp/cts_fn:10.5f},{self.beta**2:10.5f}]',
           f'\nP(+|predicted +)=bin precision~{tp/(tp+fp):.5f}',
           f'\nP(predicted +|+)=bin recall~{tp/(tp+fn):.5f}',
-          f'\nfp wgt: {self.fp_weight:.5f}',file=outf,flush=True)
+          f'\nthreshold,U,V: {self.threshold:.5f},{self.U:.5f},{self.V:.5f}',file=outf,flush=True)
 
   def run_epochs(self,X_train,y_train,X_test=None,y_test=None,
                  batch_size=32,n_epochs=100,verbose=2):
