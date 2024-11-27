@@ -21,7 +21,7 @@ X,y,X_test,y_test=d[0][0].astype(float32),(d[0][1]==0).astype(float32),\
 
 opts=['nlp','conv']
 if len(argv)!=2 or not(argv[1] in opts):
-  print('Usage:',argv[0],'[',opts,']')
+  print('Usage:',argv[0],opts)
   exit(1)
 
 if argv[1]=='nlp':

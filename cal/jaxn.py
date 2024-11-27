@@ -228,7 +228,7 @@ class bin_optimiser:
           f'\nGradient update rule: -({self.U:.8f}*dfp+{self.V:.8f}*dfn)',file=outf,flush=True)
 
   def run_epochs(self,X_train,y_train,X_test=None,y_test=None,
-                 batch_size=32,n_epochs=20,verbose=2):
+                 batch_size=32,n_epochs=50,verbose=2):
     for i in range(1,n_epochs+1):
       if verbose: print('Beginning epoch',i,'...',file=self.outf,flush=True)
       self.run_epoch(X_train,y_train,batch_size=batch_size,verbose=verbose==2)
