@@ -19,7 +19,7 @@ def PAL_req(p,x,y,y_pred=None): # This isn't used and may need further thought
 def PAL_upd(p,x,y,y_pred=None):
   if y_pred is None:
     y_pred=PAL_inf(p,x)
-  loss=1-y*y_pred
+  loss=y!=y_pred
   l2=x.dot(x)**.5
   eta=loss/l2
   return p+eta*y*x
