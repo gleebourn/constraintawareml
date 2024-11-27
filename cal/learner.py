@@ -70,7 +70,7 @@ class ComposedLearner(Learner):
     for a in self.composite_learners:
       y=a.infer(j)
 
-    j.set_y(self,y)
+    j.set_y_pred(self,y)
     return y
   
   def request(self,j,update=True):

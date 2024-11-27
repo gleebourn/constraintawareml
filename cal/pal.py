@@ -2,7 +2,7 @@ import numpy as np
 from numpy import zeros
 from sklearn.metrics import classification_report, accuracy_score
 
-from learner import FunctionalLearner,ComposedLearner,Job
+from cal.learner import FunctionalLearner,ComposedLearner,Job
 
 def print_report(a,a_pred):
   print(f"Test Set Accuracy : {accuracy_score(a[1:], a_pred[1:]) * 100} %\n\n")
@@ -24,5 +24,5 @@ def PAL_upd(p,x,y,y_pred=None):
   eta=loss/l2
   return p+eta*y*x
 
-def pal_learner(n_features):
+def pa_learner(n_features):
   return FunctionalLearner(PAL_inf,PAL_req,PAL_upd,zeros(n_features))

@@ -1,4 +1,4 @@
-from numpy import ones, int32,prod,pi,cos,vectorize,array,sort,cumsum,square
+from numpy import ones,int32,prod,pi,cos,vectorize,array,sort,cumsum,square,zeros
 from numpy.random import default_rng
 
 
@@ -83,32 +83,33 @@ def brownian_region(n_cols,n_rows,std,fidelity,p,seed=None):
   return X,y<thresh
 
 
-def mk_synthetic_linear(n_cols,n_rows,er=.01,scheme='iidunif',dimy=10):
+def mk_synthetic_linear(n_cols,n_rows,er=.01,scheme='iidunif',dimy=10,seed=None):
+  r=default_rng(seed)
   if scheme=='iidunif':
-    X_synthetic=(2*np.random.rand(n_rows,n_cols)-1)
-    actual=(2*np.random.rand(n_cols)-1)
-    noise=er*(2*np.random.rand(n_rows)-1)
+    X_synthetic=(2*r.random((n_rows,n_cols))-1)
+    actual=(2*r.random(n_cols)-1)
+    noise=er*(2*r.random(n_rows)-1)
     y_synthetic=2*(X_synthetic.dot(actual)+noise > 0)-1
     return X_synthetic,2*(y_synthetic>0)-1
 
   if scheme=='walkingmodel':
-    X_synthetic=(2*np.random.rand(n_rows,n_cols)-1)
-    y_synthetic=np.zeros(n_rows)
-    actual=np.random.normal(size=n_cols)
-    actual/=np.linalg.norm(actual)
+    X_synthetic=(2*r.random((n_rows,n_cols))-1)
+    y_synthetic=zeros(n_rows)
+    actual=r.normal(size=n_cols)
+    actual/=(actual**2).sum()**.5
     for i in range(n_rows):
       y_synthetic[i]=actual.dot(X_synthetic[i,:])
-      actual+=er*np.random.normal(size=n_cols)
-      actual/=np.linalg.norm(actual)
-    return X_synthetic,2*(y_synthetic>0)-1
+      actual+=er*r.normal(size=n_cols)
+      actual/=(actual**2).sum()**.5
+    return X_synthetic,2*(y_synthetic>0)-1.
 
   if scheme=='ndwalkingmodel':
-    X_synthetic=(2*np.random.rand(n_rows,n_cols)-1)
-    y_synthetic=np.zeros((n_rows,dimy))
-    actual=np.random.normal(size=(dimy,n_cols))
-    actual/=np.linalg.norm(actual)
+    X_synthetic=(2*r.random(n_rows,n_cols)-1)
+    y_synthetic=zeros((n_rows,dimy))
+    actual=r.normal(size=(dimy,n_cols))
+    actual/=(actual**2).sum()**.5
     for i in range(n_rows):
       y_synthetic[i]=actual.dot(X_synthetic[i,:])
-      actual+=er*np.random.normal(size=(dimy,n_cols))
-      actual/=np.linalg.norm(actual)
+      actual+=er*r.normal(size=(dimy,n_cols))
+      actual/=(actual**2).sum()**.5
     return X_synthetic,y_synthetic
