@@ -39,8 +39,9 @@ elif argv[1]=='conv':
   implementation=conv_infer
   init_params=conv_params
 
-for b in geomspace(.1,10,20):
-  o=bin_optimiser(in_shape,outf='log/beta_'+str(b)+'.log',beta=b,
-                  implementation=implementation,init_params=init_params)
+for fp,fn in zip(geomspace(.001,.05,20),geomspace(.05,.001,20)):
+  o=bin_optimiser(in_shape,outf='log/fp_'+str(fp)+'_fn_'+str(fn)+'.log',
+                  target_fp=fp,target_fn=fn,init_params=init_params,
+                  implementation=implementation)
   
   o.run_epochs(X,y,X_test,y_test,verbose=1)

@@ -1,17 +1,12 @@
+from jax import grad,jit
 from jax.nn import sigmoid,relu
-from jax.numpy import dot,vectorize,zeros,square,sqrt,array,inf,logical_not,\
-                      sum as jsum,max as jmax
-def relu1(x): return relu(1-relu(.5-x))
-def mixsr(x): return .9*relu1(x)+.1*sigmoid(x)
+from jax.numpy import dot,vectorize,zeros,square,sqrt,array,logical_not,\
+                      sum as jsum
 from jax.scipy.signal import convolve
 from jax.random import normal,key,randint,permutation
-from jax import grad,jit
-from jax.errors import JaxRuntimeError
 
 from sys import stderr
-#from concurrent.futures import ProcessPoolExecutor
 
-#@jit #jitting this causes an iteration over 0d array error!!!!
 def rand_batch(X,y,batch_size,key):
   indices=randint(key,batch_size,0,y.shape[0])
   return X[indices],y[indices]
@@ -39,7 +34,6 @@ def mk_nlp(layer_dims=default_layer_dims):
 
 nlp_params,nlp_infer=mk_nlp()
 
-#default_conv_sizes=[5,5,3]
 default_conv_sizes=[5,4,3,3]
 default_dense_dims=[128,64,32]
 def mk_conv(conv_sizes=default_conv_sizes,dense_dims=default_dense_dims,
@@ -80,8 +74,8 @@ conv_params,conv_infer=mk_conv()
 class bin_optimiser:
 
   def __init__(self,input_dims,init_params=nlp_params,lr=.001,seed=0,
-               implementation=nlp_infer,beta1=.9,beta2=.999,
-               eps=.00000001,kappa=.999,beta=.1,nu=10,outf=stderr):
+               implementation=nlp_infer,beta1=.9,beta2=.999,max_relative_confusion_importance=.001,
+               eps=.00000001,confusion_averaging_rate=.99,target_fp=.01,target_fn=.01,outf=stderr):
     self.outf=open(outf,'w') if isinstance(outf,str) else outf
     self.key=key(seed)
     self.lr=lr
@@ -97,12 +91,16 @@ class bin_optimiser:
 
     self.d_fp,self.d_fn=grad(_c_fp,argnums=2),grad(_c_fn,argnums=2)
 
-    self.beta=beta
-    self.beta_sq=beta**2
-    self.kappa=kappa
-    self.one_minus_kappa=1-kappa
-    self.nu=nu
+    self.target_fp=target_fp
+    self.target_fn=target_fn
+    self.beta_sq=target_fp/target_fn
+    self.beta=self.beta_sq**.5
+    self.confusion_averaging_rate=confusion_averaging_rate
+    self.max_relative_confusion_importance=max_relative_confusion_importance
+    self.one_minus_confusion_averaging_rate=1-confusion_averaging_rate
     self.threshold=.5
+    self.empirical_fp=.5
+    self.empirical_fn=.5
 
     ##Adam params
     #Don't implement time dependent bias removal
@@ -148,48 +146,33 @@ class bin_optimiser:
   def c_fp(self,y,y_pred): return jsum(y_pred[y==0.])/len(y)
 
   def c_fn(self,y,y_pred): return jsum(1-y_pred[y==1.])/len(y)
-
-  #def c_tp(self,y,y_pred): return jsum(relu(2*y_pred[y==1.]-1))/len(y)
-   
-  #def c_fp(self,y,y_pred): return jsum(relu(2*y_pred[y==0.]-1))/len(y)
-   
-  #def c_fn(self,y,y_pred): return jsum(relu(2*(1-y_pred[y==1.])-1))/len(y)
                     
   def update_fp_w(self,y,y_pseudolikelihoods):
-    thresh_lb=0
-    thresh_ub=1
-    fp_fn_thresh_lb=inf
-    fp_fn_thresh_ub=0
 
-    while thresh_ub-thresh_lb>self.eps:
-      avg=(thresh_ub+thresh_lb)/2
-      y_pred_bin=y_pseudolikelihoods>avg
-      fp_fn=self.b_fp(y,y_pred_bin)/(self.b_fn(y,y_pred_bin)+self.eps)
-      if abs(fp_fn-self.beta_sq)<self.eps: break
-      if fp_fn>self.beta_sq:
-        fp_fn_thresh_lb,thresh_lb=fp_fn,avg
-      else :
-        fp_fn_thresh_ub,thresh_ub=fp_fn,avg
+    y_pred_bin=y_pseudolikelihoods>self.threshold
+    batch_fp,batch_fn=self.b_fp(y,y_pred_bin),self.b_fn(y,y_pred_bin)
+    self.empirical_fp*=self.confusion_averaging_rate
+    self.empirical_fn*=self.confusion_averaging_rate
+    self.empirical_fp+=self.one_minus_confusion_averaging_rate*batch_fp
+    self.empirical_fn+=self.one_minus_confusion_averaging_rate*batch_fn
 
-    self.threshold*=self.kappa
-    self.threshold+=self.one_minus_kappa*avg
+    batch_target_fp=self.empirical_fp
+    batch_target_fn=self.empirical_fn
 
-    ##We want threshold to be about .5 really.
-    #self.threshold>.5 -> we are cutting off what would be false positive
-    #                  -> want model to make fewer false positives
-    #self.U=sigmoid(self.nu*(self.threshold-.5))
-    self.U=sigmoid(self.nu*(avg-.5))
+    fp_too_high=self.empirical_fp>self.target_fp
+    fn_too_high=self.empirical_fn>self.target_fn
 
-    self.V=1-self.U
+    if fp_too_high: batch_target_fp=self.target_fp
+    if fn_too_high: batch_target_fn=self.target_fn
+    elif not(fp_too_high):batch_target_fp=batch_target_fn=0
 
-    #When on target, FP/beta=FN*beta
-    #Want to decrease FP by 1/beta for every time FN decreases by beta
-    self.U*=self.beta
-    self.V/=self.beta
-
+    U=self.empirical_fp-batch_target_fp
+    V=self.empirical_fn-batch_target_fn
+    self.U=max(U,self.max_relative_confusion_importance*V)
+    self.V=max(V,self.max_relative_confusion_importance*U)
 
   def adam_step(self,X,y):
-    y_pred=self.infer(X)
+    y_pred=self.implementation(X,self.params)
     self.update_fp_w(y,y_pred)
     upd=self.d_l(X,y,self.params)
 
@@ -212,16 +195,6 @@ class bin_optimiser:
         shape=()
       self.params[k]+=amount*normal(self.key,shape=shape)
 
-  def infer(self,x):
-    try:
-      return self.implementation(x,self.params)
-    except JaxRuntimeError as e:
-      print('Could not do vectorised inference...',file=self.outf,flush=True)
-      print('Inferring over a loop...',file=self.outf,flush=True)
-      y_pred=array([self.infer(array([t])) for t in x])
-      print('...done',file=self.outf,flush=True)
-      return y_pred
-
   def run_epoch(self,X_all,y_all,batch_size=32,verbose=True,reports_per_batch=4):
     n_rows=len(y_all)
     n_batches=n_rows//batch_size #May miss 0<=t<32 rows
@@ -240,22 +213,22 @@ class bin_optimiser:
   def bench(self,X,y,outf=None):
     if outf is None:
       outf=self.outf
-    y_pred=self.infer(X)
+    y_pred=self.implementation(X,self.params)
     y_pred_bin=y_pred>self.threshold
     tp=self.b_tp(y,y_pred_bin)
     fp,fn=self.b_fp(y,y_pred_bin),self.b_fn(y,y_pred_bin)
     cts_tp,cts_fp,cts_fn=self.c_tp(y,y_pred),self.c_fp(y,y_pred),self.c_fn(y,y_pred)
-    print(f'[bin,cts] tp: [{tp:.5f},{cts_tp:.5f}], bin/cts:{tp/cts_tp:.5f}',
-          f'\n[bin,cts] fp: [{fp:.5f},{cts_fp:.5f}], bin/cts:{fp/cts_fp:.5f}',
-          f'\n[bin,cts] fn: [{fn:.5f},{cts_fn:.5f}], bin/cts:{fn/cts_fn:.5f}',
-          f'\n[bin,cts,tgt] fp/fn: [{fp/fn:10.5f},',
-          f'{cts_fp/cts_fn:10.5f},{self.beta**2:10.5f}]',
-          f'\nP(+|predicted +)=bin precision~{tp/(tp+fp):.5f}',
-          f'\nP(predicted +|+)=bin recall~{tp/(tp+fn):.5f}',
-          f'\nthreshold,U,V: {self.threshold:.5f},{self.U:.5f},{self.V:.5f}',file=outf,flush=True)
+    print(f'[bin,cts] tp: [{tp:.8f},{cts_tp:.8f}], bin/cts:{tp/cts_tp:.8f}',
+          f'\n[bin,cts] fp: [{fp:.8f},{cts_fp:.8f}], bin/cts:{fp/cts_fp:.8f}',
+          f'\n[bin,cts] fn: [{fn:.8f},{cts_fn:.8f}], bin/cts:{fn/cts_fn:.8f}',
+          f'\ntargetted [fp,fn]: [{self.target_fp:.8f},{self.target_fn:.8f}]',
+          f'\nempirical [fp,fn]: [{self.empirical_fp:.8f},{self.empirical_fn:.8f}]'+\
+          f'\nP(+|predicted +)=bin precision~{tp/(tp+fp):.8f}',
+          f'\nP(predicted +|+)=bin recall~{tp/(tp+fn):.8f}',
+          f'\nGradient update rule: -({self.U:.8f}*dfp+{self.V:.8f}*dfn)',file=outf,flush=True)
 
   def run_epochs(self,X_train,y_train,X_test=None,y_test=None,
-                 batch_size=32,n_epochs=100,verbose=2):
+                 batch_size=32,n_epochs=20,verbose=2):
     for i in range(1,n_epochs+1):
       if verbose: print('Beginning epoch',i,'...',file=self.outf,flush=True)
       self.run_epoch(X_train,y_train,batch_size=batch_size,verbose=verbose==2)
