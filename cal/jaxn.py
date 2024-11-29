@@ -112,29 +112,12 @@ class bin_optimiser:
     self.beta2=beta2
     self.one_minus_beta1=1-beta1
     self.one_minus_beta2=1-beta2
-    self.m=self.init_params(self.input_dims)
-    self.v=0
+    self.m_fp=self.init_params(self.input_dims)
+    self.m_fn=self.init_params(self.input_dims)
+    self.v_fp=0
+    self.v_fn=0
     self.eps=eps
 
-  def d_l(self,X,y,params):
-    ret=dict()
-    dfp=self.d_fp(X,y,params)
-    dfn=self.d_fn(X,y,params)
-
-    #normalising seems to hinder performance.
-    #Could reasons be: wrong norm?  Floating point precision loss?
-    #dfp_frob_sq=self.eps #Frobenius norm of the derivative
-    #dfn_frob_sq=self.eps
-    #for k in dfp:
-    #  dfp_frob_sq+=jsum(dfp[k]**2)
-    #  dfn_frob_sq+=jsum(dfn[k]**2)
-    #for k in dfp:
-    #  ret[k]=U*dfp[k]/(self.beta*dfp_frob_sq)+self.beta*V*dfn[k]/dfn_frob_sq
-
-    for k in dfp:
-      ret[k]=self.U*dfp[k]+self.V*dfn[k]
-
-    return ret
 
   #Assume both y and y_pred are floats but y always 1. or 0.
   def b_tp(self,y,y_pred): return jsum((y==1.)&y_pred)/len(y)
@@ -173,20 +156,32 @@ class bin_optimiser:
     self.U=max(U,self.max_relative_confusion_importance*V)
     self.V=max(V,self.max_relative_confusion_importance*U)
 
+    #Incorporated U and V into adam so need to normalise
+    norm=(self.U**2+self.V**2)**.5
+    self.U/=norm
+    self.V/=norm
+
   def adam_step(self,X,y):
     y_pred=self.implementation(X,self.params)
     self.update_fp_w(y,y_pred)
-    upd=self.d_l(X,y,self.params)
+    dfp=self.d_fp(X,y,self.params)
+    dfn=self.d_fn(X,y,self.params)
 
-    self.v*=self.beta2
-    for k in upd:
-      self.m[k]*=self.beta1
-      self.m[k]+=self.one_minus_beta1*upd[k]
-      self.v+=self.one_minus_beta2*jsum(square(upd[k]))
+    self.v_fp*=self.beta2
+    self.v_fn*=self.beta2
+    for k in dfp:
+      self.m_fp[k]*=self.beta1
+      self.m_fp[k]+=self.one_minus_beta1*dfp[k]
+      self.v_fp+=self.one_minus_beta2*jsum(square(dfp[k]))
 
-    mult=self.lr/(self.eps+sqrt(self.v))
-    for k in upd:
-      self.params[k]-=mult*self.m[k]
+      self.m_fn[k]*=self.beta1
+      self.m_fn[k]+=self.one_minus_beta1*dfn[k]
+      self.v_fn+=self.one_minus_beta2*jsum(square(dfn[k]))
+
+    mult_fp=self.U*self.lr/(self.eps+sqrt(self.v_fp))
+    mult_fn=self.V*self.lr/(self.eps+sqrt(self.v_fn))
+    for k in dfp:
+      self.params[k]-=mult_fp*self.m_fp[k]+mult_fn*self.m_fn[k]
 
   def randomise_params(self,amount=1):
     for k in self.params:
