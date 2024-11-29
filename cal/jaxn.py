@@ -144,8 +144,8 @@ class bin_optimiser:
     batch_target_fp=self.empirical_fp
     batch_target_fn=self.empirical_fn
 
-    fp_too_high=self.empirical_fp>self.target_fp
-    fn_too_high=self.empirical_fn>self.target_fn
+    fp_too_high=self.empirical_fp>self.target_fp*self.tol
+    fn_too_high=self.empirical_fn>self.target_fn*self.tol
 
     if fp_too_high: batch_target_fp=self.tol*self.target_fp
     if fn_too_high: batch_target_fn=self.tol*self.target_fn
@@ -171,15 +171,17 @@ class bin_optimiser:
     self.v_fn*=self.beta2
     for k in dfp:
       self.m_fp[k]*=self.beta1
-      self.m_fp[k]+=self.one_minus_beta1*dfp[k]
+      self.m_fp[k]+=self.U*self.one_minus_beta1*dfp[k]
       self.v_fp+=self.one_minus_beta2*jsum(square(dfp[k]))
 
       self.m_fn[k]*=self.beta1
-      self.m_fn[k]+=self.one_minus_beta1*dfn[k]
+      self.m_fn[k]+=self.V*self.one_minus_beta1*dfn[k]
       self.v_fn+=self.one_minus_beta2*jsum(square(dfn[k]))
 
-    mult_fp=self.U*self.lr/(self.eps+sqrt(self.v_fp))
-    mult_fn=self.V*self.lr/(self.eps+sqrt(self.v_fn))
+    mult_fp=self.lr/(self.eps+sqrt(self.v_fp))
+    mult_fn=self.lr/(self.eps+sqrt(self.v_fn))
+    #mult_fp=self.U*self.lr/(self.eps+sqrt(self.v_fp))
+    #mult_fn=self.V*self.lr/(self.eps+sqrt(self.v_fn))
     for k in dfp:
       self.params[k]-=mult_fp*self.m_fp[k]+mult_fn*self.m_fn[k]
 
@@ -222,7 +224,8 @@ class bin_optimiser:
           f'\nempirical [fp,fn]: [{self.empirical_fp:.8f},{self.empirical_fn:.8f}]'+\
           f'\nP(+|predicted +)=bin precision~{tp/(tp+fp):.8f}',
           f'\nP(predicted +|+)=bin recall~{tp/(tp+fn):.8f}',
-          f'\nGradient update rule: -({self.U:.8f}*dfp+{self.V:.8f}*dfn)',file=outf,flush=True)
+          f'\nGradient update rule: -(adam_dfp({self.U:.8f})+adam_dfn({self.V:.8f}))',
+          file=outf,flush=True)
 
   def run_epochs(self,X_train,y_train,X_test=None,y_test=None,
                  batch_size=32,n_epochs=50,verbose=2):
