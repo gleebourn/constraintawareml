@@ -73,9 +73,10 @@ conv_params,conv_infer=mk_conv()
 
 class bin_optimiser:
 
-  def __init__(self,input_dims,init_params=nlp_params,lr=.001,seed=0,
-               implementation=nlp_infer,beta1=.9,beta2=.999,max_relative_confusion_importance=.001,
-               eps=.00000001,confusion_averaging_rate=.99,target_fp=.01,target_fn=.01,outf=stderr):
+  def __init__(self,input_dims,init_params=nlp_params,lr=.001,seed=0,tol=.5,
+               implementation=nlp_infer,beta1=.9,beta2=.999,eps=.00000001,
+               max_relative_confusion_importance=.001,target_fp=.01,target_fn=.01,
+               confusion_averaging_rate=.99,outf=stderr):
     self.outf=open(outf,'w') if isinstance(outf,str) else outf
     self.key=key(seed)
     self.lr=lr
@@ -98,6 +99,7 @@ class bin_optimiser:
     self.confusion_averaging_rate=confusion_averaging_rate
     self.max_relative_confusion_importance=max_relative_confusion_importance
     self.one_minus_confusion_averaging_rate=1-confusion_averaging_rate
+    self.tol=tol
     self.threshold=.5
     self.empirical_fp=.5
     self.empirical_fn=.5
@@ -162,8 +164,8 @@ class bin_optimiser:
     fp_too_high=self.empirical_fp>self.target_fp
     fn_too_high=self.empirical_fn>self.target_fn
 
-    if fp_too_high: batch_target_fp=self.target_fp
-    if fn_too_high: batch_target_fn=self.target_fn
+    if fp_too_high: batch_target_fp=self.tol*self.target_fp
+    if fn_too_high: batch_target_fn=self.tol*self.target_fn
     elif not(fp_too_high):batch_target_fp=batch_target_fn=0
 
     U=self.empirical_fp-batch_target_fp
