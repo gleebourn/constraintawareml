@@ -34,8 +34,8 @@ def mk_nlp(layer_dims=default_layer_dims):
 
 nlp_params,nlp_infer=mk_nlp()
 
-default_conv_sizes=[5,4,3,3]
-default_dense_dims=[128,64,32]
+default_conv_sizes=[5,3,3]
+default_dense_dims=[64,32]
 def mk_conv(conv_sizes=default_conv_sizes,dense_dims=default_dense_dims,
             activation=sigmoid):
   dense_dims=dense_dims+[1]
@@ -76,7 +76,7 @@ class bin_optimiser:
   def __init__(self,input_dims,init_params=nlp_params,lr=.001,seed=0,tol=.5,
                implementation=nlp_infer,beta1=.9,beta2=.999,eps=.00000001,
                max_relative_confusion_importance=.001,target_fp=.01,target_fn=.01,
-               confusion_averaging_rate=.99,outf=stderr):
+               confusion_averaging_rate=.9999,outf=stderr):
     self.outf=open(outf,'w') if isinstance(outf,str) else outf
     self.key=key(seed)
     self.lr=lr
@@ -169,7 +169,7 @@ class bin_optimiser:
 
     self.v_fp*=self.beta2
     self.v_fn*=self.beta2
-    for k in dfp:
+    for k in dfp: #Q: use U and V here or just to weight current step?
       self.m_fp[k]*=self.beta1
       self.m_fp[k]+=self.U*self.one_minus_beta1*dfp[k]
       self.v_fp+=self.one_minus_beta2*jsum(square(dfp[k]))
@@ -180,8 +180,6 @@ class bin_optimiser:
 
     mult_fp=self.lr/(self.eps+sqrt(self.v_fp))
     mult_fn=self.lr/(self.eps+sqrt(self.v_fn))
-    #mult_fp=self.U*self.lr/(self.eps+sqrt(self.v_fp))
-    #mult_fn=self.V*self.lr/(self.eps+sqrt(self.v_fn))
     for k in dfp:
       self.params[k]-=mult_fp*self.m_fp[k]+mult_fn*self.m_fn[k]
 
