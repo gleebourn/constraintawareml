@@ -76,7 +76,7 @@ class bin_optimiser:
   def __init__(self,input_dims,init_params=nlp_params,lr=.001,seed=0,tol=.5,
                implementation=nlp_infer,beta1=.9,beta2=.999,eps=.00000001,
                max_relative_confusion_importance=.001,target_fp=.01,target_fn=.01,
-               confusion_averaging_rate=.9999,outf=stderr):
+               confusion_averaging_rate=.99,outf=stderr):
     self.outf=open(outf,'w') if isinstance(outf,str) else outf
     self.key=key(seed)
     self.lr=lr
