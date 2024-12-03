@@ -4,18 +4,21 @@ from pathlib import Path
 path.append(str(Path('.').absolute()))
 from os import mkdir
 from os.path import isfile
+
 try:
   mkdir('log')
 except FileExistsError:
   pass
 
 from jax.numpy import array,geomspace
+from numpy import linspace,geomspace
 from cal.jaxn import bin_optimiser,nlp_params,nlp_infer,conv_params,conv_infer
 
 from tensorflow.keras.datasets import mnist
 
-from numpy import float32,reshape
 d=mnist.load_data()
+
+from numpy import float32,reshape
 
 X,y,X_test,y_test=d[0][0].astype(float32),(d[0][1]==0).astype(float32),\
                   d[1][0].astype(float32),(d[1][1]==0).astype(float32)
@@ -40,11 +43,26 @@ elif argv[1]=='conv':
   implementation=conv_infer
   init_params=conv_params
 
-for fp,fn in zip(geomspace(.001,.04,20),geomspace(.04,.001,20)):
+performance=[]
+n_trials=20
+for fp,fn in zip(geomspace(.001,.04,n_trials),geomspace(.04,.001,n_trials)):
   outf_name='log/fp_'+str(fp)+'_fn_'+str(fn)+'.log'
-  if not(isfile(outf_name)):
-    o=bin_optimiser(in_shape,outf=outf_name,
-                    target_fp=fp,target_fn=fn,init_params=init_params,
-                    implementation=implementation)
-    
-    o.run_epochs(X,y,X_test,y_test,verbose=1)
+  #if not(isfile(outf_name)):
+  o=bin_optimiser(in_shape,outf=outf_name,
+                  target_fp=fp,target_fn=fn,init_params=init_params,
+                  implementation=implementation)
+  
+  performance.append((fp,fn)+o.run_epochs(X,y,X_test,y_test,verbose=1))
+  print('Performance by epoch for target fp,fn=,(',fp,',',fn,'):')
+  for a,b in performance[-1][2:4]:
+    print('(',a,',',b,')')
+
+from matplotlib.pyplot import plot,show,cm
+colours=cm.rainbow(linspace(0,1,n_trials))
+
+print('Plotting...')
+for (tgt_fp,tgt_fn,fp,fn),col in zip(performance,colours):
+  plot(tgt_fp,tgt_fn,'o',c=col)
+  plot(fp,fn,c=col)
+
+show()

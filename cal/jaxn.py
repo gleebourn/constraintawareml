@@ -132,7 +132,7 @@ class bin_optimiser:
 
   def c_fn(self,y,y_pred): return jsum(1-y_pred[y==1.])/len(y)
                     
-  def update_fp_w(self,y,y_pseudolikelihoods):
+  def update_weights(self,y,y_pseudolikelihoods):
 
     y_pred_bin=y_pseudolikelihoods>self.threshold
     batch_fp,batch_fn=self.b_fp(y,y_pred_bin),self.b_fn(y,y_pred_bin)
@@ -163,13 +163,13 @@ class bin_optimiser:
 
   def adam_step(self,X,y):
     y_pred=self.implementation(X,self.params)
-    self.update_fp_w(y,y_pred)
+    self.update_weights(y,y_pred)
     dfp=self.d_fp(X,y,self.params)
     dfn=self.d_fn(X,y,self.params)
 
     self.v_fp*=self.beta2
     self.v_fn*=self.beta2
-    for k in dfp: #Q: use U and V here or just to weight current step?
+    for k in dfp: #Q: scale by U and V here or after this for block?
       self.m_fp[k]*=self.beta1
       self.m_fp[k]+=self.U*self.one_minus_beta1*dfp[k]
       self.v_fp+=self.one_minus_beta2*jsum(square(dfp[k]))
@@ -224,9 +224,12 @@ class bin_optimiser:
           f'\nP(predicted +|+)=bin recall~{tp/(tp+fn):.8f}',
           f'\nGradient update rule: -(adam_dfp({self.U:.8f})+adam_dfn({self.V:.8f}))',
           file=outf,flush=True)
+    return fp,fn
 
   def run_epochs(self,X_train,y_train,X_test=None,y_test=None,
                  batch_size=32,n_epochs=50,verbose=2):
+    performance_fp=[]
+    performance_fn=[]
     for i in range(1,n_epochs+1):
       if verbose: print('Beginning epoch',i,'...',file=self.outf,flush=True)
       self.run_epoch(X_train,y_train,batch_size=batch_size,verbose=verbose==2)
@@ -236,5 +239,8 @@ class bin_optimiser:
         self.bench(X_train,y_train)
         if not(X_test is None):
           print('Testing performance:',file=self.outf,flush=True)
-          self.bench(X_test,y_test)
+          p_fp,p_fn=self.bench(X_test,y_test)
+          performance_fp.append(p_fp)
+          performance_fn.append(p_fn)
+    return performance_fp,performance_fn
 

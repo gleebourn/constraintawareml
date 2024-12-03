@@ -57,7 +57,7 @@
 
 \newcommand{\ubar}[1]{\text{\b{$#1$}}}
 
-\title{Controlling $\tfrac{FP}{FN}$ with an adaptive loss function}
+\title{Controlling $FP$ and $F$ with an adaptive loss function}
 \author{George Lee}
 \begin{document}
 \maketitle
@@ -120,9 +120,9 @@ In the case of imbalanced data the precision-recall curve or PRC is pertinent fo
 Similar metrics in the literature include the ``AUC'' and ``ROC''.
 We will be able to generate an analogous metric when varying a threshold in out loss function, so can produce comparable performances of the families of models that we can generate.
 One should however note that for classification on big datasets where we are only interested in $\tfrac{FP}{FN}$ very big or small, such an area isn't the relevant statistic.
-\section{Controlling $\tfrac{FP}{FN}$ with parameterised loss functions}
+\section{An adaptive gradient rule}
 
-In this work we are focused on influencing the behaviour of the model at the training stage - we will largely fix our threshold at $\alpha=\tfrac12$ and make the loss function do the work of forcing a desired $\tfrac{FP}{FN}$ tradeoff.
+In this work we are focused on influencing the behaviour of the model at the training stage - we will largely fix our threshold at $\alpha=\tfrac12$ and make the loss function do the work of forcing a desired tradeoff between $FP$ and $FN$.
 
 We consider families of loss functions depending upon a parameter that constrains the model at the training stage.
 This approach ensures that only the problem of interest is being solved, at the cost of needing to retrain a model if constraints are changed.
@@ -158,13 +158,14 @@ One may readily verify that
 We observe that for a fixed batch, we generally expect that we will make an update to the parameters in the direction spanned by $\partial_{\boldsymbol\theta}\texttt{tp}_{\mathcal F}(\boldsymbol\theta)$ and $\partial_{\boldsymbol\theta}\texttt{tn}_{\mathcal F}(\boldsymbol\theta)$.
 We may write such an update for the batch at time $t$ as
 $$
-\varphi(t)=-U_t\partial_{\boldsymbol\theta}\texttt{fp}_{\mathcal F_t}(\boldsymbol\theta_t)-V_t\partial_{\boldsymbol\theta}\texttt{fn}_{\mathcal F_t}(\boldsymbol\theta_t)=\partial_{\boldsymbol\theta}(-U_t\texttt{fp}_t-V_t\texttt{fn}_t)=\partial_{\boldsymbol\theta}\Phi(\texttt{fp}_t,\texttt{fn}_t,U_t,V_t).
+\delta\boldsymbol\theta_t\propto-U_t\partial_{\boldsymbol\theta}\texttt{fp}_{\mathcal F_t}(\boldsymbol\theta_t)-V_t\partial_{\boldsymbol\theta}\texttt{fn}_{\mathcal F_t}(\boldsymbol\theta_t)=\partial_{\boldsymbol\theta}(-U_t\texttt{fp}_t(\boldsymbol\theta_t)-V_t\texttt{fn}_t(\boldsymbol\theta_t))=\partial_{\boldsymbol\theta}\Phi(\texttt{fp}_t(\boldsymbol\theta_t),\texttt{fn}_t(\boldsymbol\theta_t),U_t,V_t).
 $$
 Here $U_t$ and $V_t>0$ are weights corresponding to the relative amount that the model needs to improve on the rates of false positives and false negatives.
-\lstinputlisting[language=python,basicstyle=\small,caption=A dynamic choice of gradient weights]{snippets/d_l.py}
-The loss function $\Psi$ or equivalently the gradient $\varphi(t)$ may then be taken as the input to stochastic gradient descent or a related method, such as Adam.
+Empirically it is typically a good idea to not use this update rule directly, but to apply some kind of averaged update, such as adam \cite{kingma2017adammethodstochasticoptimization}.
+Correspondingly, we adapt this algorithm to take advantage of the benefits of such an averaging scheme while stll having control over the relative amount that the parameters are updated in favour of false positives or false negatives.
+There is freedom to approach the weight updating scheme in many different ways, and we will introduce an explicit choice below.
+\lstinputlisting[language=python,basicstyle=\small,caption=A stochastic gradient routineandwith binary prediction derived weighting updates]{snippets/adam_step.py}
 
-In the next subsection we consider an existing loss function designed to control $\tfrac{FP}{FN}$, and relate it to this observation about the form of the gradient update.
 \subsection{Comparison with an existing loss function based approach}
 
 In order to control both false positives and false negatives at a specific relative desired rate, one may consider the family of quantities discussed by Rijsbergen in \cite{van1979information}, though here are looking for quantities to minimise so we we modify conventions and use $1-$ the original figure:
@@ -173,7 +174,7 @@ F_\beta=1-(1+\beta^2)\frac{\textbf{precision}\cdot\textbf{recall}}{\beta^2\cdot\
 $$
 This quantity can't be found directly but may be approximated based on a sample, but this won't yield a function to which we can apply gradient descent methods.
 
-swapping out for the surrogates defined above we arrive at wwidetilde is referred to in \cite{lee2021surrogate} as the macro soft $F_\beta$ score, up to the same modification of convention as before:
+swapping out for the surrogates defined above we arrive at what is referred to in \cite{lee2021surrogate} as the macro soft $F_\beta$ score, up to the same modification of convention as before:
 \begin{align*}
 \texttt F_\beta=&1-(1+\beta^2)\frac{\textbf{surrogate precision}\cdot\textbf{surrogate recall}}{\beta^2\cdot\textbf{surrogate precision}+\textbf{surrogate recall}}\\
 =&1-(1+\beta^2)\frac{\texttt{tp}}{\beta^2(\texttt{tp}+\texttt{fn})+\texttt{tp}+\texttt{fp}}\\
@@ -185,7 +186,7 @@ One can see from this that the role of $\lambda$ or equivalently $\beta$ is to c
 Write $\partial_i$ for the partial derivative of a function with respect to its $i$th argument.
 The gradient of this loss then is given by
 $$
-\partial_{\boldsymbol\theta}\texttt{F}_\beta=(\partial_1\Psi)\partial_{\boldsymbol\theta}\texttt{fp}+(\partial_2\Psi)\partial_{\boldsymbol\theta}\texttt{fn}.
+\partial_{\boldsymbol\theta}\texttt{F}_\beta=(\partial_1\Psi)\partial_{\boldsymbol\theta}\texttt{fp}+(\partial_2\Psi)\partial_{\boldsymbol\theta}\texttt{fn}=U_t\partial_{\boldsymbol\theta}\texttt{fp}_t(\boldsymbol\theta_t)+V_t\partial_{\boldsymbol\theta}\texttt{fn}_t(\boldsymbol\theta_t).
 $$
 If we assume that the performance of a model is already good, so that $|y|\gg\texttt{fp}$ and $\texttt{fn}$, then it is easy to verify that we roughly have
 $$
@@ -194,24 +195,14 @@ $$
 in other words, the relative weighting reflects the target ratio of false positives to false negatives.
 This then is an example of a loss that perturbs in a direction in the positive cone spanned by $\partial_{\boldsymbol\theta}\texttt{fp}$ and $\partial_{\boldsymbol\theta}\texttt{fn}$.
 
-In the present work we instead seek to dynamically choose the relative weighting $U_t$ and $V_t$ depending on the performance of the model.
-The magnitude of the gradient is relatively immaterial when passed to Adam, so we take $U_t\in(0,1)$ and $V_t=1-U_t$ for simplicity.
+Here $U_t$ and $V_t$ are determined by this specific choice of loss - whereas this work makes the relative weighting $U_t$ and $V_t$ more clearly depend on the desired reates of false positives and negatives.
+
+One may also investigate the effect that the relative sizes of $\partial_{\boldsymbol\theta}\texttt{fp}$ and $\partial_{\boldsymbol\theta}\texttt{fn}$: for extreme imbalances it seems likely that this may become important, but empirically this rough argument gives some justification for the choices made in the methods used here.
+Note that the use of adam adds some confusion to the analysis by further rescaling the derivatives supplied to it.
 \subsection{An adaptive weighting scheme}
 Here we give a possible method for choice of weights $U_t$ and $V_t$.
-When the model has $\tfrac{FP}{FN}$ much larger than intended, we want $1\approx U_t\gg V_t\approx0$ and vice versa when $\tfrac{FP}{FN}$ is much smaller than intended.
-Fix hyperparameters $\kappa$ and $\nu$ which represent the timescale of the moving average over which $\tfrac{FP}{FN}$ is evaluated and the degree to which the weighting scales accoridng to how off-target the model is.
-Let $\sigma(t)=\tfrac1{1+e^{-t}}$.
-Write $\widetilde{FP}=\tfrac{FP}{\#\mathcal F}$ and similarly for other quantities to denote the respective rates within a batch of size $N$.
-Let $u_0=0$ and at batch $t$ define $U$ and $V$ via the rule
-$$
-u_{t+1}=\frac{\kappa u_t}N+N(1-\kappa)(\tfrac{\widetilde{FP}}\beta-\beta\widetilde{FN})~\text{and}~U_t=\sigma(\nu u_t),V_t=1-U_t.
-$$
-This choice allows the loss function to reflect the binary predictions that the model has been making.
-When there are too many false positives, $u_t>0$ and so $U_t>\tfrac12$ causing the loss to depend more upon the false positive rate, and vice versa in the case of too many false negatives.
-\lstinputlisting[language=python,basicstyle=\small,caption=Loss weight updating subroutine]{snippets/update_fp_w.py}
-This is implemented via a modified adam type gradient descent step.
-In fact, $dl$ needn't be computed by computing a single gradient, but may also take weighted sums of $d\texttt{fp}$ and $d\texttt{fn}$ computed by other means.
-\lstinputlisting[language=python,basicstyle=\small,caption=A stochastic gradient routine with binary prediction derived weighting updates]{snippets/adam_step.py}
+When we are more concerned with reducing false positives, we want $1\approx U_t\gg V_t\approx0$ and vice versa when we are mainly concerned with false negatives.
+\lstinputlisting[language=python,basicstyle=\small,caption=Loss weight updating subroutine]{snippets/update_weights.py}
 \bibliographystyle{plain}
 \bibliography{imbalanced}
 \end{document}

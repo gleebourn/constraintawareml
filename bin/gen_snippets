@@ -28,5 +28,4 @@ def output_source(obj,file_name):
     print(src,file=fd)
 
 output_source(hlp.adam_step,'adam_step')
-output_source(hlp.update_fp_w,'update_fp_w')
-output_source(hlp.d_l,'d_l')
+output_source(hlp.update_weights,'update_weights')
