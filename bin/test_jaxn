@@ -54,7 +54,7 @@ for fp,fn in zip(geomspace(.001,.04,n_trials),geomspace(.04,.001,n_trials)):
   
   performance.append((fp,fn)+o.run_epochs(X,y,X_test,y_test,verbose=1))
   print('Performance by epoch for target fp,fn=,(',fp,',',fn,'):')
-  for a,b in performance[-1][2:4]:
+  for a,b in zip(performance[-1][2],performance[-1][3]):
     print('(',a,',',b,')')
 
 from matplotlib.pyplot import plot,show,cm
