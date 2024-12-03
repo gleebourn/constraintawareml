@@ -1,11 +1,11 @@
+from sys import stderr
+
 from jax import grad,jit
 from jax.nn import sigmoid,relu
 from jax.numpy import dot,vectorize,zeros,square,sqrt,array,logical_not,\
                       sum as jsum
 from jax.scipy.signal import convolve
 from jax.random import normal,key,randint,permutation
-
-from sys import stderr
 
 def rand_batch(X,y,batch_size,key):
   indices=randint(key,batch_size,0,y.shape[0])
@@ -23,7 +23,7 @@ def mk_nlp(layer_dims=default_layer_dims):
     return x[0]
 
   def nlp_init_params(input_dim):
-    ret=dict()
+    ret={}
     for i,out_dim in enumerate(layer_dims):
       ret[('A',i)]=zeros(shape=(out_dim,input_dim))
       ret[('b',i)]=zeros(shape=out_dim)
@@ -56,10 +56,10 @@ def mk_conv(conv_sizes=default_conv_sizes,dense_dims=default_dense_dims,
 
   def conv_init_params(input_dims):#expect square matrix input
     #Calculate the number of nodes of last conv layer
-    ret=dict()
+    ret={}
     for i,dim in enumerate(conv_sizes):
       ret[('K',i)]=zeros(shape=(dim,dim))
-    
+
     input_dim=(input_dims[0]-sum(conv_sizes)+len(conv_sizes))**2
     for i,out_dim in enumerate(dense_dims):
       ret[('A',i)]=zeros(shape=(out_dim,input_dim))
@@ -121,7 +121,7 @@ class bin_optimiser:
 
   #Assume both y and y_pred are floats but y always 1. or 0.
   def b_tp(self,y,y_pred): return jsum((y==1.)&y_pred)/len(y)
-  
+
   def b_fp(self,y,y_pred): return jsum((y==0.)&y_pred)/len(y)
   
   def b_fn(self,y,y_pred): return jsum((y==1.)&logical_not(y_pred))/len(y)
@@ -131,7 +131,7 @@ class bin_optimiser:
   def c_fp(self,y,y_pred): return jsum(y_pred[y==0.])/len(y)
 
   def c_fn(self,y,y_pred): return jsum(1-y_pred[y==1.])/len(y)
-                    
+
   def update_weights(self,y,y_pseudolikelihoods):
 
     y_pred_bin=y_pseudolikelihoods>self.threshold
@@ -149,7 +149,7 @@ class bin_optimiser:
 
     if fp_too_high: batch_target_fp=self.tol*self.target_fp
     if fn_too_high: batch_target_fn=self.tol*self.target_fn
-    elif not(fp_too_high):batch_target_fp=batch_target_fn=0
+    elif not fp_too_high:batch_target_fp=batch_target_fn=0
 
     U=self.empirical_fp-batch_target_fp
     V=self.empirical_fn-batch_target_fn
@@ -202,7 +202,7 @@ class bin_optimiser:
     report_interval=n_batches//reports_per_batch
     for i in range(n_batches):
       self.adam_step(X_all[i:i+batch_size],y_all[i:i+batch_size])
-      if verbose and not(i%report_interval):
+      if verbose and not i%report_interval:
         print(f'Epoch {100*(i/n_batches):.0f}% complete... training performance:',
               file=self.outf,flush=True)
         self.bench(X_all,y_all)
@@ -237,7 +237,7 @@ class bin_optimiser:
         print('...done!',file=self.outf,flush=True)
         print('Training performance:',file=self.outf,flush=True)
         self.bench(X_train,y_train)
-        if not(X_test is None):
+        if not X_test is None:
           print('Testing performance:',file=self.outf,flush=True)
           p_fp,p_fn=self.bench(X_test,y_test)
           performance_fp.append(p_fp)
