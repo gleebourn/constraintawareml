@@ -4,9 +4,19 @@ from pathlib import Path
 path.append(str(Path('.').absolute()))
 from os import mkdir
 from os.path import isfile
+from sys import stderr
+from subprocess import check_output
+
+if check_output(['git','status']).decode('ascii').\
+   split('\n')[-2]!='nothing to commit, working tree clean':
+  print('Head not clean, unable to guarantee reproducibility',
+        file=stderr)
+  exit(1)
 
 try:
-  mkdir('log')
+  log_dir='log_'+check_output(['git','rev-parse','--short','HEAD']).\
+                 decode('ascii')[:-1]
+  mkdir(log_dir)
 except FileExistsError:
   pass
 
@@ -25,7 +35,7 @@ X,y,X_test,y_test=d[0][0].astype(float32),(d[0][1]==0).astype(float32),\
 
 opts=['nlp','conv']
 if len(argv)!=2 or not(argv[1] in opts):
-  print('Usage:',argv[0],opts)
+  print('Usage:',argv[0],opts,file=stderr)
   exit(1)
 
 if argv[1]=='nlp':
@@ -46,7 +56,7 @@ elif argv[1]=='conv':
 performance=[]
 n_trials=20
 for fp,fn in zip(geomspace(.001,.04,n_trials),geomspace(.04,.001,n_trials)):
-  outf_name='log/fp_'+str(fp)+'_fn_'+str(fn)+'.log'
+  outf_name=log_dir+'/fp_'+str(fp)+'_fn_'+str(fn)+'.log'
   #if not(isfile(outf_name)):
   o=bin_optimiser(in_shape,outf=outf_name,
                   target_fp=fp,target_fn=fn,init_params=init_params,
