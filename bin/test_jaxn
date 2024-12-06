@@ -24,6 +24,8 @@ from jax.numpy import array,geomspace
 from numpy import linspace,geomspace
 from cal.jaxn import bin_optimiser,nlp_params,nlp_infer,conv_params,conv_infer
 
+from matplotlib.pyplot import plot,show,cm
+
 from tensorflow.keras.datasets import mnist
 
 d=mnist.load_data()
@@ -69,7 +71,6 @@ for fp,fn in zip(geomspace(.005,.08,n_trials),geomspace(.08,.005,n_trials)):
   plot(fp,fn,c=col)
   plot([tgt_fp,tgt_fp*o.tol],[tgt_fn,tgt_fn*o.tol],'o',c=col,linestyle='dotted')
 
-from matplotlib.pyplot import plot,show,cm
 colours=cm.rainbow(linspace(0,1,n_trials))
 
 show()
