@@ -7,14 +7,18 @@ from os.path import isfile
 from sys import stderr
 from subprocess import check_output
 
+reprod=''
 if check_output(['git','status']).decode('ascii').\
    split('\n')[-2]!='nothing to commit, working tree clean':
   print('Head not clean, unable to guarantee reproducibility',
         file=stderr)
-  exit(1)
+  if len(argv)<=2:
+    exit(1)
+  else:
+    reprod='unrep_'
 
 try:
-  log_dir='log_'+check_output(['git','rev-parse','--short','HEAD']).\
+  log_dir='log_'+reprod+check_output(['git','rev-parse','--short','HEAD']).\
                  decode('ascii')[:-1]
   mkdir(log_dir)
 except FileExistsError:
@@ -36,8 +40,8 @@ X,y,X_test,y_test=d[0][0].astype(float32),(d[0][1]==0).astype(float32),\
                   d[1][0].astype(float32),(d[1][1]==0).astype(float32)
 
 opts=['nlp','conv']
-if len(argv)!=2 or not(argv[1] in opts):
-  print('Usage:',argv[0],opts,file=stderr)
+if len(argv)<2 or not(argv[1] in opts):
+  print('Usage:',argv[0],opts,'[norep]',file=stderr)
   exit(1)
 
 if argv[1]=='nlp':
@@ -57,7 +61,8 @@ elif argv[1]=='conv':
 
 performance=[]
 n_trials=20
-for fp,fn in zip(geomspace(.005,.08,n_trials),geomspace(.08,.005,n_trials)):
+for fp,fn,col in zip(geomspace(.005,.08,n_trials),geomspace(.08,.005,n_trials),
+                     cm.rainbow(linspace(0,1,n_trials))):
   outf_name=log_dir+'/fp_'+str(fp)+'_fn_'+str(fn)+'.log'
   #if not(isfile(outf_name)):
   o=bin_optimiser(in_shape,outf=outf_name,
@@ -71,6 +76,5 @@ for fp,fn in zip(geomspace(.005,.08,n_trials),geomspace(.08,.005,n_trials)):
   plot(fp,fn,c=col)
   plot([tgt_fp,tgt_fp*o.tol],[tgt_fn,tgt_fn*o.tol],'o',c=col,linestyle='dotted')
 
-colours=cm.rainbow(linspace(0,1,n_trials))
 
 show()
