@@ -9,6 +9,8 @@
 *.blg
 *.aux
 *.log
+*.npy
+*.pkl
 *.out
 *.pdf
 b/*

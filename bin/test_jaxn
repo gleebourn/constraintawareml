@@ -6,6 +6,7 @@ from os import mkdir
 from os.path import isfile
 from sys import stderr
 from subprocess import check_output
+from pickle import dump,load
 
 reprod=''
 if check_output(['git','status']).decode('ascii').\
@@ -17,12 +18,18 @@ if check_output(['git','status']).decode('ascii').\
   else:
     reprod='unrep_'
 
-try:
-  log_dir='log_'+reprod+check_output(['git','rev-parse','--short','HEAD']).\
+prep=reprod+check_output(['git','rev-parse','--short','HEAD']).\
                  decode('ascii')[:-1]
-  mkdir(log_dir)
-except FileExistsError:
-  pass
+
+log_dir=prep+'/log/'
+sns_dir=prep+'/sns/'
+
+try: mkdir(prep)
+except FileExistsError: pass
+try: mkdir(log_dir)
+except FileExistsError: pass
+try: mkdir(sns_dir)
+except FileExistsError: pass
 
 from jax.numpy import array,geomspace
 from numpy import linspace,geomspace
@@ -47,8 +54,6 @@ if len(argv)<2 or not(argv[1] in opts):
 if argv[1]=='nlp':
   X=X.reshape((X.shape[0],X.shape[1]*X.shape[2]))
   X_test=X_test.reshape((X_test.shape[0],X_test.shape[1]*X_test.shape[2]))
-print(X.shape)
-print(y.shape)
 
 if argv[1]=='nlp':
   in_shape=X.shape[1]
@@ -61,20 +66,29 @@ elif argv[1]=='conv':
 
 performance=[]
 n_trials=20
+tolerance=.5
 for fp,fn,col in zip(geomspace(.005,.08,n_trials),geomspace(.08,.005,n_trials),
                      cm.rainbow(linspace(0,1,n_trials))):
-  outf_name=log_dir+'/fp_'+str(fp)+'_fn_'+str(fn)+'.log'
-  #if not(isfile(outf_name)):
-  o=bin_optimiser(in_shape,outf=outf_name,
-                  target_fp=fp,target_fn=fn,init_params=init_params,
-                  implementation=implementation)
-  
-  performance.append((fp,fn)+o.run_epochs(X,y,X_test,y_test,verbose=1))
+  f_prep=argv[1]+'_fp_'+str(fp)+'_fn_'+str(fn)
+  log_filename=log_dir+f_prep+'.log'
+  snapshot_dir_name=sns_dir+f_prep+'/'
+  epoch_snapshot_filename=snapshot_dir_name+'epochs.pkl'
+  try:
+    with open(epoch_snapshot_filename,'rb') as f:
+      fp_epochs,fn_epochs=load(f)
+  except FileNotFoundError:
+    o=bin_optimiser(in_shape,logf=log_filename,sns_dir=snapshot_dir_name,
+                    target_fp=fp,target_fn=fn,init_params=init_params,
+                    implementation=implementation,tol=tolerance)
+    
+    fp_epochs,fn_epochs=o.run_epochs(X,y,X_test,y_test,verbose=1)
+    with open(epoch_snapshot_filename,'wb') as f:
+      dump((fp_epochs,fn_epochs),f)
   print('Performance by epoch for target fp,fn=,(',fp,',',fn,'):')
-  for a,b in zip(performance[-1][2],performance[-1][3]):
+  for a,b in zip(fp_epochs,fn_epochs):
     print('(',a,',',b,')')
-  plot(fp,fn,c=col)
-  plot([tgt_fp,tgt_fp*o.tol],[tgt_fn,tgt_fn*o.tol],'o',c=col,linestyle='dotted')
+  plot(fp_epochs,fn_epochs,c=col)
+  plot([fp,fp*tolerance],[fn,fn*tolerance],'o',c=col,linestyle='dotted')
 
 
 show()

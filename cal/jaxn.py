@@ -1,9 +1,10 @@
+from os import mkdir
 from sys import stderr
 
 from jax import grad,jit
 from jax.nn import sigmoid,relu
-from jax.numpy import dot,vectorize,zeros,square,sqrt,array,logical_not,\
-                      sum as jsum
+from jax.numpy import dot,vectorize,zeros,square,sqrt,array,\
+                      logical_not,save,sum as jsum
 from jax.scipy.signal import convolve
 from jax.random import normal,key,randint,permutation
 
@@ -75,14 +76,21 @@ class bin_optimiser:
 
   def __init__(self,input_dims,init_params=nlp_params,lr=.001,seed=0,tol=.5,
                implementation=nlp_infer,beta1=.9,beta2=.999,eps=.00000001,
-               max_relative_confusion_importance=.001,target_fp=.01,target_fn=.01,
-               confusion_averaging_rate=.99,outf=stderr):
-    self.outf=open(outf,'w') if isinstance(outf,str) else outf
+               max_relative_confusion_importance=.001,target_fp=.01,
+               target_fn=.01,confusion_averaging_rate=.99,logf=stderr,
+               sns_dir=None,sns_per_epoch=10):
+    self.logf=open(logf,'w') if isinstance(logf,str) else logf
+
+    self.sns_dir=sns_dir
+    try: mkdir(sns_dir)
+    except FileExistsError: pass
+
     self.key=key(seed)
     self.lr=lr
     self.input_dims=input_dims
     self.init_params=init_params
-    self.params=init_params(input_dims)
+    try: self.params=init_params(input_dims)
+    except TypeError: self.params=init_params
     self.randomise_params()
     self.implementation=implementation
 
@@ -103,6 +111,7 @@ class bin_optimiser:
     self.threshold=.5
     self.empirical_fp=.5
     self.empirical_fn=.5
+    self.n_steps=0
 
     ##Adam params
     #Don't implement time dependent bias removal
@@ -112,8 +121,12 @@ class bin_optimiser:
     self.beta2=beta2
     self.one_minus_beta1=1-beta1
     self.one_minus_beta2=1-beta2
-    self.m_fp=self.init_params(self.input_dims)
-    self.m_fn=self.init_params(self.input_dims)
+    try:
+      self.m_fp=self.init_params(self.input_dims)
+      self.m_fn=self.init_params(self.input_dims)
+    except TypeError:
+      self.m_fp={k:0.*self.init_params[k] for k in self.init_params}
+      self.m_fn={k:0.*self.init_params[k] for k in self.init_params}
     self.v_fp=0
     self.v_fn=0
     self.eps=eps
@@ -182,6 +195,11 @@ class bin_optimiser:
     mult_fn=self.lr/(self.eps+sqrt(self.v_fn))
     for k in dfp:
       self.params[k]-=mult_fp*self.m_fp[k]+mult_fn*self.m_fn[k]
+    
+    self.n_steps+=1
+
+  def save_sns(self):
+    save(self.sns_dir+f'{self.n_steps:09d}',self.params)
 
   def randomise_params(self,amount=1):
     for k in self.params:
@@ -192,24 +210,28 @@ class bin_optimiser:
         shape=()
       self.params[k]+=amount*normal(self.key,shape=shape)
 
-  def run_epoch(self,X_all,y_all,batch_size=32,verbose=True,reports_per_batch=4):
+  def run_epoch(self,X_all,y_all,batch_size=32,verbose=True,
+                n_reports=4,n_sns=10):
     n_rows=len(y_all)
     n_batches=n_rows//batch_size #May miss 0<=t<32 rows
 
     perm=permutation(self.key,n_rows)
     X_all,y_all=X_all[perm],y_all[perm]
 
-    report_interval=n_batches//reports_per_batch
+    report_interval=n_batches//n_reports
+    sns_interval=n_batches//n_sns
     for i in range(n_batches):
       self.adam_step(X_all[i:i+batch_size],y_all[i:i+batch_size])
       if verbose and not i%report_interval:
         print(f'Epoch {100*(i/n_batches):.0f}% complete... training performance:',
-              file=self.outf,flush=True)
+              file=self.logf,flush=True)
         self.bench(X_all,y_all)
+      if not i%sns_interval:
+        self.save_sns()
 
-  def bench(self,X,y,outf=None):
-    if outf is None:
-      outf=self.outf
+  def bench(self,X,y,logf=None):
+    if logf is None:
+      logf=self.logf
     y_pred=self.implementation(X,self.params)
     y_pred_bin=y_pred>self.threshold
     tp=self.b_tp(y,y_pred_bin)
@@ -223,7 +245,7 @@ class bin_optimiser:
           f'\nP(+|predicted +)=bin precision~{tp/(tp+fp):.8f}',
           f'\nP(predicted +|+)=bin recall~{tp/(tp+fn):.8f}',
           f'\nGradient update rule: -(adam_dfp({self.U:.8f})+adam_dfn({self.V:.8f}))',
-          file=outf,flush=True)
+          file=logf,flush=True)
     return fp,fn
 
   def run_epochs(self,X_train,y_train,X_test=None,y_test=None,
@@ -231,16 +253,18 @@ class bin_optimiser:
     performance_fp=[]
     performance_fn=[]
     for i in range(1,n_epochs+1):
-      if verbose: print('Beginning epoch',i,'...',file=self.outf,flush=True)
+      if verbose: print('Beginning epoch',i,'...',file=self.logf,flush=True)
       self.run_epoch(X_train,y_train,batch_size=batch_size,verbose=verbose==2)
       if verbose:
-        print('...done!',file=self.outf,flush=True)
-        print('Training performance:',file=self.outf,flush=True)
+        print('...done!',file=self.logf,flush=True)
+        print('Training performance:',file=self.logf,flush=True)
         self.bench(X_train,y_train)
         if not X_test is None:
-          print('Testing performance:',file=self.outf,flush=True)
+          print('Testing performance:',file=self.logf,flush=True)
           p_fp,p_fn=self.bench(X_test,y_test)
           performance_fp.append(p_fp)
           performance_fn.append(p_fn)
+    print('Completed',n_epochs,'epochs!',file=self.logf,flush=True)
+    print(':)',file=self.logf,flush=True)
     return performance_fp,performance_fn
 
