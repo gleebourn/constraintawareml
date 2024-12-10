@@ -4,14 +4,33 @@ from pathlib import Path
 path.append(str(Path('.').absolute()))
 from jax.random import normal,key,split
 from jax.numpy import sum as jsm
-s=key(80085)
+if len(argv)>1:
+  s=key(int(arv[1]))
+else:
+  from secrets import token_bytes
+  s=key(int.from_bytes(token_bytes(4)))
 from cal.jaxn import bin_optimiser
 
 in_dim=8
 
-target=bin_optimiser(in_dim,seed=s)
-s=split(s)[0]
-approximant=bin_optimiser(in_dim,seed=s)
+s,t=split(s)
+target=bin_optimiser(in_dim,seed=t)
+
+target_p=.1
+tuning_size=100*int(target_p**-2)
+s,t=split(s)
+x=normal(t,(tuning_size,in_dim))
+y=target.implementation(x,target.params)
+y=y.sort()
+print(y)
+target.threshold=y[int((1-target_p)*tuning_size)]
+print(target.threshold)
+
+
+
+s,t=split(s)
+approximant=bin_optimiser(in_dim,seed=t)
+
 
 n_steps=10000000
 batch_size=32
@@ -19,17 +38,29 @@ walk_rate=.001
 avg=32
 avg_rate=.99
 one_minus_avg_rate=1-avg_rate
+fp=0
+fn=0
+tp=0
+tn=0
 for i in range(n_steps):
-  x=normal(s,(batch_size,in_dim))
-  s=split(s)[0]
+  s,t=split(s)
+  x=normal(t,(batch_size,in_dim))
   y=target.inference(x)
   y_pred=approximant.adam_step(x,y)>approximant.threshold
-  l=jsm(abs(1.*y-1.*y_pred))
-  avg*=avg_rate
-  avg+=one_minus_avg_rate*l
+  tp+=jsm(y&y_pred)
+  tn+=jsm(~(y|y_pred))
+  fp+=jsm((~y)&y_pred)
+  fn+=jsm(y&(~y_pred))
   if not(i%100):
+    t=fp+fn+tp+tn
     print()
     print('y       :',''.join([str(1*i) for i in y]))
     print('y_pred  :',''.join([str(1*i) for i in y_pred]))
-    print('bin loss:',l)
-    print('avg loss:',avg)
+    print('tp rate :',tp/t)
+    print('tn rate :',tn/t)
+    print('fp rate :',fp/t)
+    print('fn rate :',fn/t)
+    print('tp      :',tp)
+    print('tn      :',tn)
+    print('fp      :',fp)
+    print('fn      :',fn)

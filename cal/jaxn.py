@@ -87,7 +87,7 @@ class bin_optimiser:
       except FileExistsError: pass
 
     try: self.key=key(seed)
-    except TypeError: self.key=seed
+    except TypeError: self.key=split(seed)[1]
     self.lr=lr
     self.input_dims=input_dims
     self.init_params=init_params
