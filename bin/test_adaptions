@@ -1,0 +1,35 @@
+#!/usr/bin/env python
+from sys import path,argv,stderr
+from pathlib import Path
+path.append(str(Path('.').absolute()))
+from jax.random import normal,key,split
+from jax.numpy import sum as jsm
+s=key(80085)
+from cal.jaxn import bin_optimiser
+
+in_dim=8
+
+target=bin_optimiser(in_dim,seed=s)
+s=split(s)[0]
+approximant=bin_optimiser(in_dim,seed=s)
+
+n_steps=10000000
+batch_size=32
+walk_rate=.001
+avg=32
+avg_rate=.99
+one_minus_avg_rate=1-avg_rate
+for i in range(n_steps):
+  x=normal(s,(batch_size,in_dim))
+  s=split(s)[0]
+  y=target.inference(x)
+  y_pred=approximant.adam_step(x,y)>approximant.threshold
+  l=jsm(abs(1.*y-1.*y_pred))
+  avg*=avg_rate
+  avg+=one_minus_avg_rate*l
+  if not(i%100):
+    print()
+    print('y       :',''.join([str(1*i) for i in y]))
+    print('y_pred  :',''.join([str(1*i) for i in y_pred]))
+    print('bin loss:',l)
+    print('avg loss:',avg)

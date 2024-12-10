@@ -6,7 +6,7 @@ from jax.nn import sigmoid,relu
 from jax.numpy import dot,vectorize,zeros,square,sqrt,array,\
                       logical_not,save,sum as jsum
 from jax.scipy.signal import convolve
-from jax.random import normal,key,randint,permutation
+from jax.random import normal,key,randint,permutation,split
 
 def rand_batch(X,y,batch_size,key):
   indices=randint(key,batch_size,0,y.shape[0])
@@ -82,10 +82,12 @@ class bin_optimiser:
     self.logf=open(logf,'w') if isinstance(logf,str) else logf
 
     self.sns_dir=sns_dir
-    try: mkdir(sns_dir)
-    except FileExistsError: pass
+    if not sns_dir is None:
+      try: mkdir(sns_dir)
+      except FileExistsError: pass
 
-    self.key=key(seed)
+    try: self.key=key(seed)
+    except TypeError: self.key=seed
     self.lr=lr
     self.input_dims=input_dims
     self.init_params=init_params
@@ -197,9 +199,11 @@ class bin_optimiser:
       self.params[k]-=mult_fp*self.m_fp[k]+mult_fn*self.m_fn[k]
     
     self.n_steps+=1
+    return y_pred
 
   def save_sns(self):
-    save(self.sns_dir+f'{self.n_steps:09d}',self.params)
+    if not self.sns_dir is None:
+      save(self.sns_dir+f'{self.n_steps:09d}',self.params)
 
   def randomise_params(self,amount=1):
     for k in self.params:
@@ -209,6 +213,7 @@ class bin_optimiser:
       except AttributeError as e:
         shape=()
       self.params[k]+=amount*normal(self.key,shape=shape)
+      self.key=split(self.key)[0]
 
   def run_epoch(self,X_all,y_all,batch_size=32,verbose=True,
                 n_reports=4,n_sns=10):
@@ -216,6 +221,7 @@ class bin_optimiser:
     n_batches=n_rows//batch_size #May miss 0<=t<32 rows
 
     perm=permutation(self.key,n_rows)
+    self.key=split(self.key)[0]
     X_all,y_all=X_all[perm],y_all[perm]
 
     report_interval=n_batches//n_reports
@@ -267,4 +273,7 @@ class bin_optimiser:
     print('Completed',n_epochs,'epochs!',file=self.logf,flush=True)
     print(':)',file=self.logf,flush=True)
     return performance_fp,performance_fn
+
+  def inference(self,X):
+    return self.implementation(X,self.params)>self.threshold
 
