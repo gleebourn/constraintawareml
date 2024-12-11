@@ -2,65 +2,122 @@
 from sys import path,argv,stderr
 from pathlib import Path
 path.append(str(Path('.').absolute()))
+from pickle import load,dump
+
 from jax.random import normal,key,split
 from jax.numpy import sum as jsm
+
+from secrets import token_bytes
+s=key(int.from_bytes(token_bytes(4)))
+
 if len(argv)>1:
-  s=key(int(arv[1]))
-else:
-  from secrets import token_bytes
-  s=key(int.from_bytes(token_bytes(4)))
-from cal.jaxn import bin_optimiser
+  try:
+    s=key(int(argv[1]))
+  except:
+    pass
 
-in_dim=8
+from cal.jaxn import bin_optimiser,mk_nlp
 
-s,t=split(s)
-target=bin_optimiser(in_dim,seed=t)
-
+in_dim=4
 target_p=.1
-tuning_size=100*int(target_p**-2)
-s,t=split(s)
-x=normal(t,(tuning_size,in_dim))
-y=target.implementation(x,target.params)
-y=y.sort()
-print(y)
-target.threshold=y[int((1-target_p)*tuning_size)]
-print(target.threshold)
-
-
-
-s,t=split(s)
-approximant=bin_optimiser(in_dim,seed=t)
-
-
 n_steps=10000000
 batch_size=32
-walk_rate=.001
-avg=32
-avg_rate=.99
-one_minus_avg_rate=1-avg_rate
-fp=0
-fn=0
-tp=0
-tn=0
+sns_interval=1000
+print_report_interval=100
+N=100
+ld=[256,16]
+target_move_interval=10000000000
+walk_rate=0.#0.0001/64*64#.0001
+
+#want to be able to estimate rates well, even if O(p^2), eg if
+#output is independent, as expected with random initialisation
+one_minus_avg_rate=batch_size*target_p**3/N
+avg_rate=1-one_minus_avg_rate
+tuning_size=N*int(target_p**-3)
+
+nlp_params,nlp_infer=mk_nlp(layer_dims=ld)
+
+s,t=split(s)
+
+target=bin_optimiser(in_dim,seed=s,init_params=nlp_params,
+                     implementation=nlp_infer)
+
+def recalc_threshold(s):
+  x=normal(s,(tuning_size,in_dim))
+  y=target.implementation(x,target.params)
+  target.threshold=y.sort()[int((1-target_p)*tuning_size)]
+
+approximant=bin_optimiser(in_dim,seed=t,init_params=nlp_params,
+                          implementation=nlp_infer)
+if len(argv)>2:
+  try:
+    with open(argv[2],'rb') as f:
+      ((target.params,approximant.params,target.threshold),
+       (tp,tn,fp,fn,tpr,tnr,fpr,fnr))=load(f)
+  except FileNotFoundError:
+    tp=0
+    tn=0
+    fp=0
+    fn=0
+    tpr=target_p**2
+    fpr=fnr=target_p*(1-target_p)
+    tnr=1-tpr-fnr-fpr
+
+    recalc_threshold(t)
+    print('Target network threshold:',target.threshold)
+
 for i in range(n_steps):
   s,t=split(s)
-  x=normal(t,(batch_size,in_dim))
+
+  x=normal(s,(batch_size,in_dim))
   y=target.inference(x)
   y_pred=approximant.adam_step(x,y)>approximant.threshold
-  tp+=jsm(y&y_pred)
-  tn+=jsm(~(y|y_pred))
-  fp+=jsm((~y)&y_pred)
-  fn+=jsm(y&(~y_pred))
-  if not(i%100):
-    t=fp+fn+tp+tn
+
+  if not(i%target_move_interval):
+    target.randomise_params(amount=walk_rate)
+    recalc_threshold(t)
+
+  tpb=jsm(y&y_pred)
+  tnb=jsm(~(y|y_pred))
+  fpb=jsm((~y)&y_pred)
+  fnb=jsm(y&(~y_pred))
+  tp+=tpb
+  tn+=tnb
+  fp+=fpb
+  fn+=fnb
+  tpr=avg_rate*tpr+one_minus_avg_rate*tpb/batch_size
+  tnr=avg_rate*tnr+one_minus_avg_rate*tnb/batch_size
+  fpr=avg_rate*fpr+one_minus_avg_rate*fpb/batch_size
+  fnr=avg_rate*fnr+one_minus_avg_rate*fnb/batch_size
+  if not(i%print_report_interval):
+    tot=fp+fn+tp+tn
     print()
-    print('y       :',''.join([str(1*i) for i in y]))
-    print('y_pred  :',''.join([str(1*i) for i in y_pred]))
-    print('tp rate :',tp/t)
-    print('tn rate :',tn/t)
-    print('fp rate :',fp/t)
-    print('fn rate :',fn/t)
-    print('tp      :',tp)
-    print('tn      :',tn)
-    print('fp      :',fp)
-    print('fn      :',fn)
+    print()
+    print('y                            :',''.join([str(1*i) for i in y]))
+    print('y_pred                       :',''.join([str(1*i) for i in y_pred]))
+    print()
+    print('tp                           :',tp)
+    print('total                 tp rate:',tp/tot)
+    print('local                 tp rate:',tpr)
+    print()
+    print('tn                           :',tn)
+    print('total                 tn rate:',tn/tot)
+    print('local                 tn rate:',tnr)
+    print()
+    print('fp                           :',fp)
+    print('total                 fp rate:',fp/tot)
+    print('local                 fp rate:',fpr)
+    print('approximant target    fp rate:',approximant.target_fp)
+    print('approximant empirical fp rate:',approximant.empirical_fp)
+    print('approximant U                :',approximant.U)
+    print()
+    print('fn                           :',fn)
+    print('total                 fn rate:',fn/tot)
+    print('local                 fn rate:',fnr)
+    print('approximant target    fn rate:',approximant.target_fn)
+    print('approximant empirical fn rate:',approximant.empirical_fn)
+    print('approximant V                :',approximant.V)
+  if not(i%sns_interval):
+    with open(argv[2],'wb') as f:
+      dump(((target.params,approximant.params,target.threshold),
+            (tp,tn,fp,fn,tpr,tnr,fpr,fnr)),f)

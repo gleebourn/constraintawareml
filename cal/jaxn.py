@@ -156,25 +156,33 @@ class bin_optimiser:
     self.empirical_fp+=self.one_minus_confusion_averaging_rate*batch_fp
     self.empirical_fn+=self.one_minus_confusion_averaging_rate*batch_fn
 
+
+    fp_ok=self.empirical_fp<self.target_fp*self.tol
+    fn_ok=self.empirical_fn<self.target_fn*self.tol
+
     batch_target_fp=self.empirical_fp
     batch_target_fn=self.empirical_fn
+    if fp_ok:
+      if fn_ok:
+        batch_target_fp=batch_target_fn=0
+      else:
+        batch_target_fn=0
+    else:
+      batch_target_fp=0
+      if not fn_ok:
+        batch_target_fn=0
 
-    fp_too_high=self.empirical_fp>self.target_fp*self.tol
-    fn_too_high=self.empirical_fn>self.target_fn*self.tol
 
-    if fp_too_high: batch_target_fp=self.tol*self.target_fp
-    if fn_too_high: batch_target_fn=self.tol*self.target_fn
-    elif not fp_too_high:batch_target_fp=batch_target_fn=0
 
     U=self.empirical_fp-batch_target_fp
     V=self.empirical_fn-batch_target_fn
     self.U=max(U,self.max_relative_confusion_importance*V)
     self.V=max(V,self.max_relative_confusion_importance*U)
 
-    #Incorporated U and V into adam so need to normalise
-    norm=(self.U**2+self.V**2)**.5
-    self.U/=norm
-    self.V/=norm
+    ##Incorporated U and V into adam so need to normalise
+    #norm=(self.U**2+self.V**2)**.5
+    #self.U/=norm
+    #self.V/=norm
 
   def adam_step(self,X,y):
     y_pred=self.implementation(X,self.params)
