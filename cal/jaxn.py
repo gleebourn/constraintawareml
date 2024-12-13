@@ -12,7 +12,7 @@ def rand_batch(X,y,batch_size,key):
   indices=randint(key,batch_size,0,y.shape[0])
   return X[indices],y[indices]
 
-default_layer_dims=[32,32]
+default_layer_dims=[32,32]#[4096]#[32,32]
 def mk_nlp(layer_dims=default_layer_dims):
   layer_dims=layer_dims+[1]
   l=len(layer_dims)
@@ -20,10 +20,10 @@ def mk_nlp(layer_dims=default_layer_dims):
   @jit
   def nlp_infer(x,params):
     for i in range(l):
-      x=sigmoid(dot(params[('A',i)],x)+params[('b',i)])
-    return x[0]
+      x=sigmoid(dot(params[('A',i)],x)+params[('b',i)])-.5
+    return x[0]+.5
 
-  def nlp_init_params(input_dim):
+  def nlp_make_params(input_dim):
     ret={}
     for i,out_dim in enumerate(layer_dims):
       ret[('A',i)]=zeros(shape=(out_dim,input_dim))
@@ -31,12 +31,12 @@ def mk_nlp(layer_dims=default_layer_dims):
       input_dim=out_dim
     return ret
 
-  return nlp_init_params,vectorize(nlp_infer,excluded=[1],signature='(n)->()')
+  return nlp_make_params,vectorize(nlp_infer,excluded=[1],signature='(n)->()')
 
 nlp_params,nlp_infer=mk_nlp()
 
 default_conv_sizes=[5,3,3]
-default_dense_dims=[64,32]
+default_dense_dims=[256,32]
 def mk_conv(conv_sizes=default_conv_sizes,dense_dims=default_dense_dims,
             activation=sigmoid):
   dense_dims=dense_dims+[1]
@@ -55,7 +55,7 @@ def mk_conv(conv_sizes=default_conv_sizes,dense_dims=default_dense_dims,
       i+=1
     return x[0]
 
-  def conv_init_params(input_dims):#expect square matrix input
+  def conv_make_params(input_dims):#expect square matrix input
     #Calculate the number of nodes of last conv layer
     ret={}
     for i,dim in enumerate(conv_sizes):
@@ -68,17 +68,17 @@ def mk_conv(conv_sizes=default_conv_sizes,dense_dims=default_dense_dims,
       input_dim=out_dim
     return ret
 
-  return conv_init_params,vectorize(conv_infer,excluded=[1],signature='(n,n)->()')
+  return conv_make_params,vectorize(conv_infer,excluded=[1],signature='(n,n)->()')
 
 conv_params,conv_infer=mk_conv()
 
 class bin_optimiser:
 
-  def __init__(self,input_dims,init_params=nlp_params,lr=.001,seed=0,tol=.5,
-               implementation=nlp_infer,beta1=.9,beta2=.999,eps=.00000001,
-               max_relative_confusion_importance=.001,target_fp=.01,
-               target_fn=.01,confusion_averaging_rate=.99,logf=stderr,
-               sns_dir=None,sns_per_epoch=10):
+  def __init__(self,input_dims,make_params=nlp_params,lr=.00001,seed=0,tol=.5,
+               implementation=nlp_infer,beta1=.9,beta2=.999,eps=.00000001,batch_size=32,
+               max_relative_confusion_importance=.0000001,target_fp=.01,
+               target_fn=.01,logf=stderr,threshold=.5,
+               sns_dir=None,sns_per_epoch=10,params=None,empirical_fp=None,empirical_fn=None):
     self.logf=open(logf,'w') if isinstance(logf,str) else logf
 
     self.sns_dir=sns_dir
@@ -90,11 +90,22 @@ class bin_optimiser:
     except TypeError: self.key=split(seed)[1]
     self.lr=lr
     self.input_dims=input_dims
-    self.init_params=init_params
-    try: self.params=init_params(input_dims)
-    except TypeError: self.params=init_params
-    self.randomise_params()
+    self.make_params=make_params
+    if params:
+      self.params=params
+    else:
+      self.params=make_params(input_dims)
+      self.randomise_params()
     self.implementation=implementation
+
+    if empirical_fp:
+      self.empirical_fp=empirical_fp
+    else:
+      self.empirical_fp=.25
+    if empirical_fn:
+      self.empirical_fn=empirical_fn
+    else:
+      self.empirical_fn=.25
 
     def _c_fp(X,y,params): return self.c_fp(y,implementation(X,params))
 
@@ -106,14 +117,13 @@ class bin_optimiser:
     self.target_fn=target_fn
     self.beta_sq=target_fp/target_fn
     self.beta=self.beta_sq**.5
-    self.confusion_averaging_rate=confusion_averaging_rate
+    self.one_minus_confusion_averaging_rate=batch_size*min(target_fp,target_fn)
+    self.confusion_averaging_rate=1-self.one_minus_confusion_averaging_rate
     self.max_relative_confusion_importance=max_relative_confusion_importance
-    self.one_minus_confusion_averaging_rate=1-confusion_averaging_rate
     self.tol=tol
-    self.threshold=.5
-    self.empirical_fp=.5
-    self.empirical_fn=.5
+    self.threshold=threshold
     self.n_steps=0
+    self.batch_size=batch_size
 
     ##Adam params
     #Don't implement time dependent bias removal
@@ -124,15 +134,14 @@ class bin_optimiser:
     self.one_minus_beta1=1-beta1
     self.one_minus_beta2=1-beta2
     try:
-      self.m_fp=self.init_params(self.input_dims)
-      self.m_fn=self.init_params(self.input_dims)
+      self.m_fp=self.make_params(self.input_dims)
+      self.m_fn=self.make_params(self.input_dims)
     except TypeError:
-      self.m_fp={k:0.*self.init_params[k] for k in self.init_params}
-      self.m_fn={k:0.*self.init_params[k] for k in self.init_params}
+      self.m_fp={k:0.*self.make_params[k] for k in self.make_params}
+      self.m_fn={k:0.*self.make_params[k] for k in self.make_params}
     self.v_fp=0
     self.v_fn=0
     self.eps=eps
-
 
   #Assume both y and y_pred are floats but y always 1. or 0.
   def b_tp(self,y,y_pred): return jsum((y==1.)&y_pred)/len(y)
@@ -156,26 +165,23 @@ class bin_optimiser:
     self.empirical_fp+=self.one_minus_confusion_averaging_rate*batch_fp
     self.empirical_fn+=self.one_minus_confusion_averaging_rate*batch_fn
 
-
-    fp_ok=self.empirical_fp<self.target_fp*self.tol
-    fn_ok=self.empirical_fn<self.target_fn*self.tol
+    self.fp_ok=self.empirical_fp<self.target_fp*self.tol
+    self.fn_ok=self.empirical_fn<self.target_fn*self.tol
 
     batch_target_fp=self.empirical_fp
     batch_target_fn=self.empirical_fn
-    if fp_ok:
-      if fn_ok:
+    if self.fp_ok:
+      if self.fn_ok:
         batch_target_fp=batch_target_fn=0
       else:
         batch_target_fn=0
     else:
       batch_target_fp=0
-      if not fn_ok:
+      if not self.fn_ok:
         batch_target_fn=0
 
-
-
-    U=self.empirical_fp-batch_target_fp
-    V=self.empirical_fn-batch_target_fn
+    U=(self.empirical_fp-batch_target_fp)/self.target_fp
+    V=(self.empirical_fn-batch_target_fn)/self.target_fn
     self.U=max(U,self.max_relative_confusion_importance*V)
     self.V=max(V,self.max_relative_confusion_importance*U)
 
@@ -207,7 +213,7 @@ class bin_optimiser:
       self.params[k]-=mult_fp*self.m_fp[k]+mult_fn*self.m_fn[k]
     
     self.n_steps+=1
-    return y_pred
+    return y_pred>self.threshold
 
   def save_sns(self):
     if not self.sns_dir is None:
@@ -221,21 +227,23 @@ class bin_optimiser:
       except AttributeError as e:
         shape=()
       self.params[k]+=amount*normal(self.key,shape=shape)
+      #if self.params[k].ndim==2:
+      #  self.params[k]/=self.params[k].shape[1]**.5
       self.key=split(self.key)[0]
 
-  def run_epoch(self,X_all,y_all,batch_size=32,verbose=True,
-                n_reports=4,n_sns=10):
+  def run_epoch(self,X_all,y_all,verbose=True,
+                n_reports=4,n_sns=0):
     n_rows=len(y_all)
-    n_batches=n_rows//batch_size #May miss 0<=t<32 rows
+    n_batches=n_rows//self.batch_size #May miss 0<=t<32 rows
 
     perm=permutation(self.key,n_rows)
     self.key=split(self.key)[0]
     X_all,y_all=X_all[perm],y_all[perm]
 
     report_interval=n_batches//n_reports
-    sns_interval=n_batches//n_sns
+    sns_interval=n_batches//(n_sns+1)
     for i in range(n_batches):
-      self.adam_step(X_all[i:i+batch_size],y_all[i:i+batch_size])
+      self.adam_step(X_all[i:i+self.batch_size],y_all[i:i+self.batch_size])
       if verbose and not i%report_interval:
         print(f'Epoch {100*(i/n_batches):.0f}% complete... training performance:',
               file=self.logf,flush=True)
@@ -262,13 +270,12 @@ class bin_optimiser:
           file=logf,flush=True)
     return fp,fn
 
-  def run_epochs(self,X_train,y_train,X_test=None,y_test=None,
-                 batch_size=32,n_epochs=50,verbose=2):
+  def run_epochs(self,X_train,y_train,X_test=None,y_test=None,n_epochs=50,verbose=2):
     performance_fp=[]
     performance_fn=[]
     for i in range(1,n_epochs+1):
       if verbose: print('Beginning epoch',i,'...',file=self.logf,flush=True)
-      self.run_epoch(X_train,y_train,batch_size=batch_size,verbose=verbose==2)
+      self.run_epoch(X_train,y_train,verbose=verbose==2)
       if verbose:
         print('...done!',file=self.logf,flush=True)
         print('Training performance:',file=self.logf,flush=True)

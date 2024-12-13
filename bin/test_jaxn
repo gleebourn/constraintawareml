@@ -58,11 +58,11 @@ if argv[1]=='nlp':
 if argv[1]=='nlp':
   in_shape=X.shape[1]
   implementation=nlp_infer
-  init_params=nlp_params
+  make_params=nlp_params
 elif argv[1]=='conv':
   in_shape=X[0].shape
   implementation=conv_infer
-  init_params=conv_params
+  make_params=conv_params
 
 performance=[]
 n_trials=20
@@ -78,7 +78,7 @@ for fp,fn,col in zip(geomspace(.005,.08,n_trials),geomspace(.08,.005,n_trials),
       fp_epochs,fn_epochs=load(f)
   except FileNotFoundError:
     o=bin_optimiser(in_shape,logf=log_filename,sns_dir=snapshot_dir_name,
-                    target_fp=fp,target_fn=fn,init_params=init_params,
+                    target_fp=fp,target_fn=fn,make_params=make_params,
                     implementation=implementation,tol=tolerance)
     
     fp_epochs,fn_epochs=o.run_epochs(X,y,X_test,y_test,verbose=1)
