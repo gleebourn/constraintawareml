@@ -8,6 +8,8 @@ from jax.numpy import dot,vectorize,zeros,square,sqrt,array,\
 from jax.scipy.signal import convolve
 from jax.random import normal,key,randint,permutation,split
 
+#sigmoid=lambda x:relu(1-relu(1-x)) #lazy!!
+
 def rand_batch(X,y,batch_size,key):
   indices=randint(key,batch_size,0,y.shape[0])
   return X[indices],y[indices]
@@ -19,8 +21,8 @@ def mk_nlp(layer_dims=default_layer_dims):
 
   @jit
   def nlp_infer(x,params):
-    for i in range(l):
-      x=sigmoid(dot(params[('A',i)],x)+params[('b',i)])-.5
+    for i in range(l): ##the subtraction of .5 means we "expect the input to have mean 0"
+      x=sigmoid(dot(params[('A',i)],x)+params[('b',i)])-.5 #Otherwise: Wignerian behaviour!
     return x[0]+.5
 
   def nlp_make_params(input_dim):
@@ -227,8 +229,12 @@ class bin_optimiser:
       except AttributeError as e:
         shape=()
       self.params[k]+=amount*normal(self.key,shape=shape)
-      #if self.params[k].ndim==2:
-      #  self.params[k]/=self.params[k].shape[1]**.5
+      if self.params[k].ndim==2:#Trying to get free field...
+        dim=min(self.params[k].shape)
+        
+        self.params[k]*=10*self.params[k].shape[1]**-.5
+        #for i in range(dim):
+        #  self.params[k].at[i,i].set(self.params[k][i,i]+1.)
       self.key=split(self.key)[0]
 
   def run_epoch(self,X_all,y_all,verbose=True,

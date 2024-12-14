@@ -6,8 +6,11 @@ from pickle import load,dump
 from types import SimpleNamespace
 from select import select
 
+from matplotlib.pyplot import plot,scatter,legend,show,axhline,hist
+
 from jax.random import normal,key,split
-from jax.numpy import array,linspace,sum as jsm,max as jmx
+from jax.numpy import array,linspace,log,sum as jsm,max as jmx
+from jax.scipy.stats.norm import pdf
 
 if len(argv)!=3:
   print('Usage:',argv[0],'[random/N] [output file]',file=stderr) 
@@ -20,6 +23,8 @@ except:
   s=key(int.from_bytes(token_bytes(4)))
 
 from cal.jaxn import bin_optimiser,mk_nlp
+
+eps=1e-8
 
 try:
   with open(argv[2],'rb') as f:
@@ -37,7 +42,16 @@ except FileNotFoundError:
   m.sns_interval=1000
   m.print_report_interval=100
   m.N=100
-  m.ld=[2187, 1458, 972, 648, 432, 288, 192, 128]#[1024,1024]
+  #m.ld=[2187, 1458]#, 972, 648, 432, 288, 192, 128]#[1024,1024]
+  #m.ld=[128,128,128,128,128,128,128,128,128,128,128]
+  #m.ld=[2**i*3**j for i,j in zip(range(8),reversed(range(8)))]
+  width=16
+  depth=20
+  m.target_ld=[width]*depth#[int(16*(2**(-i/1000))) for i in range(1000)]
+  m.approximant_ld=[width]*depth#[int(16*(2**(-i/1000))) for i in range(1000)]
+  #m.ld=[1024,1024]
+  print('target layer dimensions:',m.target_ld)
+  print('approximant layer dimensions:',m.approximant_ld)
   m.target_move_interval=10000000000
   m.walk_rate=0.#0.0001/64*64#.0001
   m.target_fp=.1
@@ -55,16 +69,17 @@ one_minus_avg_rate=m.batch_size*m.target_p**3/m.N
 avg_rate=1-one_minus_avg_rate
 tuning_size=int(m.N*m.target_p**-3)
 
-nlp_params,nlp_infer=mk_nlp(layer_dims=m.ld)
+target_nlp_params,target_nlp_infer=mk_nlp(layer_dims=m.target_ld)
+approximant_nlp_params,approximant_nlp_infer=mk_nlp(layer_dims=m.approximant_ld)
 
 s,t=split(s)
 
-target=bin_optimiser(m.in_dim,seed=s,make_params=nlp_params,threshold=m.threshold,
-                     implementation=nlp_infer,params=m.target_params)
-approximant=bin_optimiser(m.in_dim,seed=t,make_params=nlp_params,tol=m.tol,
+target=bin_optimiser(m.in_dim,seed=s,make_params=target_nlp_params,threshold=m.threshold,
+                     implementation=target_nlp_infer,params=m.target_params)
+approximant=bin_optimiser(m.in_dim,seed=t,make_params=approximant_nlp_params,tol=m.tol,
                           target_fp=m.target_fp,target_fn=m.target_fn,
                           empirical_fp=m.empirical_fp,empirical_fn=m.empirical_fn,
-                          implementation=nlp_infer,params=m.approximant_params)
+                          implementation=approximant_nlp_infer,params=m.approximant_params)
 
 def recalc_threshold(s):
   x=normal(s,(tuning_size,m.in_dim))
@@ -121,33 +136,39 @@ while m.n_steps>0:
     print('approximant empirical fn rate:',approximant.empirical_fn,
           ':)' if approximant.empirical_fn<approximant.target_fn*m.tol else ':(')
     print('approximant V                :',approximant.V)
-    if stdin in select([stdin],[],[],0)[0]:
-      print(m)
-      if m.in_dim==1:
-        from matplotlib.pyplot import plot,legend,show,axhline
-        x=linspace(-6,6,num=1000)
+    show_plots=True
+    while stdin in select([stdin],[],[],0)[0]:
+      if 'x' in stdin.readline().lower():
+        print('Bye!')
+        exit()
+      elif show_plots:
+        x=linspace(-6,6,num=10000)
 
-        y_true=target.implementation(array([x]).T,target.params)
+        #inv_activation=lambda x:x
+        inv_activation=lambda x:(log(x+eps)-log(1-x+eps))
+        y_true=inv_activation(target.implementation(array([x]).T,target.params))
         #tt=(target.threshold+jmx(-y_true))/(jmx(y_true)+jmx(-y_true))
         #y_true+=jmx(-y_true)
         #y_true/=jmx(y_true)+jmx(-y_true)
 
-        y_pred=approximant.implementation(array([x]).T,approximant.params)
-        print(y_pred)
+        y_pred=inv_activation(approximant.implementation(array([x]).T,approximant.params))
         #pt=(approximant.threshold+jmx(-y_pred))/(jmx(y_pred)+jmx(-y_pred))
         #y_pred+=jmx(-y_pred)
         #y_pred/=jmx(y_pred)+jmx(-y_pred)
 
-        plot(x,y_true,color='blue',label='target')
-        plot(x,y_pred,color='red',label='approximant')
-        #axhline(tt,color='blue',linestyle='dotted')
-        #if -jmx(-y_pred)<pt<jmx(y_pred):
-        #  axhline(pt,color='red',linestyle='dotted')
-        axhline(target.threshold,color='blue',linestyle='dotted')
-        axhline(approximant.threshold,color='red',linestyle='dotted')
-        legend()
+        if m.in_dim==1:
+          plot(x,y_true,color='blue',label='target')
+          plot(x,y_pred,color='red',label='approximant')
+          axhline(inv_activation(target.threshold),color='blue',linestyle='dotted',
+                  label='target threshold')
+          axhline(inv_activation(approximant.threshold),color='red',linestyle='dotted',
+                  label='approximant threshold')
+          legend()
+          show()
+        hist(y_true,color='blue',label='target',weights=pdf(x),bins=50,histtype='step')
+        hist(y_pred,color='red',label='approximant',weights=pdf(x),bins=50,histtype='step')
         show()
-      stdin.readline()
+        show_plots=False
         
   if not(m.n_steps%m.sns_interval):
     with open(argv[2],'wb') as f:
