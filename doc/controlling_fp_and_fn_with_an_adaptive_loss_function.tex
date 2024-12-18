@@ -15,6 +15,8 @@
 \usepackage{listings}
 \usepackage{tikz}
 \usetikzlibrary{positioning}
+\usetikzlibrary{calc}
+\usetikzlibrary{quotes}
 %\usepackage[X2,T1]{fontenc}
 
 \pgfplotsset{compat=1.16}
@@ -57,7 +59,7 @@
 
 \newcommand{\ubar}[1]{\text{\b{$#1$}}}
 
-\title{Controlling $FP$ and $F$ with an adaptive loss function}
+\title{Iterative confusion constraining in imbalanced classification}
 \author{George Lee}
 \begin{document}
 \maketitle
@@ -80,7 +82,7 @@ $$
 The bulk of popular models use neural networks and we largely focus on this approach here.
 One working conjecture is that almost regardless of choice of loss function in such a situation, the gradient updates are likely to fall in a narrow range of possibilities for a fixed batch of training data.
 We identify a surface on which we can expect such an update to lie, and propose an algorithm that selects a direction on this surface that forces a particular ratio of false positive and false negatives.
-\subsection{A reminder of some performance metrics}
+\subsection{Discrete performance metrics for binary classifiers}
 When evaluating the model's performance, each binary prediction and label $(\widetilde\upsilon_i,\upsilon_i)$ is either a true positive $(+,+)$, a false positive $(+,-)$, a false negative $(-,+)$ or a true negative $(-,-)$.
 
 When a batch of these observations are made, denote the counts of these corresponding cases by $TP$, $FP$, $FN$ and $TN$ respectively.
@@ -106,32 +108,99 @@ Write $\mathbb P_{\boldsymbol\theta}$ for the probabilities of events for such a
 \item The $\textbf{precision}=\mathbb P_{\boldsymbol\theta}(+|\text{We predicted }+)$, and
 \item the $\textbf{recall}=\mathbb P_{\boldsymbol\theta}(\text{we predicted }+|+)$.
 \end{itemize}
+\subsection{Representing models diagrammatically}
+From the perspective of learning, the function $f_{\boldsymbol\theta}$ defines the inference of a given model with internal state $\boldsymbol\theta$.
+This may be represented by the diagram\\
+\begin{tikzpicture}
+  \node(t) {$\boldsymbol\theta$};
+  \node[draw, rectangle, thick, below= of t, minimum height = 1cm,minimum width=1cm] (f) {$f$};
+  \node[left= of f] (x) {$x$};
+  \node[right= of f] (yh) {$\hat y$};
 
+  \path[-latex, thick, auto] (t) edge (f);
+  \path[-latex, thick, auto] (x) edge (f);
+  \path[-latex, thick, auto] (f) edge (yh);
+\end{tikzpicture}\\
+To find an appropriate $\boldsymbol\theta$ an iterative update method which is denoted here by $f_\sharp$ is applied, so that the new parameters are given by $\boldsymbol\theta'=f_\sharp(\boldsymbol\theta,x,y)$.
+Labelling $(f,f_\sharp)=\texttt{model}$, this may then be represented by the diagram\\
+\begin{tikzpicture}
+  \node(phi) {$\boldsymbol\theta$};
+  \node(t) at ([xshift=.5cm]phi){};
+  \node(phip)at ([xshift=.5cm]t) {$\boldsymbol\theta'$};
+  \node[draw,below=of t, rectangle, thick, minimum height = 2cm,minimum width=2cm] (f) {$\texttt{model}$};
+  \node[left=of f](x){};
+  \node(x_in)at([yshift=.5cm]x){$x$};
+  \node[right= of f] (y){};
+  \node(y_pred) at([yshift=.5cm]y) {$\hat y$};
+  \node(y_true)at([yshift=-.5cm]y) {$y$};
+
+  \path[-latex, thick, auto] (phi) edge (f.north -| phi);
+  \path[-latex, thick, auto] (f.north -| phip) edge (phip);
+  \path[-latex, thick, auto] (x_in) edge (f.west |- x_in);
+  \path[-latex, thick, auto] (f.east |- y_pred) edge (y_pred);
+  \path[-latex, thick, auto] (y_true) edge (f.east |- y_true);
+\end{tikzpicture}\\
+Such a block is referred to as a parametric lens, as discussed in the work of \cite{cruttwell2024deeplearningparametriclenses}, and is an abstraction that captures the parametric nature of learning algorithms as well as the inherant bidirectional flow of data.
+The map $f$ is referred to as the forward map and $f_\sharp$ is referred to as the backward map.
+Each block represents a forced dynamical system.
+In these diagrams, the variables above the block represent the internal state of the system.
+Arrows flowing in and out of the system are its inputs and outputs respectively.
+These diagrams will be developed as particular assumptions are made about $f$ and $f_\sharp$.
+In this first example of a lens, the backward map only passes an update up to the internal state of the system.
+Correspondingly, as in the next diagram, we also in general allow the backward map to pass values right to left, so that blocks may be composed as coupled dynamical systems that propogate inferences forward and updates backward.
+This principle 
 \subsection{Passing to a continuous-valued classifier}
-For any $\lambda\in[0,1]$ the quantity $(\lambda FP+(1-\lambda)FN$ is analogous to a least squares loss where the cost for a false negative versus a false positive is controlled by $\lambda$.
+For any numbers $a,b>0$ the quantity $aFP+bFN$ is analogous to a least squares loss where the cost for a false negative versus a false positive is controlled by $\lambda$.
 However, this function takes discrete values so doesn't have a useful gradient and it is impossible to apply backpropogation directly.
 
-The ubiquitous solution here is to work with a model $f_\theta:\mathcal X\rightarrow(0,1)$ that outputs a number that may be interpreted as a likelihood of an observation being in the $+$ class.
-With this approach, the practical use of such an $f_\theta$ is to fix a threshold $\alpha\in(0,1)$ such that the actual classification is given by $+$ if $f_\theta(x)>\alpha$ and $-$ otherwise.
-Correspondingly, a trained neural network provides a family of different possible models indexed by $\alpha$ which is monotonic in the proportion of data that is classified as $-$.
-As we approach the extreme cases $\alpha\rightarrow0$ and $\alpha\rightarrow1$ the model tends towards interpreting all points as $+$ and $-$ respectively.
-Commonly such models are then evaluated by their performance over a range of these alpha variables, resulting in metrics that give an overview of the performance of the family of generated models, and the guarantee of monotonicity as a threshold is fixed allows for a particular choice of $FP:FN$ that suits the training dataset..
-In the case of imbalanced data the precision-recall curve or PRC is pertinent for imbalanced classification: one traces out the function $(\textbf{Precision}(\alpha),\textbf{Recall}(\alpha))$ and computes the area under the curve in the unit square.
-Similar metrics in the literature include the ``AUC'' and ``ROC''.
-We will be able to generate an analogous metric when varying a threshold in out loss function, so can produce comparable performances of the families of models that we can generate.
-One should however note that for classification on big datasets where we are only interested in $\tfrac{FP}{FN}$ very big or small, such an area isn't the relevant statistic.
+The ubiquitous solution here is to work with a model $\tilde f_\theta:\mathcal X\rightarrow(0,1)$ that outputs a number $\tilde f_{\boldsymbol\theta}(x)=\tilde y\in(0,1)$, then take a threshold function $\tau(t)=1$ if $t>\alpha$ and $0$ otherwise for some fixed $\alpha\in(0,1)$ so that
+$$
+f_{\boldsymbol\theta}(x)=\tau(\tilde f_{\boldsymbol\theta}(x))=\begin{cases}1~\text{if}~x>\alpha~\text{and}\\0~\text{otherwise.}\end{cases}.
+$$
+We can represent this diagramatically as the composition of two blocks,\\
+\begin{tikzpicture}
+  \node(phi) {$\boldsymbol\theta$};
+  \node(t) at ([xshift=.5cm]phi){};
+  \node(phip)at ([xshift=.5cm]t) {$\boldsymbol\theta'$};
+  \node[draw,below=of t, rectangle, thick, minimum height = 2cm,minimum width=2cm] (f) {$(\tilde f,\tilde f_\sharp)$};
+  \node[draw,right=of f, rectangle, thick, minimum height = 2cm,minimum width=1cm] (thresh) {$(\tau,\tau_\sharp)$};
+  \node[left=of f](x){};
+  \node(x_in)at([yshift=.5cm]x){$x$};
+  \node[right= of thresh] (y){};
+  \node(y_pred) at([yshift=.5cm]y) {$\hat y$};
+  \node(y_true)at([yshift=-.5cm]y) {$y$};
+
+  \path[-latex, thick, auto] (phi) edge (f.north -| phi);
+  \path[-latex, thick, auto] (f.north -| phip) edge (phip);
+
+  \path[-latex, thick, auto] (x_in) edge (f.west |- x_in);
+
+  \path[-latex, thick, auto] ([yshift=.5cm]f.east) edge["$\tilde y$"] ([yshift=.5cm]thresh.west);
+  \path[-latex, thick, auto] ([yshift=-.5cm]thresh.west) edge["$y'$"] ([yshift=-.5cm]f.east);
+
+  \path[-latex, thick, auto] (thresh.east |- y_pred) edge (y_pred);
+  \path[-latex, thick, auto] (y_true) edge (thresh.east |- y_true);
+\end{tikzpicture}\\
+where the backward map of the thresholding block $\tau_\sharp(\hat y,y)=y'$ is some choice of data encoding the performance of the model.
+This choice of backward map is nonunique, and in this case a trivial map simply passing back $y$ ould work, but the objective here is to decompose the system into simple components, and this choice simplifies subsequent computation in the backward pass.
+The above diagram could be augmented by considering $\alpha$ as a parameter of the model, in which case we would add input threshold $\alpha$ and output $\alpha'$ as internal state to the second block.
+$\tau$ and $\tau_\sharp$ would take this extra internal state $\alpha$ as input, and the backward map would output both $z$ and $\alpha'$, $\tau_\sharp(\alpha,\tilde y,y)=(y',\alpha')$, where $\alpha'$ would typically be an updated threshold.
+The parameters or internal state of the overall system would then be given by the pair $(\boldsymbol\theta,\alpha)$.
+In this work $\alpha=.5$ is fixed, under the assumption that an appropriate choice of $\boldsymbol\theta$ can be found for $\tilde f$ for any threshold that isn't too close to $0$ or $1$.
+Indeed, any model which terminates with the single parameter layer $L(\alpha,t)$ taking inputs $t\in(0,1)$ such that
+$$
+L(\alpha,t)=\begin{cases}\tfrac1{2\alpha}t~\text{if}~t<~\tfrac12\text{and}\tfrac{t+1-2\alpha}{2(1-\alpha}~\text{otherwise}\end{cases}
+$$
+demonstrates the redundancy of finding such a threshold as a separate step.
 \section{An adaptive gradient rule}
 
-In this work we are focused on influencing the behaviour of the model at the training stage - we will largely fix our threshold at $\alpha=\tfrac12$ and make the loss function do the work of forcing a desired tradeoff between $FP$ and $FN$.
-
-We consider families of loss functions depending upon a parameter that constrains the model at the training stage.
-This approach ensures that only the problem of interest is being solved, at the cost of needing to retrain a model if constraints are changed.
-For the sake of comparison we may generate similar AUC metrics but note that these methods are only useful if we care about all possible $\tfrac{FP}{FN}$ ratios, which is unrealistic in highly imbalanced classification.
+As discussed, it is unfeasible to precisely encode the binary performance of a model using only the gradients of smooth loss functions.
+It is nonetheless possible to make a gradient descent type algorithm depend upon such statistics.
 
 \subsection{Smoothed statistics}
 
 Fix a batch of observations $\mathcal F=\{(x_i,y_i)\}_{i=1}^N\subseteq\mathcal X\times\{0,1\}$ and write $\hat y_i=f_{\boldsymbol\theta}(x_i)$ for $1\leq i\leq N$.
-We can approximate the counts of the four different outcomes algebraically by
+As in \cite{lee2021surrogate}, one may  approximate the counts of the four different outcomes algebraically by
 \begin{itemize}
   \item $\texttt{tp}_\mathcal F(\boldsymbol\theta)=\sum_{i=1}^N y_i\hat y_i$,
   \item $\texttt{tn}_\mathcal F(\boldsymbol\theta)=\sum_{i=1}^N(1-y_i)(1-\hat y_i)$,
@@ -146,22 +215,90 @@ Then the estimates for precision and recall are given by
 \end{itemize}
 Where clear we may suppress $\boldsymbol\theta$ and $\mathcal F$ dependence.
 Analogously to the binary statistics, writing $|y|=\#\{i:y_i=1\}$ we also have $\texttt{tp}=|y|-\texttt{fn}$ and $\texttt{tn}=|1-y|-\texttt{fp}$.
-\subsection{A general form for candidate loss functions}
-Given a batch at some point in training, we may seek to update the weights of the network to decrease $\texttt{fn}$ and $\texttt{fp}$ while increasing $\texttt{tn}$ and $\texttt{tp}$.
+The values of these quantities are more effort to compute and of little use when evaluating the performance of a model.
+Their importance lies in the observation that when used as update functions, the negatives of the gradients of these surrogate false positive and false negative rates tend to force the parameters of the underlying model in the direction of fewer actual false positives and negatives.
+If the $\tilde y_i$s were interpreted as probabilities of being in the positive class, then these gradients could be understood as moving the distribution in the direction of maximum likelihood for the batch, but this isn't exactly what the smooth model's target output is.
+\subsection{Developing candidate loss functions}
+At each point in training, the aim for a classification problem is to update the weights of the smooth model to decrease $\texttt{fn}$ and $\texttt{fp}$ while increasing $\texttt{tn}$ and $\texttt{tp}$.
 Write $\partial_{\boldsymbol\theta}$ for derivatives with respect to the parameters.
-One may readily verify that
-\begin{align*}
-  \partial_{\boldsymbol\theta}\texttt{tp}_{\mathcal F}(\boldsymbol\theta)=&\sum_{i:y_i=1}\partial_{\boldsymbol\theta}f_{\boldsymbol\theta}(x_i)=-\partial_{\boldsymbol\theta}\texttt{fn}_{\mathcal F}(\boldsymbol\theta)~\text{and}\\
-  \partial_{\boldsymbol\theta}\texttt{tn}_{\mathcal F}(\boldsymbol\theta)=&-\sum_{i:y_i=0}\partial_{\boldsymbol\theta}f_{\boldsymbol\theta}(x_i)=-\partial_{\boldsymbol\theta}\texttt{fp}_{\mathcal F}(\boldsymbol\theta).
-\end{align*}
+In choosing a gradient update in these directions, only the smooth false positive and negative gradients need be considered, since $\partial_{\boldsymbol\theta}\texttt{tp}_{\mathcal F}(\boldsymbol\theta)=-\partial_{\boldsymbol\theta}\texttt{fn}_{\mathcal F}(\boldsymbol\theta)$ and $\partial_{\boldsymbol\theta}\texttt{tn}_{\mathcal F}(\boldsymbol\theta)=-\partial_{\boldsymbol\theta}\texttt{fp}_{\mathcal F}(\boldsymbol\theta)$.
 
-We observe that for a fixed batch, we generally expect that we will make an update to the parameters in the direction spanned by $\partial_{\boldsymbol\theta}\texttt{tp}_{\mathcal F}(\boldsymbol\theta)$ and $\partial_{\boldsymbol\theta}\texttt{tn}_{\mathcal F}(\boldsymbol\theta)$.
-We may write such an update for the batch at time $t$ as
+The update  we generally expect that we will make an update to the parameters in the direction spanned by $\partial_{\boldsymbol\theta}\texttt{tp}_{\mathcal F}(\boldsymbol\theta)$ and $\partial_{\boldsymbol\theta}\texttt{tn}_{\mathcal F}(\boldsymbol\theta)$.
+A gradient update may be given according to the rule
 $$
-\delta\boldsymbol\theta_t\propto-U_t\partial_{\boldsymbol\theta}\texttt{fp}_{\mathcal F_t}(\boldsymbol\theta_t)-V_t\partial_{\boldsymbol\theta}\texttt{fn}_{\mathcal F_t}(\boldsymbol\theta_t)=\partial_{\boldsymbol\theta}(-U_t\texttt{fp}_t(\boldsymbol\theta_t)-V_t\texttt{fn}_t(\boldsymbol\theta_t))=\partial_{\boldsymbol\theta}\Phi(\texttt{fp}_t(\boldsymbol\theta_t),\texttt{fn}_t(\boldsymbol\theta_t),U_t,V_t).
+\delta\boldsymbol\theta\propto-U\partial_{\boldsymbol\theta}\texttt{fp}_{\mathcal F}(\boldsymbol\theta)-V\partial_{\boldsymbol\theta}\texttt{fn}_{\mathcal F}(\boldsymbol\theta)=\partial_{\boldsymbol\theta}(-U\texttt{fp}(\boldsymbol\theta)-V\texttt{fn}(\boldsymbol\theta))=\partial_{\boldsymbol\theta}\Phi(\texttt{fp}(\boldsymbol\theta),\texttt{fn}(\boldsymbol\theta),U,V).
 $$
-Here $U_t$ and $V_t>0$ are weights corresponding to the relative amount that the model needs to improve on the rates of false positives and false negatives.
-Empirically it is typically a good idea to not use this update rule directly, but to apply some kind of averaged update, such as adam \cite{kingma2017adammethodstochasticoptimization}.
+Functions similar to $\Phi$, in particular, ones that depend only upon similarly defined smooth statistics, are also considered in \cite{marchetti2022score}.
+Here the function is allowed to depend upon parameters $U$ and $V$ which can reflect on the actual performance after thresholding.
+Here $U$ and $V>0$ are weights corresponding to the relative amount that the model needs to improve on the rates of false positives and false negatives.
+Correspondingly the overall model may be further decomposed into a network layer followed by a layer which tracks these weights.
+In addition, it is often empirically found to be a good idea to not use just the gradient as the update, but typically there is some kind of averaged update, such as adam \cite{kingma2017adammethodstochasticoptimization}.
+Introducing a second type of block - a so-called reparameterisation - allows for further factoring of the model into its constituent parts:
+\begin{tikzpicture}
+  \node(w) {$w$};
+  \node(copy_w) at([yshift=-1.5cm]w) {$\Delta$};
+  \node(m)at ([xshift=1cm]w) {$m$};
+  \node(tensor_wm)at (m|-copy_w) {$\otimes$};
+
+  \node[draw, rectangle, thick, minimum height = 1cm,minimum width=2cm] (ad)at([xshift=1cm,yshift=-3cm]t) {$\texttt{reparam}$};
+  \node(wp)at([xshift=.5cm]m-|ad){$w'$};
+  \node(mp)at([xshift=1cm]wp){$m'$};
+  \node(p_wm)at(wp|-tensor_wm){$\Pi$};
+
+  %\node[below=of ad] (t) {};
+  \node(tensor_du) at([xshift=.5cm,yshift=-1cm]ad.south) {$\otimes$};
+
+  \node[draw, rectangle, thick, minimum height = 2cm,minimum width=2cm] (f) at([yshift=-7cm]t) {$\texttt{smooth}$};
+  \node[draw, rectangle, thick, minimum height = 1cm,minimum width=2cm] (fpfn)at([xshift=4cm,yshift=-.5cm]f) {$\texttt{binadapt}$};
+
+  \node[draw,rectangle, thick, minimum height = 2cm,minimum width=1cm] (thresh) at([xshift=8cm]f) {$\texttt{thresh}$};
+
+  \node[left=of f](x){};
+  \node(x_in)at([yshift=.5cm]x){$x$};
+
+  \node(D)at([xshift=1cm,yshift=-.5cm]thresh.east){$\Delta$};
+  \node[right= of D] (y_true){$y$};
+  \node(y_pred) at([yshift=1cm]y_true) {$\hat y$};
+
+  \node(b)at([xshift=-.5cm]fpfn|-w){$b$};
+  \node(bp)at([xshift=1cm]b){$b'$};
+  \node(p)at(bp|-tensor_du){$\Pi$};
+
+  \path[-latex, thick, auto] (w) edge (copy_w);
+  \path[-latex, thick, auto] (m) edge (tensor_wm);
+  \path[-latex, thick, auto] (copy_w) edge (tensor_wm);
+  \path[-latex, thick, auto] (copy_w) edge (f.north-|copy_w);
+  \path[-latex, thick, auto] (tensor_wm) edge (ad.north-|tensor_wm);
+  \path[-latex, thick, auto] (ad.north-|p_wm) edge (p_wm);
+  \path[-latex, thick, auto] (p_wm)edge(wp);
+  \path[thick] (p_wm)edge(p_wm-|mp);
+  \path[-latex,thick,auto] (p_wm-|mp)edge(mp);
+
+  %\path[-latex, thick, auto] ([xshift=.5cm]f.north) to["{$(dfp,dfn)$}",'] ([xshift=.5cm]tensor_du -| f.north) to (tensor_du);
+  \path[thick] (f.north -| m) edge["{$(dfp,dfn)$}",'] (tensor_du -| m);
+  \path[-latex,thick,auto] (tensor_du -| m) edge (tensor_du);
+
+  \path[-latex, thick, auto] (tensor_du) edge (ad.south-|tensor_du);
+
+  \path[-latex, thick, auto] (b) edge (fpfn.north -| b);
+  \path[-latex, thick, auto] (fpfn.north -| bp) edge (p);
+  \path[-latex, thick, auto] (p) edge (bp);
+  \path[-latex, thick, auto] (p) edge["{$(U,V)$}",',pos=.6] (tensor_du);
+
+  \path[-latex, thick, auto] (x_in) edge (f.west |- x_in);
+
+  \path[-latex, thick, auto] ([yshift=.5cm]f.east) edge["$\tilde y$",pos=.8] ([yshift=.5cm]thresh.west);
+  \path[-latex, thick, auto] (D) edge ([yshift=-.5cm]thresh.east);
+  %\path[thick] (D) edge["{$(FP,FN)$}",pos=.7] (junct-|D);
+  \draw[-latex,thick,auto] (D) to ([yshift=-1cm]D) to ([xshift=1cm,yshift=-1cm]f.east|-y_true) to ([xshift=1cm]f.east|-y_true)to(f.east|-y_true);
+
+  \path[-latex, thick, auto] (thresh.west|-y_true) edge["{$(FP,FN)$}",'] (fpfn.east|-y_true);
+
+
+  \path[-latex, thick, auto] (thresh.east |- y_pred) edge (y_pred);
+  \path[-latex, thick, auto] (y_true) edge (D);
+\end{tikzpicture}\\
+
 Correspondingly, we adapt this algorithm to take advantage of the benefits of such an averaging scheme while stll having control over the relative amount that the parameters are updated in favour of false positives or false negatives.
 There is freedom to approach the weight updating scheme in many different ways, and we will introduce an explicit choice below.
 \lstinputlisting[language=python,basicstyle=\small,caption=A stochastic gradient routineandwith binary prediction derived weighting updates]{snippets/adam_step.py}

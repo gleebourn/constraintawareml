@@ -6,7 +6,8 @@ from pickle import load,dump
 from types import SimpleNamespace
 from select import select
 
-from matplotlib.pyplot import plot,scatter,legend,show,axhline,hist
+from matplotlib.pyplot import plot,scatter,legend,show,axhline,hist,imshow
+from matplotlib.patches import Patch
 
 from jax.random import normal,key,split
 from jax.numpy import array,linspace,log,sum as jsm,max as jmx
@@ -35,7 +36,7 @@ except FileNotFoundError:
   m.tn=0
   m.fp=0
   m.fn=0
-  m.in_dim=1
+  m.in_dim=2
   m.target_p=.1
   m.n_steps=10000000
   m.batch_size=32
@@ -45,8 +46,8 @@ except FileNotFoundError:
   #m.ld=[2187, 1458]#, 972, 648, 432, 288, 192, 128]#[1024,1024]
   #m.ld=[128,128,128,128,128,128,128,128,128,128,128]
   #m.ld=[2**i*3**j for i,j in zip(range(8),reversed(range(8)))]
-  width=16
-  depth=20
+  width=256#16
+  depth=3#50
   m.target_ld=[width]*depth#[int(16*(2**(-i/1000))) for i in range(1000)]
   m.approximant_ld=[width]*depth#[int(16*(2**(-i/1000))) for i in range(1000)]
   #m.ld=[1024,1024]
@@ -136,39 +137,66 @@ while m.n_steps>0:
     print('approximant empirical fn rate:',approximant.empirical_fn,
           ':)' if approximant.empirical_fn<approximant.target_fn*m.tol else ':(')
     print('approximant V                :',approximant.V)
-    show_plots=True
+    show_plots=0
     while stdin in select([stdin],[],[],0)[0]:
+      show_plots+=1
       if 'x' in stdin.readline().lower():
         print('Bye!')
         exit()
-      elif show_plots:
-        x=linspace(-6,6,num=10000)
 
-        #inv_activation=lambda x:x
-        inv_activation=lambda x:(log(x+eps)-log(1-x+eps))
-        y_true=inv_activation(target.implementation(array([x]).T,target.params))
-        #tt=(target.threshold+jmx(-y_true))/(jmx(y_true)+jmx(-y_true))
-        #y_true+=jmx(-y_true)
-        #y_true/=jmx(y_true)+jmx(-y_true)
+    if show_plots:
+      plot_scale=2
+      num_to_sample=10000*show_plots
+      num_per_dim=int(num_to_sample**(1/m.in_dim))
+      print('Plotting',num_per_dim**m.in_dim,'samples...')
+      x=[[]]
+      for i in range(m.in_dim):#Silly but doesn't matter
+        x=[s+[t] for s in x for t in linspace(-plot_scale,plot_scale,num=num_per_dim)]
+      x=array(x)
+       
+      #if m.in_dim==1:
+      #  x=array([linspace(-6,6,num=num_to_sample)]).T
 
-        y_pred=inv_activation(approximant.implementation(array([x]).T,approximant.params))
-        #pt=(approximant.threshold+jmx(-y_pred))/(jmx(y_pred)+jmx(-y_pred))
-        #y_pred+=jmx(-y_pred)
-        #y_pred/=jmx(y_pred)+jmx(-y_pred)
+      #else:
+      #inv_activation=lambda x:x
+      inv_activation=lambda x:(log(x+eps)-log(1-x+eps))
+      y_t=target.implementation(x,target.params)
+      y_true_bin=y_t>target.threshold
+      #rescale so that thresholds match
+      y_tr=(~y_true_bin)*y_t*approximant.threshold/(target.threshold)+\
+             y_true_bin*\
+             ((1-approximant.threshold)*y_t+ approximant.threshold-target.threshold)/\
+             (1-target.threshold)
 
-        if m.in_dim==1:
-          plot(x,y_true,color='blue',label='target')
-          plot(x,y_pred,color='red',label='approximant')
-          axhline(inv_activation(target.threshold),color='blue',linestyle='dotted',
-                  label='target threshold')
-          axhline(inv_activation(approximant.threshold),color='red',linestyle='dotted',
-                  label='approximant threshold')
-          legend()
-          show()
-        hist(y_true,color='blue',label='target',weights=pdf(x),bins=50,histtype='step')
-        hist(y_pred,color='red',label='approximant',weights=pdf(x),bins=50,histtype='step')
+      y_true=inv_activation(y_tr)
+
+      y_p=approximant.implementation(x,approximant.params)
+      y_pred_bin=y_p>approximant.threshold
+      y_pred=inv_activation(y_p)
+
+      if m.in_dim==1:
+        plot(x,y_true,color='blue',label='target')
+        plot(x,y_pred,color='red',label='approximant')
+        axhline(inv_activation(approximant.threshold),linestyle='dotted',
+                label='threshold')
+        legend()
         show()
-        show_plots=False
+      elif m.in_dim==2: 
+        fp_img=y_pred_bin&(~y_true_bin)
+        fn_img=(~y_pred_bin)&y_true_bin
+        tp_img=y_pred_bin&y_true_bin
+        tn_img=(~y_pred_bin)&(~y_true_bin)
+        #col_mat=[[0,.1,.5],[0,.5,.1],[1,1,1],[0,0,0]]#fp,fn,tp,tn
+        col_mat=[[1.,0,0],[0,1,0],[1,1,1],[0,0,0]]#fp,fn,tp,tn
+        cols=array([fp_img,fn_img,tp_img,tn_img]).T.dot(array(col_mat)).\
+             reshape(num_per_dim,num_per_dim,3)
+        imshow(cols,extent=[-plot_scale,plot_scale]*2)
+        legend(handles=[Patch(color=c,label=s) for c,s in zip(col_mat,['FP','FN','TP','TN'])])
+        show()
+      density=pdf(x).prod(axis=1)
+      hist(y_true,color='blue',label='target',weights=density,bins=50,histtype='step')
+      hist(y_pred,color='red',label='approximant',weights=density,bins=50,histtype='step')
+      show()
         
   if not(m.n_steps%m.sns_interval):
     with open(argv[2],'wb') as f:

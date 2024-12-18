@@ -2,9 +2,10 @@ from os import mkdir
 from sys import stderr
 
 from jax import grad,jit
-from jax.nn import sigmoid,relu
+from jax.nn import sigmoid,relu,softmax
 from jax.numpy import dot,vectorize,zeros,square,sqrt,array,\
                       logical_not,save,sum as jsum
+from jax.numpy.linalg import qr,svd
 from jax.scipy.signal import convolve
 from jax.random import normal,key,randint,permutation,split
 
@@ -24,6 +25,9 @@ def mk_nlp(layer_dims=default_layer_dims):
     for i in range(l): ##the subtraction of .5 means we "expect the input to have mean 0"
       x=sigmoid(dot(params[('A',i)],x)+params[('b',i)])-.5 #Otherwise: Wignerian behaviour!
     return x[0]+.5
+    #for i in range(l-1): ##the subtraction of .5 means we "expect the input to have mean 0"
+    #  x=softmax(dot(params[('A',i)],x)+params[('b',i)])#-.5 #Otherwise: Wignerian behaviour!
+    #return sigmoid(dot(params[('A',i)],x)+params[('b',i)])[0] #Otherwise: Wignerian behaviour!
 
   def nlp_make_params(input_dim):
     ret={}
@@ -79,7 +83,7 @@ class bin_optimiser:
   def __init__(self,input_dims,make_params=nlp_params,lr=.00001,seed=0,tol=.5,
                implementation=nlp_infer,beta1=.9,beta2=.999,eps=.00000001,batch_size=32,
                max_relative_confusion_importance=.0000001,target_fp=.01,
-               target_fn=.01,logf=stderr,threshold=.5,
+               target_fn=.01,avg_tol=.1,logf=stderr,threshold=.5,
                sns_dir=None,sns_per_epoch=10,params=None,empirical_fp=None,empirical_fn=None):
     self.logf=open(logf,'w') if isinstance(logf,str) else logf
 
@@ -119,8 +123,8 @@ class bin_optimiser:
     self.target_fn=target_fn
     self.beta_sq=target_fp/target_fn
     self.beta=self.beta_sq**.5
-    self.one_minus_confusion_averaging_rate=batch_size*min(target_fp,target_fn)
-    self.confusion_averaging_rate=1-self.one_minus_confusion_averaging_rate
+    self.target_fn=target_fn
+    self.avg_tol=avg_tol
     self.max_relative_confusion_importance=max_relative_confusion_importance
     self.tol=tol
     self.threshold=threshold
@@ -162,10 +166,12 @@ class bin_optimiser:
 
     y_pred_bin=y_pseudolikelihoods>self.threshold
     batch_fp,batch_fn=self.b_fp(y,y_pred_bin),self.b_fn(y,y_pred_bin)
-    self.empirical_fp*=self.confusion_averaging_rate
-    self.empirical_fn*=self.confusion_averaging_rate
-    self.empirical_fp+=self.one_minus_confusion_averaging_rate*batch_fp
-    self.empirical_fn+=self.one_minus_confusion_averaging_rate*batch_fn
+    fp_detection_thresh=self.avg_tol*min(self.empirical_fp,1-self.empirical_fp)
+    fn_detection_thresh=self.avg_tol*min(self.empirical_fn,1-self.empirical_fn)
+    self.empirical_fp*=1-fp_detection_thresh
+    self.empirical_fn*=1-fn_detection_thresh
+    self.empirical_fp+=fp_detection_thresh*batch_fp
+    self.empirical_fn+=fn_detection_thresh*batch_fn
 
     self.fp_ok=self.empirical_fp<self.target_fp*self.tol
     self.fn_ok=self.empirical_fn<self.target_fn*self.tol
@@ -228,13 +234,21 @@ class bin_optimiser:
         shape=self.params[k].shape
       except AttributeError as e:
         shape=()
-      self.params[k]+=amount*normal(self.key,shape=shape)
-      if self.params[k].ndim==2:#Trying to get free field...
-        dim=min(self.params[k].shape)
-        
-        self.params[k]*=10*self.params[k].shape[1]**-.5
-        #for i in range(dim):
-        #  self.params[k].at[i,i].set(self.params[k][i,i]+1.)
+      delta=2*normal(self.key,self.params[k].shape)
+      #if self.params[k].ndim==2:#Trying to get free field...
+      #  dim=min(self.params[k].shape)
+      #  #Random orthogonal weights
+      #  #delta=8*qr(delta)[0]
+      ## delta*=2
+      #  #if delta.shape[0]==delta.shape[1]:
+      #  #  for i in range(min(delta.shape)):
+      #  #    delta.at[i,i].set(delta[i,i]+32)#32.)
+      ##  
+      ##  self.params[k]*=2#*self.params[k].shape[1]**-.5
+      #  #for i in range(dim):
+      ##else:
+      ##  delta=0
+      self.params[k]+=amount*delta
       self.key=split(self.key)[0]
 
   def run_epoch(self,X_all,y_all,verbose=True,
