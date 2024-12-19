@@ -83,7 +83,7 @@ class bin_optimiser:
   def __init__(self,input_dims,make_params=nlp_params,lr=.00001,seed=0,tol=.5,
                implementation=nlp_infer,beta1=.9,beta2=.999,eps=.00000001,batch_size=32,
                max_relative_confusion_importance=.0000001,target_fp=.01,
-               target_fn=.01,avg_tol=.1,logf=stderr,threshold=.5,
+               target_fn=.01,avg_tol=.1,logf=stderr,threshold=.5,sigma_w=1,sigma_b=1,
                sns_dir=None,sns_per_epoch=10,params=None,empirical_fp=None,empirical_fn=None):
     self.logf=open(logf,'w') if isinstance(logf,str) else logf
 
@@ -94,6 +94,10 @@ class bin_optimiser:
 
     try: self.key=key(seed)
     except TypeError: self.key=split(seed)[1]
+
+    self.sigma_w=sigma_w
+    self.sigma_b=sigma_b
+
     self.lr=lr
     self.input_dims=input_dims
     self.make_params=make_params
@@ -234,20 +238,20 @@ class bin_optimiser:
         shape=self.params[k].shape
       except AttributeError as e:
         shape=()
-      delta=2*normal(self.key,self.params[k].shape)
-      #if self.params[k].ndim==2:#Trying to get free field...
+      delta=normal(self.key,self.params[k].shape)
+      if self.params[k].ndim==2:#Trying to get free field...
       #  dim=min(self.params[k].shape)
       #  #Random orthogonal weights
       #  #delta=8*qr(delta)[0]
-      ## delta*=2
+         delta*=self.sigma_w
       #  #if delta.shape[0]==delta.shape[1]:
       #  #  for i in range(min(delta.shape)):
       #  #    delta.at[i,i].set(delta[i,i]+32)#32.)
       ##  
       ##  self.params[k]*=2#*self.params[k].shape[1]**-.5
       #  #for i in range(dim):
-      ##else:
-      ##  delta=0
+      else:
+        delta*=self.sigma_b
       self.params[k]+=amount*delta
       self.key=split(self.key)[0]
 

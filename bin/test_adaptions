@@ -9,6 +9,10 @@ from select import select
 from matplotlib.pyplot import plot,scatter,legend,show,axhline,hist,imshow
 from matplotlib.patches import Patch
 
+from numpy import zeros,stack
+
+from sklearn.utils.extmath import cartesian
+
 from jax.random import normal,key,split
 from jax.numpy import array,linspace,log,sum as jsm,max as jmx
 from jax.scipy.stats.norm import pdf
@@ -46,8 +50,8 @@ except FileNotFoundError:
   #m.ld=[2187, 1458]#, 972, 648, 432, 288, 192, 128]#[1024,1024]
   #m.ld=[128,128,128,128,128,128,128,128,128,128,128]
   #m.ld=[2**i*3**j for i,j in zip(range(8),reversed(range(8)))]
-  width=256#16
-  depth=3#50
+  width=64#1024#16
+  depth=20#2#50
   m.target_ld=[width]*depth#[int(16*(2**(-i/1000))) for i in range(1000)]
   m.approximant_ld=[width]*depth#[int(16*(2**(-i/1000))) for i in range(1000)]
   #m.ld=[1024,1024]
@@ -137,40 +141,43 @@ while m.n_steps>0:
     print('approximant empirical fn rate:',approximant.empirical_fn,
           ':)' if approximant.empirical_fn<approximant.target_fn*m.tol else ':(')
     print('approximant V                :',approximant.V)
-    show_plots=0
+    plot_num_blocks=0
     while stdin in select([stdin],[],[],0)[0]:
-      show_plots+=1
+      plot_num_blocks+=1
       if 'x' in stdin.readline().lower():
         print('Bye!')
         exit()
 
-    if show_plots:
-      plot_scale=2
-      num_to_sample=10000*show_plots
-      num_per_dim=int(num_to_sample**(1/m.in_dim))
-      print('Plotting',num_per_dim**m.in_dim,'samples...')
-      x=[[]]
-      for i in range(m.in_dim):#Silly but doesn't matter
-        x=[s+[t] for s in x for t in linspace(-plot_scale,plot_scale,num=num_per_dim)]
-      x=array(x)
+    if plot_num_blocks:
+      im_len=2
+      target_num_samples=plot_num_blocks*10000
+      positions_per_dimension=int(target_num_samples**(1/m.in_dim))
+      num_samples=positions_per_dimension**m.in_dim
+      block_size=num_samples//plot_num_blocks
+      print('Plotting',num_samples,'samples...')
+      #Gaussian sampling probably better for large in_dim...
+      x=cartesian([linspace(-im_len,im_len,num=positions_per_dimension)]*m.in_dim)
        
-      #if m.in_dim==1:
-      #  x=array([linspace(-6,6,num=num_to_sample)]).T
-
-      #else:
-      #inv_activation=lambda x:x
       inv_activation=lambda x:(log(x+eps)-log(1-x+eps))
-      y_t=target.implementation(x,target.params)
+      y_t=zeros(num_samples)
+      y_p=zeros(num_samples)
+      for y_out,imp,para in[(y_t,target.implementation,target.params),
+                            (y_p,approximant.implementation,approximant.params)]:
+        block_pos=0
+        while True:
+          end_pos=min(block_pos+block_size,num_samples)
+          y_out[block_pos:end_pos]=imp(x[block_pos:end_pos],para)
+          if end_pos==num_samples:break
+          block_pos=end_pos
+        
       y_true_bin=y_t>target.threshold
       #rescale so that thresholds match
       y_tr=(~y_true_bin)*y_t*approximant.threshold/(target.threshold)+\
-             y_true_bin*\
-             ((1-approximant.threshold)*y_t+ approximant.threshold-target.threshold)/\
-             (1-target.threshold)
+           y_true_bin*((1-approximant.threshold)*y_t+ approximant.threshold-target.threshold)/\
+           (1-target.threshold)
 
       y_true=inv_activation(y_tr)
 
-      y_p=approximant.implementation(x,approximant.params)
       y_pred_bin=y_p>approximant.threshold
       y_pred=inv_activation(y_p)
 
@@ -186,17 +193,18 @@ while m.n_steps>0:
         fn_img=(~y_pred_bin)&y_true_bin
         tp_img=y_pred_bin&y_true_bin
         tn_img=(~y_pred_bin)&(~y_true_bin)
-        #col_mat=[[0,.1,.5],[0,.5,.1],[1,1,1],[0,0,0]]#fp,fn,tp,tn
         col_mat=[[1.,0,0],[0,1,0],[1,1,1],[0,0,0]]#fp,fn,tp,tn
         cols=array([fp_img,fn_img,tp_img,tn_img]).T.dot(array(col_mat)).\
-             reshape(num_per_dim,num_per_dim,3)
-        imshow(cols,extent=[-plot_scale,plot_scale]*2)
+             reshape(positions_per_dimension,positions_per_dimension,3)
+        imshow(cols,extent=[-im_len,im_len]*2)
         legend(handles=[Patch(color=c,label=s) for c,s in zip(col_mat,['FP','FN','TP','TN'])])
         show()
       density=pdf(x).prod(axis=1)
       hist(y_true,color='blue',label='target',weights=density,bins=50,histtype='step')
       hist(y_pred,color='red',label='approximant',weights=density,bins=50,histtype='step')
       show()
+
+    while stdin in select([stdin],[],[],0)[0]:stdin.readline()
         
   if not(m.n_steps%m.sns_interval):
     with open(argv[2],'wb') as f:

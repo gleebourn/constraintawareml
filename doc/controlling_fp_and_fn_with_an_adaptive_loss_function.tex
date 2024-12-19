@@ -14,10 +14,12 @@
 \usepackage{pgfplots}
 \usepackage{listings}
 \usepackage{tikz}
+\usepackage{stmaryrd}
+\usepackage{float}
 \usetikzlibrary{positioning}
 \usetikzlibrary{calc}
 \usetikzlibrary{quotes}
-%\usepackage[X2,T1]{fontenc}
+\usepackage[T1]{fontenc}
 
 \pgfplotsset{compat=1.16}
 
@@ -65,19 +67,11 @@
 \maketitle
 \section{Overview of imbalanced binary classification}
 \subsection{Introducton}
-In this work we study binary classification.
-This is an important problem in its own right, but also a useful ``toy'' problem in learning where associated methods may be useful in very general situations.
-Given an observation in some state space $\mathcal X$, the problem is to decide whether $x$ belongs to one of two populations, which we may denote by $+$ and $-$ or by $1$ and $0$.
-unfortunately 0 isn't negative, but the latter convention is useful when writing mathematical expressions.
-One important situation which we are interested in handling is that of \textbf{imbalanced classification}, in which most of the observations belong to $-$ and a minority to $+$.
-Simplifying further, we investigate the supervised learning of such a model: the data consists of the training set
-$$
-(x,y)\in\mathcal X^m\times\{\pm\}^m
-$$
-and testing set
-$$
-(a,b)\in\mathcal X^n\times\{\pm\}^n.
-$$
+Binary classification is a common learning problem:
+given an observation in some state space $\mathcal X$, the problem is to construct a model to decide whether $x$ belongs to one of two populations, which we may denote by $+$ and $-$ or by $1$ and $0$.
+Of particular interest are cases where $x$ belongs to a majority or a minority class with high and low probability respectively.
+When discussing such problems $+$ is typically fixed as the minority class.
+In the supervised learning paradigm, models are constructed based on a training set of pairs of inputs and labels $(x,y)\in\mathcal X^m\times\{\pm\}^m$ and subsequently evaluated against a testing set $(a,b)\in\mathcal X^n\times\{\pm\}^n$.
 
 The bulk of popular models use neural networks and we largely focus on this approach here.
 One working conjecture is that almost regardless of choice of loss function in such a situation, the gradient updates are likely to fall in a narrow range of possibilities for a fixed batch of training data.
@@ -109,8 +103,11 @@ Write $\mathbb P_{\boldsymbol\theta}$ for the probabilities of events for such a
 \item the $\textbf{recall}=\mathbb P_{\boldsymbol\theta}(\text{we predicted }+|+)$.
 \end{itemize}
 \subsection{Representing models diagrammatically}
+Here 
 From the perspective of learning, the function $f_{\boldsymbol\theta}$ defines the inference of a given model with internal state $\boldsymbol\theta$.
-This may be represented by the diagram\\
+This may be represented by the diagram
+\begin{figure}[H]
+\centering
 \begin{tikzpicture}
   \node(t) {$\boldsymbol\theta$};
   \node[draw, rectangle, thick, below= of t, minimum height = 1cm,minimum width=1cm] (f) {$f$};
@@ -120,9 +117,47 @@ This may be represented by the diagram\\
   \path[-latex, thick, auto] (t) edge (f);
   \path[-latex, thick, auto] (x) edge (f);
   \path[-latex, thick, auto] (f) edge (yh);
-\end{tikzpicture}\\
-To find an appropriate $\boldsymbol\theta$ an iterative update method which is denoted here by $f_\sharp$ is applied, so that the new parameters are given by $\boldsymbol\theta'=f_\sharp(\boldsymbol\theta,x,y)$.
-Labelling $(f,f_\sharp)=\texttt{model}$, this may then be represented by the diagram\\
+\end{tikzpicture}.
+\end{figure}
+Composition is repredented in an obious way: given another parametric map $g$ whose range is contained in the domain of $f$, the composition $g\fatsemi f$ can be obtained by adding a second block to the left of $f$ which passes its output to $f$.
+The composition is then parameterised by the pair $(\theta,\varphi)$.
+
+As well as passing data serially, extra blocks may be added in parallel.
+Batching can be reprented by taking a copy of two blocks with the same parameterisation.
+This may be represented by a a copy operation which is denoted $\Delta$:
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+  \node(t) {$\boldsymbol\theta$};
+  \node[below=of t](d) {$\Delta$};
+  \node[draw, rectangle, thick, below= of d, minimum height = 1cm,minimum width=1cm] (f) {$f$};
+  \node[left= of f] (x1) {$x_1$};
+  \node[right= of f] (y1) {$\hat y_1$};
+  \node[draw, rectangle, thick, minimum height = 1cm,minimum width=1cm] (ff) at ([yshift=-3cm]f) {$f$};
+  \node[left= of ff] (x2) {$x_2$};
+  \node[right= of ff] (y2) {$\hat y_2$};
+
+  \path[-latex, thick, auto] (t) edge (d);
+  \path[-latex, thick, auto] (d) edge (f);
+  \path[-latex, thick, auto] (x1) edge (f);
+  \path[-latex, thick, auto] (f) edge (y1);
+
+  \path[-latex, thick, auto] (x2) edge (ff);
+  \path[-latex, thick, auto] (ff) edge (y2);
+
+  \draw[-latex,thick,auto] (d) to ([xshift=-1cm]d) to ([xshift=-1cm,yshift=1cm]ff.north) to ([yshift=1cm]ff.north)to(ff.north);
+\end{tikzpicture}.
+\end{figure}
+
+but there is no way of finding appropriate parameters $\boldsymbol\theta$ without some way of accepting and processing feedback.
+In order to better represent the dynamics of algorithms, it is desirable to adopt logically sound notation.
+The paper \cite{cruttwell2024deeplearningparametriclenses} is a formal approach to learning which advocates for the use of a category of abstract components of learning algorithms.
+In the diagram above, the parametric function processes data from the left and passes it to the right.
+
+Commonly a parameterised function can be naturally associated with a backpropogation type routine.
+This may be represented by a map $f_\sharp$ depending on the current parameters, the input, and the target output, so that the new parameters are given by $\boldsymbol\theta'=f_\sharp(\boldsymbol\theta,x,y)$.
+Labelling $(f,f_\sharp)=\texttt{model}$, this may then be represented by the diagram
+\begin{figure}[H]
 \begin{tikzpicture}
   \node(phi) {$\boldsymbol\theta$};
   \node(t) at ([xshift=.5cm]phi){};
@@ -139,8 +174,8 @@ Labelling $(f,f_\sharp)=\texttt{model}$, this may then be represented by the dia
   \path[-latex, thick, auto] (x_in) edge (f.west |- x_in);
   \path[-latex, thick, auto] (f.east |- y_pred) edge (y_pred);
   \path[-latex, thick, auto] (y_true) edge (f.east |- y_true);
-\end{tikzpicture}\\
-Such a block is referred to as a parametric lens, as discussed in the work of \cite{cruttwell2024deeplearningparametriclenses}, and is an abstraction that captures the parametric nature of learning algorithms as well as the inherant bidirectional flow of data.
+\end{tikzpicture}
+\end{figure}[H]
 The map $f$ is referred to as the forward map and $f_\sharp$ is referred to as the backward map.
 Each block represents a forced dynamical system.
 In these diagrams, the variables above the block represent the internal state of the system.
@@ -149,13 +184,14 @@ These diagrams will be developed as particular assumptions are made about $f$ an
 In this first example of a lens, the backward map only passes an update up to the internal state of the system.
 Correspondingly, as in the next diagram, we also in general allow the backward map to pass values right to left, so that blocks may be composed as coupled dynamical systems that propogate inferences forward and updates backward.
 This principle 
-\subsection{Passing to a continuous-valued classifier}
+\subsection{Thresholded smooth parametric maps}
 For any numbers $a,b>0$ the quantity $aFP+bFN$ is analogous to a least squares loss where the cost for a false negative versus a false positive is controlled by $\lambda$.
 However, this function takes discrete values so doesn't have a useful gradient and it is impossible to apply backpropogation directly.
 
 The ubiquitous solution here is to work with a model $\tilde f_\theta:\mathcal X\rightarrow(0,1)$ that outputs a number $\tilde f_{\boldsymbol\theta}(x)=\tilde y\in(0,1)$, then take a threshold function $\tau(t)=1$ if $t>\alpha$ and $0$ otherwise for some fixed $\alpha\in(0,1)$ so that
 $$
-f_{\boldsymbol\theta}(x)=\tau(\tilde f_{\boldsymbol\theta}(x))=\begin{cases}1~\text{if}~x>\alpha~\text{and}\\0~\text{otherwise.}\end{cases}.
+f_{\boldsymbol\theta}(x)=\tau(\tilde f_{\boldsymbol\theta}(x))=\begin{cases*}1~\text{if}~x>\alpha\\
+~\text{and}~0~\text{otherwise.}\end{cases*}.
 $$
 We can represent this diagramatically as the composition of two blocks,\\
 \begin{tikzpicture}
@@ -189,7 +225,7 @@ The parameters or internal state of the overall system would then be given by th
 In this work $\alpha=.5$ is fixed, under the assumption that an appropriate choice of $\boldsymbol\theta$ can be found for $\tilde f$ for any threshold that isn't too close to $0$ or $1$.
 Indeed, any model which terminates with the single parameter layer $L(\alpha,t)$ taking inputs $t\in(0,1)$ such that
 $$
-L(\alpha,t)=\begin{cases}\tfrac1{2\alpha}t~\text{if}~t<~\tfrac12\text{and}\tfrac{t+1-2\alpha}{2(1-\alpha}~\text{otherwise}\end{cases}
+L(\alpha,t)=\begin{cases}\tfrac1{2\alpha}t~\text{if}~t<\tfrac12\text{and}\\\tfrac{t+1-2\alpha}{2(1-\alpha}~\text{otherwise}\end{cases}
 $$
 demonstrates the redundancy of finding such a threshold as a separate step.
 \section{An adaptive gradient rule}
@@ -223,17 +259,18 @@ At each point in training, the aim for a classification problem is to update the
 Write $\partial_{\boldsymbol\theta}$ for derivatives with respect to the parameters.
 In choosing a gradient update in these directions, only the smooth false positive and negative gradients need be considered, since $\partial_{\boldsymbol\theta}\texttt{tp}_{\mathcal F}(\boldsymbol\theta)=-\partial_{\boldsymbol\theta}\texttt{fn}_{\mathcal F}(\boldsymbol\theta)$ and $\partial_{\boldsymbol\theta}\texttt{tn}_{\mathcal F}(\boldsymbol\theta)=-\partial_{\boldsymbol\theta}\texttt{fp}_{\mathcal F}(\boldsymbol\theta)$.
 
-The update  we generally expect that we will make an update to the parameters in the direction spanned by $\partial_{\boldsymbol\theta}\texttt{tp}_{\mathcal F}(\boldsymbol\theta)$ and $\partial_{\boldsymbol\theta}\texttt{tn}_{\mathcal F}(\boldsymbol\theta)$.
-A gradient update may be given according to the rule
+The update we generally expect that we will make an update to the parameters in the direction spanned by $\partial_{\boldsymbol\theta}\texttt{tp}_{\mathcal F}(\boldsymbol\theta)$ and $\partial_{\boldsymbol\theta}\texttt{tn}_{\mathcal F}(\boldsymbol\theta)$.
+Smooth functions that depend only upon these smooth confusion statistics are essentially the class of ``score oriented loss functions'' described in \cite{marchetti2022score}.
+In the case considered here the approach is to allow $U$ and $V$ to depend directly on the discrete performance statistics.
 $$
 \delta\boldsymbol\theta\propto-U\partial_{\boldsymbol\theta}\texttt{fp}_{\mathcal F}(\boldsymbol\theta)-V\partial_{\boldsymbol\theta}\texttt{fn}_{\mathcal F}(\boldsymbol\theta)=\partial_{\boldsymbol\theta}(-U\texttt{fp}(\boldsymbol\theta)-V\texttt{fn}(\boldsymbol\theta))=\partial_{\boldsymbol\theta}\Phi(\texttt{fp}(\boldsymbol\theta),\texttt{fn}(\boldsymbol\theta),U,V).
 $$
-Functions similar to $\Phi$, in particular, ones that depend only upon similarly defined smooth statistics, are also considered in \cite{marchetti2022score}.
+Intuitively it might be epected that $U$ and $V>0$ should reflect the relative amount that the model needs to improve on the rates of false positives and false negatives.
+Functions similar to $\Phi$, in particular, .
 Here the function is allowed to depend upon parameters $U$ and $V$ which can reflect on the actual performance after thresholding.
-Here $U$ and $V>0$ are weights corresponding to the relative amount that the model needs to improve on the rates of false positives and false negatives.
 Correspondingly the overall model may be further decomposed into a network layer followed by a layer which tracks these weights.
 In addition, it is often empirically found to be a good idea to not use just the gradient as the update, but typically there is some kind of averaged update, such as adam \cite{kingma2017adammethodstochasticoptimization}.
-Introducing a second type of block - a so-called reparameterisation - allows for further factoring of the model into its constituent parts:
+Introducing a second type of block - a so-called reparameterisation - allows for further factoring of the model into its constituent parts:\\
 \begin{tikzpicture}
   \node(w) {$w$};
   \node(copy_w) at([yshift=-1.5cm]w) {$\Delta$};
@@ -249,20 +286,20 @@ Introducing a second type of block - a so-called reparameterisation - allows for
   \node(tensor_du) at([xshift=.5cm,yshift=-1cm]ad.south) {$\otimes$};
 
   \node[draw, rectangle, thick, minimum height = 2cm,minimum width=2cm] (f) at([yshift=-7cm]t) {$\texttt{smooth}$};
-  \node[draw, rectangle, thick, minimum height = 1cm,minimum width=2cm] (fpfn)at([xshift=4cm,yshift=-.5cm]f) {$\texttt{binadapt}$};
+  \node[draw, rectangle, thick, minimum height = 1cm,minimum width=2cm] (fpfn)at([xshift=4cm,yshift=-.5cm]f) {$\texttt{moving average}$};
 
-  \node[draw,rectangle, thick, minimum height = 2cm,minimum width=1cm] (thresh) at([xshift=8cm]f) {$\texttt{thresh}$};
+  \node[draw,rectangle, thick, minimum height = 2cm,minimum width=1cm] (thresh) at([xshift=8cm]f) {$\texttt{threshold}$};
 
   \node[left=of f](x){};
   \node(x_in)at([yshift=.5cm]x){$x$};
 
-  \node(D)at([xshift=1cm,yshift=-.5cm]thresh.east){$\Delta$};
+ \node(D)at([xshift=1cm,yshift=-.5cm]thresh.east){$\Delta$};
   \node[right= of D] (y_true){$y$};
   \node(y_pred) at([yshift=1cm]y_true) {$\hat y$};
 
-  \node(b)at([xshift=-.5cm]fpfn|-w){$b$};
-  \node(bp)at([xshift=1cm]b){$b'$};
-  \node(p)at(bp|-tensor_du){$\Pi$};
+  \node(c)at([xshift=-.5cm]fpfn|-w){$c$};
+  \node(cp)at([xshift=1cm]c){$c'$};
+  \node(p)at(cp|-tensor_du){$\Pi$};
 
   \path[-latex, thick, auto] (w) edge (copy_w);
   \path[-latex, thick, auto] (m) edge (tensor_wm);
@@ -274,15 +311,14 @@ Introducing a second type of block - a so-called reparameterisation - allows for
   \path[thick] (p_wm)edge(p_wm-|mp);
   \path[-latex,thick,auto] (p_wm-|mp)edge(mp);
 
-  %\path[-latex, thick, auto] ([xshift=.5cm]f.north) to["{$(dfp,dfn)$}",'] ([xshift=.5cm]tensor_du -| f.north) to (tensor_du);
-  \path[thick] (f.north -| m) edge["{$(dfp,dfn)$}",'] (tensor_du -| m);
+  \path[thick] (f.north -| m) edge["{$(d\texttt{fp},\texttt{dfn})$}",'] (tensor_du -| m);
   \path[-latex,thick,auto] (tensor_du -| m) edge (tensor_du);
 
   \path[-latex, thick, auto] (tensor_du) edge (ad.south-|tensor_du);
 
-  \path[-latex, thick, auto] (b) edge (fpfn.north -| b);
-  \path[-latex, thick, auto] (fpfn.north -| bp) edge (p);
-  \path[-latex, thick, auto] (p) edge (bp);
+  \path[-latex, thick, auto] (c) edge (fpfn.north -| c);
+  \path[-latex, thick, auto] (fpfn.north -| cp) edge (p);
+  \path[-latex, thick, auto] (p) edge (cp);
   \path[-latex, thick, auto] (p) edge["{$(U,V)$}",',pos=.6] (tensor_du);
 
   \path[-latex, thick, auto] (x_in) edge (f.west |- x_in);
