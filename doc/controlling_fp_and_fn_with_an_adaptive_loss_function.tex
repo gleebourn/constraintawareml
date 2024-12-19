@@ -123,7 +123,7 @@ Composition is repredented in an obious way: given another parametric map $g$ wh
 The composition is then parameterised by the pair $(\theta,\varphi)$.
 
 As well as passing data serially, extra blocks may be added in parallel.
-Batching can be reprented by taking a copy of two blocks with the same parameterisation.
+Batching is standard in learning problems, and can be reprented by taking a copy of two blocks that share the same parameterisation.
 This may be represented by a a copy operation which is denoted $\Delta$:
 \begin{figure}[H]
 \centering
@@ -146,6 +146,18 @@ This may be represented by a a copy operation which is denoted $\Delta$:
   \path[-latex, thick, auto] (ff) edge (y2);
 
   \draw[-latex,thick,auto] (d) to ([xshift=-1cm]d) to ([xshift=-1cm,yshift=1cm]ff.north) to ([yshift=1cm]ff.north)to(ff.north);
+\end{tikzpicture}
+\\
+is a diagramatic decomposition of\\
+\begin{tikzpicture}
+  \node(t) {$\boldsymbol\theta$};
+  \node[draw, rectangle, thick, below= of t, minimum height = 1cm,minimum width=1cm] (f) {$(\boldsymbol\theta,x_1,x_2)\mapsto(f_{\boldsymbol\theta}(x_1),f_{\boldsymbol\theta}(x_2))$};
+  \node[left= of f] (x) {$(x_1,x_2)$};
+  \node[right= of f] (yh) {$(\hat y_1,\hat y_1)$};
+
+  \path[-latex, thick, auto] (t) edge (f);
+  \path[-latex, thick, auto] (x) edge (f);
+  \path[-latex, thick, auto] (f) edge (yh);
 \end{tikzpicture}.
 \end{figure}
 
@@ -158,6 +170,7 @@ Commonly a parameterised function can be naturally associated with a backpropoga
 This may be represented by a map $f_\sharp$ depending on the current parameters, the input, and the target output, so that the new parameters are given by $\boldsymbol\theta'=f_\sharp(\boldsymbol\theta,x,y)$.
 Labelling $(f,f_\sharp)=\texttt{model}$, this may then be represented by the diagram
 \begin{figure}[H]
+\centering
 \begin{tikzpicture}
   \node(phi) {$\boldsymbol\theta$};
   \node(t) at ([xshift=.5cm]phi){};
@@ -175,7 +188,7 @@ Labelling $(f,f_\sharp)=\texttt{model}$, this may then be represented by the dia
   \path[-latex, thick, auto] (f.east |- y_pred) edge (y_pred);
   \path[-latex, thick, auto] (y_true) edge (f.east |- y_true);
 \end{tikzpicture}
-\end{figure}[H]
+\end{figure}
 The map $f$ is referred to as the forward map and $f_\sharp$ is referred to as the backward map.
 Each block represents a forced dynamical system.
 In these diagrams, the variables above the block represent the internal state of the system.
@@ -194,6 +207,8 @@ f_{\boldsymbol\theta}(x)=\tau(\tilde f_{\boldsymbol\theta}(x))=\begin{cases*}1~\
 ~\text{and}~0~\text{otherwise.}\end{cases*}.
 $$
 We can represent this diagramatically as the composition of two blocks,\\
+\begin{figure}[H]
+\centering
 \begin{tikzpicture}
   \node(phi) {$\boldsymbol\theta$};
   \node(t) at ([xshift=.5cm]phi){};
@@ -217,6 +232,7 @@ We can represent this diagramatically as the composition of two blocks,\\
   \path[-latex, thick, auto] (thresh.east |- y_pred) edge (y_pred);
   \path[-latex, thick, auto] (y_true) edge (thresh.east |- y_true);
 \end{tikzpicture}\\
+\end{figure}
 where the backward map of the thresholding block $\tau_\sharp(\hat y,y)=y'$ is some choice of data encoding the performance of the model.
 This choice of backward map is nonunique, and in this case a trivial map simply passing back $y$ ould work, but the objective here is to decompose the system into simple components, and this choice simplifies subsequent computation in the backward pass.
 The above diagram could be augmented by considering $\alpha$ as a parameter of the model, in which case we would add input threshold $\alpha$ and output $\alpha'$ as internal state to the second block.
@@ -270,7 +286,10 @@ Functions similar to $\Phi$, in particular, .
 Here the function is allowed to depend upon parameters $U$ and $V$ which can reflect on the actual performance after thresholding.
 Correspondingly the overall model may be further decomposed into a network layer followed by a layer which tracks these weights.
 In addition, it is often empirically found to be a good idea to not use just the gradient as the update, but typically there is some kind of averaged update, such as adam \cite{kingma2017adammethodstochasticoptimization}.
-Introducing a second type of block - a so-called reparameterisation - allows for further factoring of the model into its constituent parts:\\
+Introducing a second type of block - a so-called reparameterisation - allows for further factoring of the model into its constituent parts.
+The input and output internal state $\boldsymbol\theta=(w,m,c)$ and $\boldsymbol\theta'=(w',m',c')$ is made up of where $(w,w')$ representing the weights of the smooth model, $(m,m')$ the weights of the reparameterisation routine, and $(c,c')$ data dependent upon the binary confusion statistics.
+\begin{figure}[H]
+\centering
 \begin{tikzpicture}
   \node(w) {$w$};
   \node(copy_w) at([yshift=-1.5cm]w) {$\Delta$};
@@ -333,7 +352,8 @@ Introducing a second type of block - a so-called reparameterisation - allows for
 
   \path[-latex, thick, auto] (thresh.east |- y_pred) edge (y_pred);
   \path[-latex, thick, auto] (y_true) edge (D);
-\end{tikzpicture}\\
+\end{tikzpicture}
+\end{figure}
 
 Correspondingly, we adapt this algorithm to take advantage of the benefits of such an averaging scheme while stll having control over the relative amount that the parameters are updated in favour of false positives or false negatives.
 There is freedom to approach the weight updating scheme in many different ways, and we will introduce an explicit choice below.
