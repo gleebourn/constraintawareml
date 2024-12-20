@@ -148,7 +148,7 @@ This may be represented by a a copy operation which is denoted $\Delta$:
   \draw[-latex,thick,auto] (d) to ([xshift=-1cm]d) to ([xshift=-1cm,yshift=1cm]ff.north) to ([yshift=1cm]ff.north)to(ff.north);
 \end{tikzpicture}
 \\
-is a diagramatic decomposition of\\
+is a decomposition of\\
 \begin{tikzpicture}
   \node(t) {$\boldsymbol\theta$};
   \node[draw, rectangle, thick, below= of t, minimum height = 1cm,minimum width=1cm] (f) {$(\boldsymbol\theta,x_1,x_2)\mapsto(f_{\boldsymbol\theta}(x_1),f_{\boldsymbol\theta}(x_2))$};
@@ -163,12 +163,10 @@ is a diagramatic decomposition of\\
 
 but there is no way of finding appropriate parameters $\boldsymbol\theta$ without some way of accepting and processing feedback.
 In order to better represent the dynamics of algorithms, it is desirable to adopt logically sound notation.
-The paper \cite{cruttwell2024deeplearningparametriclenses} is a formal approach to learning which advocates for the use of a category of abstract components of learning algorithms.
-In the diagram above, the parametric function processes data from the left and passes it to the right.
-
-Commonly a parameterised function can be naturally associated with a backpropogation type routine.
-This may be represented by a map $f_\sharp$ depending on the current parameters, the input, and the target output, so that the new parameters are given by $\boldsymbol\theta'=f_\sharp(\boldsymbol\theta,x,y)$.
-Labelling $(f,f_\sharp)=\texttt{model}$, this may then be represented by the diagram
+The paper \cite{cruttwell2024deeplearningparametriclenses} is a formal  and a decomposition is sought for the blockIn the diagram above, the parametric function processes data from the left and passes it to the right.
+Provided it is sufficiently well behaved, however, such a map can be associated naturally with a backward pass via backpropogation.
+Depicted as a single block, each layer within a neural network has incoming and outgoing data to the left, right and its weights above.
+There is no requirement in this case for the overall model to pass any data back to the left, and a decomposition is sought for the block
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}
@@ -206,15 +204,15 @@ $$
 f_{\boldsymbol\theta}(x)=\tau(\tilde f_{\boldsymbol\theta}(x))=\begin{cases*}1~\text{if}~x>\alpha\\
 ~\text{and}~0~\text{otherwise.}\end{cases*}.
 $$
-We can represent this diagramatically as the composition of two blocks,\\
+We can represent this diagramatically as a composition of two blocks
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}
   \node(phi) {$\boldsymbol\theta$};
   \node(t) at ([xshift=.5cm]phi){};
   \node(phip)at ([xshift=.5cm]t) {$\boldsymbol\theta'$};
-  \node[draw,below=of t, rectangle, thick, minimum height = 2cm,minimum width=2cm] (f) {$(\tilde f,\tilde f_\sharp)$};
-  \node[draw,right=of f, rectangle, thick, minimum height = 2cm,minimum width=1cm] (thresh) {$(\tau,\tau_\sharp)$};
+  \node[draw,below=of t, rectangle, thick, minimum height = 2cm,minimum width=2cm] (f) {$\texttt{continuous-valued model}$};
+  \node[draw,right=of f, rectangle, thick, minimum height = 2cm,minimum width=1cm] (thresh) {$\texttt{continuous-discrete interface}$};
   \node[left=of f](x){};
   \node(x_in)at([yshift=.5cm]x){$x$};
   \node[right= of thresh] (y){};
@@ -231,11 +229,11 @@ We can represent this diagramatically as the composition of two blocks,\\
 
   \path[-latex, thick, auto] (thresh.east |- y_pred) edge (y_pred);
   \path[-latex, thick, auto] (y_true) edge (thresh.east |- y_true);
-\end{tikzpicture}\\
+\end{tikzpicture}.
 \end{figure}
-where the backward map of the thresholding block $\tau_\sharp(\hat y,y)=y'$ is some choice of data encoding the performance of the model.
+where the forward map of $\texttt{continuous-discrete interface}$ is the thresholding map $\tau$, and the backward map outputs some choice of data encoding the binary performance of the model.
 This choice of backward map is nonunique, and in this case a trivial map simply passing back $y$ ould work, but the objective here is to decompose the system into simple components, and this choice simplifies subsequent computation in the backward pass.
-The above diagram could be augmented by considering $\alpha$ as a parameter of the model, in which case we would add input threshold $\alpha$ and output $\alpha'$ as internal state to the second block.
+The above diagram could be augmented by considering $\alpha$ as a parameter of the model, in which case we would add input threshold $\alpha$ and output $\alpha'$ above the second block to represent its internal state.
 $\tau$ and $\tau_\sharp$ would take this extra internal state $\alpha$ as input, and the backward map would output both $z$ and $\alpha'$, $\tau_\sharp(\alpha,\tilde y,y)=(y',\alpha')$, where $\alpha'$ would typically be an updated threshold.
 The parameters or internal state of the overall system would then be given by the pair $(\boldsymbol\theta,\alpha)$.
 In this work $\alpha=.5$ is fixed, under the assumption that an appropriate choice of $\boldsymbol\theta$ can be found for $\tilde f$ for any threshold that isn't too close to $0$ or $1$.
@@ -296,16 +294,16 @@ The input and output internal state $\boldsymbol\theta=(w,m,c)$ and $\boldsymbol
   \node(m)at ([xshift=1cm]w) {$m$};
   \node(tensor_wm)at (m|-copy_w) {$\otimes$};
 
-  \node[draw, rectangle, thick, minimum height = 1cm,minimum width=2cm] (ad)at([xshift=1cm,yshift=-3cm]t) {$\texttt{reparam}$};
-  \node(wp)at([xshift=.5cm]m-|ad){$w'$};
+  \node[draw, rectangle, thick, minimum height = 1cm,minimum width=2cm] (ad)at([xshift=1.5cm,yshift=-3cm]t) {$\texttt{reparameterisation}$};
+  \node(wp)at(m-|ad){$w'$};
   \node(mp)at([xshift=1cm]wp){$m'$};
   \node(p_wm)at(wp|-tensor_wm){$\Pi$};
 
   %\node[below=of ad] (t) {};
-  \node(tensor_du) at([xshift=.5cm,yshift=-1cm]ad.south) {$\otimes$};
+  \node(tensor_du) at([yshift=-1cm]ad.south-|wp) {$\otimes$};
 
   \node[draw, rectangle, thick, minimum height = 2cm,minimum width=2cm] (f) at([yshift=-7cm]t) {$\texttt{smooth}$};
-  \node[draw, rectangle, thick, minimum height = 1cm,minimum width=2cm] (fpfn)at([xshift=4cm,yshift=-.5cm]f) {$\texttt{moving average}$};
+  \node[draw, rectangle, thick, minimum height = 1cm,minimum width=2cm] (fpfn)at([xshift=4cm,yshift=-.5cm]f) {$\texttt{moving averages}$};
 
   \node[draw,rectangle, thick, minimum height = 2cm,minimum width=1cm] (thresh) at([xshift=8cm]f) {$\texttt{threshold}$};
 
@@ -330,7 +328,7 @@ The input and output internal state $\boldsymbol\theta=(w,m,c)$ and $\boldsymbol
   \path[thick] (p_wm)edge(p_wm-|mp);
   \path[-latex,thick,auto] (p_wm-|mp)edge(mp);
 
-  \path[thick] (f.north -| m) edge["{$(d\texttt{fp},\texttt{dfn})$}",'] (tensor_du -| m);
+  \path[thick] (f.north -| m) edge["{$(\partial_w\texttt{fp},\partial_w\texttt{fn})$}",'] (tensor_du -| m);
   \path[-latex,thick,auto] (tensor_du -| m) edge (tensor_du);
 
   \path[-latex, thick, auto] (tensor_du) edge (ad.south-|tensor_du);
