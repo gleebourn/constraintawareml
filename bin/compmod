@@ -1,0 +1,111 @@
+#!/usr/bin/env python
+from sys import path,stdin
+from select import select
+from pickle import load,dump
+
+from jax.random import key,normal,split
+from jax.numpy import array,linspace
+
+from matplotlib.pyplot import imshow,legend,plot,show
+from matplotlib.patches import Patch
+
+from pathlib import Path
+path.append(str(Path('.').absolute()))
+from cal.composite import mk_model_f,mk_model_b,init_model_params,get_thresh,\
+                          mk_smooth_f,init_smooth_params,randomise_weights
+
+from sklearn.utils.extmath import cartesian
+k=key(111000111)
+
+in_dim=2
+
+#Model
+layer_dims=[64]*20
+try:
+  with open('compmod.pkl','rb') as f:
+    print('Loading existing model...')
+    wmc,target_layer_dims,target_w,target_thresh,bs,step_num,k=load(f)
+    in_dim=wmc.in_dim
+except FileNotFoundError:
+  print('Generating new model...')
+  wmc=init_model_params(in_dim,layer_dims,k)
+  k=split(k)[0]
+  
+  #Target
+  target_layer_dims=[64]*30
+  target_w=init_smooth_params(in_dim,target_layer_dims)
+  randomise_weights(target_w,k)
+  k=split(k)[0]
+  
+  #The target distribution needs an appropriate imbalance
+  #Assume p small
+  k=split(k)[0]
+  
+  bs=32
+  step_num=0
+
+
+target_f=mk_smooth_f(target_layer_dims) 
+target_thresh=target_thresh if step_num else\
+              get_thresh(target_p=.1,weights=target_w,batch_size=10000,
+                         key=k,forward=target_f,in_dim=in_dim)
+
+print('Target threshold:',target_thresh)
+model_f=mk_model_f(wmc.w_shape)
+model_b=mk_model_b(wmc.w_shape)
+
+while True:
+  k,k_plot=split(k)
+  x=normal(k,(bs,in_dim))
+  y=target_f(target_w,x)>target_thresh
+  wmc=model_b(wmc,x,y)
+  step_num+=1
+
+  if step_num%10:
+    continue
+  print(wmc.c)
+  if step_num%100:
+    continue
+  
+  with open('compmod.pkl','wb') as f:
+    dump((wmc,target_layer_dims,target_w,target_thresh,bs,step_num,k),f)
+
+  rough_num_samples=0
+  while stdin in select([stdin],[],[],0)[0]:
+    rough_num_samples+=10000
+    if 'x' in stdin.readline().lower():
+      print('Bye!')
+      exit()
+  if rough_num_samples:
+    coord_square=4
+    positions_per_dimension=int(rough_num_samples**(1/wmc.in_dim))
+    num_samples=positions_per_dimension**wmc.in_dim
+    #block_size=num_samples//plot_num_blocks
+    print('Plotting',num_samples,'samples...')
+    #Gaussian sampling probably better for large in_dim...
+    x=cartesian([linspace(-coord_square,coord_square,num=positions_per_dimension)]*wmc.in_dim)
+    y_t=target_f(target_w,x)>target_thresh
+    y_p=model_f(wmc,x)
+     
+    if wmc.in_dim==1:
+      plot(x,y_t,color='blue',label='target')
+      plot(x,y_p,color='red',label='approximant')
+      show()
+    elif wmc.in_dim==2: 
+      fp_img=y_p&(~y_t)
+      fn_img=(~y_p)&y_t
+      tp_img=y_p&y_t
+      tn_img=(~y_p)&(~y_t)
+      col_mat=[[1.,0,0],[0,1,0],[1,1,1],[0,0,0]]#fp,fn,tp,tn
+      cols=array([fp_img,fn_img,tp_img,tn_img]).T.dot(array(col_mat)).\
+           reshape(positions_per_dimension,positions_per_dimension,3)
+      imshow(cols,extent=[-coord_square,coord_square]*2)
+      legend(handles=[Patch(color=c,label=s) for c,s in\
+                           zip(col_mat,['FP','FN','TP','TN'])])
+      show()
+    #density=pdf(x).prod(axis=1)
+    #hist(y_true,color='blue',label='target',weights=density,bins=50,histtype='step')
+    #hist(y_pred,color='red',label='approximant',weights=density,bins=50,histtype='step')
+    #show()
+
+  

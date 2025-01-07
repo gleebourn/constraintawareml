@@ -19,6 +19,7 @@
 \usetikzlibrary{positioning}
 \usetikzlibrary{calc}
 \usetikzlibrary{quotes}
+%\usepackage{sansmathfonts}
 \usepackage[T1]{fontenc}
 
 \pgfplotsset{compat=1.16}
@@ -103,7 +104,6 @@ Write $\mathbb P_{\boldsymbol\theta}$ for the probabilities of events for such a
 \item the $\textbf{recall}=\mathbb P_{\boldsymbol\theta}(\text{we predicted }+|+)$.
 \end{itemize}
 \subsection{Representing models diagrammatically}
-Here 
 From the perspective of learning, the function $f_{\boldsymbol\theta}$ defines the inference of a given model with internal state $\boldsymbol\theta$.
 This may be represented by the diagram
 \begin{figure}[H]
@@ -148,7 +148,7 @@ This may be represented by a a copy operation which is denoted $\Delta$:
   \draw[-latex,thick,auto] (d) to ([xshift=-1cm]d) to ([xshift=-1cm,yshift=1cm]ff.north) to ([yshift=1cm]ff.north)to(ff.north);
 \end{tikzpicture}
 \\
-is a decomposition of\\
+is a graphical decomposition of\\
 \begin{tikzpicture}
   \node(t) {$\boldsymbol\theta$};
   \node[draw, rectangle, thick, below= of t, minimum height = 1cm,minimum width=1cm] (f) {$(\boldsymbol\theta,x_1,x_2)\mapsto(f_{\boldsymbol\theta}(x_1),f_{\boldsymbol\theta}(x_2))$};
@@ -239,7 +239,7 @@ The parameters or internal state of the overall system would then be given by th
 In this work $\alpha=.5$ is fixed, under the assumption that an appropriate choice of $\boldsymbol\theta$ can be found for $\tilde f$ for any threshold that isn't too close to $0$ or $1$.
 Indeed, any model which terminates with the single parameter layer $L(\alpha,t)$ taking inputs $t\in(0,1)$ such that
 $$
-L(\alpha,t)=\begin{cases}\tfrac1{2\alpha}t~\text{if}~t<\tfrac12\text{and}\\\tfrac{t+1-2\alpha}{2(1-\alpha}~\text{otherwise}\end{cases}
+L(\alpha,t)=\begin{cases}\tfrac1{2\alpha}t~\text{if}~t<\tfrac12~\text{and}\\\tfrac{t+1-2\alpha}{2(1-\alpha}~\text{otherwise}\end{cases}
 $$
 demonstrates the redundancy of finding such a threshold as a separate step.
 \section{An adaptive gradient rule}
@@ -270,14 +270,16 @@ Their importance lies in the observation that when used as update functions, the
 If the $\tilde y_i$s were interpreted as probabilities of being in the positive class, then these gradients could be understood as moving the distribution in the direction of maximum likelihood for the batch, but this isn't exactly what the smooth model's target output is.
 \subsection{Developing candidate loss functions}
 At each point in training, the aim for a classification problem is to update the weights of the smooth model to decrease $\texttt{fn}$ and $\texttt{fp}$ while increasing $\texttt{tn}$ and $\texttt{tp}$.
-Write $\partial_{\boldsymbol\theta}$ for derivatives with respect to the parameters.
-In choosing a gradient update in these directions, only the smooth false positive and negative gradients need be considered, since $\partial_{\boldsymbol\theta}\texttt{tp}_{\mathcal F}(\boldsymbol\theta)=-\partial_{\boldsymbol\theta}\texttt{fn}_{\mathcal F}(\boldsymbol\theta)$ and $\partial_{\boldsymbol\theta}\texttt{tn}_{\mathcal F}(\boldsymbol\theta)=-\partial_{\boldsymbol\theta}\texttt{fp}_{\mathcal F}(\boldsymbol\theta)$.
+Write $w_\texttt{s}$ for the weights of a smooth model, which will be a component of $\boldsymbol\theta$, and write $\partial_\texttt{s}$ for derivatives with respect to the parameters.
+Though reparameterisation schemes, in particular based on adam, will be used here, the fundamental ingredient for the update of a smooth model is based on some gradient in a presumed direction of increasing performance.
+Here it is assumed that this initial gradient direction lies in the space spanned by the gradients of these smooth statistics.
+In choosing a gradient update in these directions, only the smooth false positive and negative gradients need be considered, since $\partial_\texttt{s}\texttt{tp}_{\mathcal F}=-\partial_\texttt{s}\texttt{fn}_{\mathcal F}$ and $\partial_\texttt{s}\texttt{tn}_{\mathcal F}=-\partial_\texttt{s}\texttt{fp}_{\mathcal F}(\boldsymbol\theta)$.
 
-The update we generally expect that we will make an update to the parameters in the direction spanned by $\partial_{\boldsymbol\theta}\texttt{tp}_{\mathcal F}(\boldsymbol\theta)$ and $\partial_{\boldsymbol\theta}\texttt{tn}_{\mathcal F}(\boldsymbol\theta)$.
+The update we generally expect that we will make an update to the parameters in the direction spanned by $\partial_\texttt{s}\texttt{tp}_{\mathcal F}(\boldsymbol\theta)$ and $\partial_\texttt{s}\texttt{tn}_{\mathcal F}(\boldsymbol\theta)$.
 Smooth functions that depend only upon these smooth confusion statistics are essentially the class of ``score oriented loss functions'' described in \cite{marchetti2022score}.
-In the case considered here the approach is to allow $U$ and $V$ to depend directly on the discrete performance statistics.
+Here the approach is to allow $U$ and $V$ to depend directly on the discrete performance statistics:
 $$
-\delta\boldsymbol\theta\propto-U\partial_{\boldsymbol\theta}\texttt{fp}_{\mathcal F}(\boldsymbol\theta)-V\partial_{\boldsymbol\theta}\texttt{fn}_{\mathcal F}(\boldsymbol\theta)=\partial_{\boldsymbol\theta}(-U\texttt{fp}(\boldsymbol\theta)-V\texttt{fn}(\boldsymbol\theta))=\partial_{\boldsymbol\theta}\Phi(\texttt{fp}(\boldsymbol\theta),\texttt{fn}(\boldsymbol\theta),U,V).
+\delta w_\texttt{s}\propto-U\partial_\texttt{s}\texttt{fp}_{\mathcal F}-V\partial_\texttt{s}{fn}_{\mathcal F}=\partial_\texttt{s}(-U\texttt{fp}-V\texttt{fn})=\partial_\texttt{s}\Phi(\texttt{fp}(\boldsymbol\theta),\texttt{fn}(\boldsymbol\theta),U,V).
 $$
 Intuitively it might be epected that $U$ and $V>0$ should reflect the relative amount that the model needs to improve on the rates of false positives and false negatives.
 Functions similar to $\Phi$, in particular, .
@@ -285,18 +287,65 @@ Here the function is allowed to depend upon parameters $U$ and $V$ which can ref
 Correspondingly the overall model may be further decomposed into a network layer followed by a layer which tracks these weights.
 In addition, it is often empirically found to be a good idea to not use just the gradient as the update, but typically there is some kind of averaged update, such as adam \cite{kingma2017adammethodstochasticoptimization}.
 Introducing a second type of block - a so-called reparameterisation - allows for further factoring of the model into its constituent parts.
-The input and output internal state $\boldsymbol\theta=(w,m,c)$ and $\boldsymbol\theta'=(w',m',c')$ is made up of where $(w,w')$ representing the weights of the smooth model, $(m,m')$ the weights of the reparameterisation routine, and $(c,c')$ data dependent upon the binary confusion statistics.
+The input and output internal state $\boldsymbol\theta=(w_\texttt{s},w_\texttt{r},w_\texttt{avg})$ and $\boldsymbol\theta'=(w_\texttt{s}',w_\texttt{r}',w_\texttt{avg}')$ where subscript $\texttt{s}$ represents the weights of the smooth model, $\texttt{r}$ the weights of the reparameterisation and $\texttt{avg}$ statistics relating to the binary performance of the model.
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}
-  \node(w) {$w$};
+  \node(w) {$w_\texttt{s}$};
+  \node(m)at ([xshift=1cm]w) {$w_\texttt{r}$};
+  \node[draw, rectangle, thick, minimum height = 1cm,minimum width=6cm] (ad)at([xshift=1.5cm,yshift=-3cm]t) {$\texttt{reparameterisation}$};
+
+  \node[draw, rectangle, thick, minimum height = 2cm,minimum width=2cm] (f) at([yshift=-7cm]t) {$\texttt{smooth}$};
+  \node[draw, rectangle, thick, minimum height = 1cm,minimum width=2cm] (fpfn)at([xshift=4cm,yshift=-.5cm]f) {$\texttt{moving averages}$};
+
+  \node[draw,rectangle, thick, minimum height = 2cm,minimum width=1cm] (thresh) at([xshift=8cm]f) {$\texttt{threshold}$};
+
+  \node[left=of f](x){};
+  \node(x_in)at([yshift=.5cm]x){$x$};
+
+ \node(D)at([xshift=1cm,yshift=-.5cm]thresh.east){$\Delta$};
+  \node[right= of D] (y_true){$y$};
+  \node(y_pred) at([yshift=1cm]y_true) {$\hat y$};
+
+  \node(c)at([xshift=-.5cm]fpfn|-w){$w_\texttt{avg}$};
+  \node(cp)at([xshift=1cm]c){$w_\texttt{avg}'$};
+
+  \path[-latex, thick, auto] (ad.north-|p_wm) edge (p_wm);
+  \path[-latex, thick, auto] (p_wm)edge(wp);
+  \path[thick] (p_wm)edge(p_wm-|mp);
+  \path[-latex,thick,auto] (p_wm-|mp)edge(mp);
+
+  \path[thick] (f.north -| m) edge["{$(\partial_w\texttt{fp},\partial_w\texttt{fn})$}",'] (tensor_du -| m);
+
+  \path[-latex, thick, auto] (c) edge (fpfn.north -| c);
+  \path[-latex, thick, auto] (fpfn.north -| cp) edge (p);
+  \path[-latex, thick, auto] (p) edge (cp);
+
+  \path[-latex, thick, auto] (x_in) edge (f.west |- x_in);
+
+  \path[-latex, thick, auto] ([yshift=.5cm]f.east) edge["$\tilde y$",pos=.8] ([yshift=.5cm]thresh.west);
+  \path[-latex, thick, auto] (D) edge ([yshift=-.5cm]thresh.east);
+  %\path[thick] (D) edge["{$(FP,FN)$}",pos=.7] (junct-|D);
+  \draw[-latex,thick,auto] (D) to ([yshift=-1cm]D) to ([xshift=1cm,yshift=-1cm]f.east|-y_true) to ([xshift=1cm]f.east|-y_true)to(f.east|-y_true);
+
+
+
+  \path[-latex, thick, auto] (thresh.east |- y_pred) edge (y_pred);
+  \path[-latex, thick, auto] (y_true) edge (D);
+\end{tikzpicture}
+\end{figure}
+Breaking down the internal logic further the model is described by the diagram
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+  \node(w) {$w_\texttt{s}$};
   \node(copy_w) at([yshift=-1.5cm]w) {$\Delta$};
-  \node(m)at ([xshift=1cm]w) {$m$};
+  \node(m)at ([xshift=1cm]w) {$w_\texttt{r}$};
   \node(tensor_wm)at (m|-copy_w) {$\otimes$};
 
   \node[draw, rectangle, thick, minimum height = 1cm,minimum width=2cm] (ad)at([xshift=1.5cm,yshift=-3cm]t) {$\texttt{reparameterisation}$};
-  \node(wp)at(m-|ad){$w'$};
-  \node(mp)at([xshift=1cm]wp){$m'$};
+  \node(wp)at(m-|ad){$w_\texttt{s}'$};
+  \node(mp)at([xshift=1cm]wp){$w_\texttt{r}'$};
   \node(p_wm)at(wp|-tensor_wm){$\Pi$};
 
   %\node[below=of ad] (t) {};
@@ -314,8 +363,8 @@ The input and output internal state $\boldsymbol\theta=(w,m,c)$ and $\boldsymbol
   \node[right= of D] (y_true){$y$};
   \node(y_pred) at([yshift=1cm]y_true) {$\hat y$};
 
-  \node(c)at([xshift=-.5cm]fpfn|-w){$c$};
-  \node(cp)at([xshift=1cm]c){$c'$};
+  \node(c)at([xshift=-.5cm]fpfn|-w){$w_\texttt{avg}$};
+  \node(cp)at([xshift=1cm]c){$w_\texttt{avg}'$};
   \node(p)at(cp|-tensor_du){$\Pi$};
 
   \path[-latex, thick, auto] (w) edge (copy_w);
