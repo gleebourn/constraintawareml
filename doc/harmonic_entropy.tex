@@ -1,0 +1,88 @@
+\documentclass[10pt,a4paper]{article}
+\pdfoutput=1
+\usepackage[margin=1in,footskip=0.25in]{geometry}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{mathtools}
+\usepackage{xparse}
+\usepackage{cite}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{geometry}
+\usepackage{pgfplots}
+\usepackage{listings}
+\usepackage{tikz}
+\usepackage{stmaryrd}
+\usepackage{float}
+\usetikzlibrary{positioning}
+\usetikzlibrary{calc}
+\usetikzlibrary{quotes}
+%\usepackage{sansmathfonts}
+\usepackage[T1]{fontenc}
+
+\pgfplotsset{compat=1.16}
+
+\newtheorem{claim}{Claim}
+\newtheorem{rmk}{Remark}
+\newtheorem{defn}[claim]{Definition}
+\newtheorem{eg}[claim]{Example}
+\newtheorem{lem}[claim]{Lemma}
+\newtheorem{thm}[claim]{Theorem}
+\newtheorem{cor}[claim]{Corollary}
+
+\DeclareMathOperator{\spn}{span}
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\prj}{Proj}
+\DeclareMathOperator{\mat}{Mat}
+\DeclareMathOperator{\codim}{codim}
+
+\DeclareMathOperator{\be}{\text{\fontencoding{X2}\selectfont б}}
+\DeclareMathOperator{\ve}{\text{\fontencoding{X2}\selectfont в}}
+\DeclareMathOperator{\ghe}{\text{\fontencoding{X2}\selectfont г}}
+
+\newcommand{\xrightarrowdbl}[2][]{
+  \xrightarrow[#1]{#2}\mathrel{\mkern-14mu}\rightarrow
+}
+
+\NewDocumentCommand \bern { O{k} }{
+    \rho_{#1}
+}
+
+\NewDocumentCommand \calLp { O{n} O{\omega} }{
+    {\mathcal L'}^{(#1)}_{#2}
+}
+\NewDocumentCommand \calL { O{n} O{\alpha^{-n}\omega} }{
+    \mathcal L^{(#1)}_{#2}
+}
+\NewDocumentCommand \Lab { O{a} O{b} }{
+    \mathcal L_{#1\rightarrow#2}
+}
+
+\newcommand{\ubar}[1]{\text{\b{$#1$}}}
+
+\title{Learning and music}
+\author{George Lee}
+\begin{document}
+\maketitle
+\section{Reasoning about tonal states}
+The ear is generally assumed to pick up frequencies from 20 to 20000 Herz or so.
+Here the training of a layer that maps pcm data to features that correspond to tonally useful data is discussed.
+No claim of any kind of general structure of music is made, but some possible seemingly popular themes are used as inspiration.
+
+Let $\Lambda\subset\mathbb R_{>0}$ represent the range of possible frequencies that we are interested in thinking about, with $a=\inf(\Lambda)<\sup(\Lambda)=b$.
+Let $\Gamma=\{x\in\Lambda^{<\infty}:x_1<\cdots<x_{\texttt{len}(x)}\}$.
+\subsection{A just approach}
+It seems common in music to rely on simple ratios between different notes.
+A just chord may be related to the possible ratios $\Phi=\{x\in\mathbb N^{<\infty}:x_1<\cdots<x_{\texttt{len}(x)},\text{hcf}(x)=1\}$.
+Important just chords include:
+\begin{itemize}
+  \item an octave $1:2$.
+    It is possible to restrict $\Lambda$ in this section to lie between unison and an octave, or even quotient out all intervals that are equivalent to multiples of $2$.
+    Write $\sim_8$ for equivalent ratios under this equivalence
+    Within the octave, every interval may be mapped to its ``inversion'' by multiplying the lower note by $2$ and switching their order.
+  \item a ``perfect fifth/v'' $2:3$, which can be related to the ``perfect fourth'' by the inversion $2:3\sim_83:4$.
+  \item 
+\end{itemize}
+\end{document}

@@ -4,7 +4,7 @@ from select import select
 from pickle import load,dump
 
 from jax.random import key,normal,split
-from jax.numpy import array,linspace
+from jax.numpy import array,linspace,sum as nsm
 
 from matplotlib.pyplot import imshow,legend,plot,show
 from matplotlib.patches import Patch
@@ -12,7 +12,8 @@ from matplotlib.patches import Patch
 from pathlib import Path
 path.append(str(Path('.').absolute()))
 from cal.composite import mk_model_f,mk_model_b,init_model_params,get_thresh,\
-                          mk_smooth_f,init_smooth_params,randomise_weights
+                          mk_smooth_f,init_smooth_params,randomise_weights,\
+                          empirical_network_weight_variance
 
 from sklearn.utils.extmath import cartesian
 k=key(111000111)
@@ -20,7 +21,7 @@ k=key(111000111)
 in_dim=2
 
 #Model
-layer_dims=[64]*20
+layer_dims=[16]*16
 try:
   with open('compmod.pkl','rb') as f:
     print('Loading existing model...')
@@ -32,80 +33,112 @@ except FileNotFoundError:
   k=split(k)[0]
   
   #Target
-  target_layer_dims=[64]*30
+  target_layer_dims=[16]*16
   target_w=init_smooth_params(in_dim,target_layer_dims)
-  randomise_weights(target_w,k)
-  k=split(k)[0]
-  
-  #The target distribution needs an appropriate imbalance
-  #Assume p small
   k=split(k)[0]
   
   bs=32
   step_num=0
 
+target_smooth_f=mk_smooth_f(target_layer_dims,activation='sigmoid') 
+if not step_num:
+  randomise_weights(target_w,k)
+  k=split(k)[0]
+  #target_var=.2
+  target_weight_variance=4.#empirical_network_weight_variance(target_smooth_f,target_w,
+               #                                  target_var,in_dim,k)
+  print('Chosen variance for target network shape:',target_weight_variance)
+  for i in target_w:
+    if len(target_w[i].shape)==2:
+      target_w[i]*=target_weight_variance
+  target_thresh=get_thresh(target_p=.1,weights=target_w,
+                           tolerance=wmc.c.binomial_averaging_tolerance,
+                           key=k,forward=target_smooth_f,in_dim=in_dim)
 
-target_f=mk_smooth_f(target_layer_dims) 
-target_thresh=target_thresh if step_num else\
-              get_thresh(target_p=.1,weights=target_w,batch_size=10000,
-                         key=k,forward=target_f,in_dim=in_dim)
+target_f=lambda x:target_smooth_f(target_w,x)>target_thresh
 
 print('Target threshold:',target_thresh)
-model_f=mk_model_f(wmc.w_shape)
+model_f=mk_model_f(wmc.w_shape,activation='sigmoid')
 model_b=mk_model_b(wmc.w_shape)
 
 while True:
   k,k_plot=split(k)
   x=normal(k,(bs,in_dim))
-  y=target_f(target_w,x)>target_thresh
+  y=target_f(x)
   wmc=model_b(wmc,x,y)
   step_num+=1
 
-  if step_num%10:
-    continue
-  print(wmc.c)
   if step_num%100:
     continue
-  
+  print('fp,fn',wmc.c.fp,wmc.c.fn)
+  print('U,V',wmc.c.U,wmc.c.V)
+  #print('lr',wmc.m.lr)
+  print('Recent motion of weights:')
+  for f in wmc.m.norm_step[-20:]:
+    print(f)
   with open('compmod.pkl','wb') as f:
     dump((wmc,target_layer_dims,target_w,target_thresh,bs,step_num,k),f)
 
-  rough_num_samples=0
-  while stdin in select([stdin],[],[],0)[0]:
-    rough_num_samples+=10000
-    if 'x' in stdin.readline().lower():
+  coord_square=2
+  im_size_factor=-1
+  while True:
+    if stdin in select([stdin],[],[],0)[0]:
+      inp=stdin.readline().lower()
+      im_size_factor+=1
+    else:
+  
+      if im_size_factor<0: break
+      print('==== step number',step_num,'====')
+      print('Binary confusion data')
+      for a,b in vars(wmc.c).items():
+        print(a.ljust(40),b)
+      print('Neural network reparametrisation data')
+      for a,b in vars(wmc.m).items():
+        if a in ['dfp','dfn']:
+          norm=0
+          for l in b:
+            norm+=nsm(b[l]**2)
+          b=norm**.5
+          a='|'+a+'|'
+        if a=='norm_step':continue
+        print(a.ljust(40),b)
+      print('Neural network weights')
+      for a,b in wmc.w.items():
+        print(('|'+a[0]+'_'+str(a[1])+'|').ljust(40),nsm(b**2)**.5)
+      print('============================')
+      break
+    if 'x' in inp:
       print('Bye!')
       exit()
-  if rough_num_samples:
-    coord_square=4
-    positions_per_dimension=int(rough_num_samples**(1/wmc.in_dim))
-    num_samples=positions_per_dimension**wmc.in_dim
-    #block_size=num_samples//plot_num_blocks
-    print('Plotting',num_samples,'samples...')
-    #Gaussian sampling probably better for large in_dim...
-    x=cartesian([linspace(-coord_square,coord_square,num=positions_per_dimension)]*wmc.in_dim)
-    y_t=target_f(target_w,x)>target_thresh
-    y_p=model_f(wmc,x)
-     
-    if wmc.in_dim==1:
-      plot(x,y_t,color='blue',label='target')
-      plot(x,y_p,color='red',label='approximant')
-      show()
-    elif wmc.in_dim==2: 
-      fp_img=y_p&(~y_t)
-      fn_img=(~y_p)&y_t
-      tp_img=y_p&y_t
-      tn_img=(~y_p)&(~y_t)
-      col_mat=[[1.,0,0],[0,1,0],[1,1,1],[0,0,0]]#fp,fn,tp,tn
-      cols=array([fp_img,fn_img,tp_img,tn_img]).T.dot(array(col_mat)).\
-           reshape(positions_per_dimension,positions_per_dimension,3)
-      imshow(cols,extent=[-coord_square,coord_square]*2)
-      legend(handles=[Patch(color=c,label=s) for c,s in\
-                           zip(col_mat,['FP','FN','TP','TN'])])
-      show()
-    #density=pdf(x).prod(axis=1)
-    #hist(y_true,color='blue',label='target',weights=density,bins=50,histtype='step')
-    #hist(y_pred,color='red',label='approximant',weights=density,bins=50,histtype='step')
-    #show()
+    try:
+      coord_square=int(inp[0])
+    except:
+      pass
 
-  
+  if im_size_factor<1: continue
+
+  im_size_factor*=10000
+  positions_per_dimension=int(im_size_factor**(1/wmc.in_dim))
+  num_samples=positions_per_dimension**wmc.in_dim
+  #block_size=num_samples//plot_num_blocks
+  print('Plotting',num_samples,'samples...')
+  #Gaussian sampling probably better for large in_dim...
+  x=cartesian([linspace(-coord_square,coord_square,num=positions_per_dimension)]*\
+               wmc.in_dim)
+  y_t=target_f(x)
+  y_p=model_f(wmc,x)
+   
+  if wmc.in_dim==2: 
+    fp_img=(y_p&(~y_t)).reshape(positions_per_dimension,positions_per_dimension)
+    fn_img=((~y_p)&y_t).reshape(positions_per_dimension,positions_per_dimension)
+    tp_img=(y_p&y_t).reshape(positions_per_dimension,positions_per_dimension)
+    tn_img=(~(y_p|y_t)).reshape(positions_per_dimension,positions_per_dimension)
+    col_mat=[[1.,0,0],[0,1,0],[1,1,1],[0,0,0]]#fp,fn,tp,tn
+    cols=array([fp_img,fn_img,tp_img,tn_img]).T.dot(array(col_mat))
+    imshow(cols,extent=[-coord_square,coord_square]*2)
+    legend(handles=[Patch(color=c,label=s) for c,s in\
+                         zip(col_mat,['FP','FN','TP','TN'])])
+    show()
+  while stdin in select([stdin],[],[],0)[0]:
+    stdin.readline()
+
