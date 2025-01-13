@@ -4,7 +4,7 @@ from math import log,exp,isnan
 
 from jax import grad
 from jax.nn import sigmoid,softmax
-from jax.numpy import zeros,dot,vectorize,maximum
+from jax.numpy import zeros,dot,vectorize,maximum,max as nmx
 
 from jax.random import normal,key,split
 
@@ -23,32 +23,22 @@ def moving_averages_b(c,conf):
   c._fn=conf.fn/conf.l
   c._tp=conf.tp/conf.l
   c._tn=conf.tn/conf.l
-  c.fp_amnt=min(c.binomial_averaging_tolerance,min(c.fp,1-c.fp)**1.5*conf.l)
-  c.fn_amnt=min(c.binomial_averaging_tolerance,min(c.fn,1-c.fn)**1.5*conf.l)
+  #Nonlinear weighted average
+  #covers all possible p values but should take care to justify
+  #Slow down averaging with the learning rate
+  c.fp_amnt=c.binomial_averaging_tolerance*min(1,conf.l*min(c.fp,1-c.fp))*(2*c.lr)**2
+  c.fn_amnt=c.binomial_averaging_tolerance*min(1,conf.l*min(c.fn,1-c.fn))*(2*c.lr)**2
 
   c.fp=(1-c.fp_amnt)*c.fp+c.fp_amnt*c._fp
   c.fn=(1-c.fn_amnt)*c.fn+c.fn_amnt*c._fn
   approach_fp=approach_fn=0
-  #fp_ok=c.fp<c.target_fp
-  #fn_ok=c.fn<c.target_fn
-  #if fp_ok and not fn_ok:
-  #  approach_fp=c.fp
-  #elif not fp_ok and fn_ok:
-  #  approach_fn=c.fn
-  #U,V=(c.fp-approach_fp)/c.target_fp,(c.fn-approach_fn)/c.target_fn
-  #U,V=c.fp/c.target_fp,c.fn/c.target_fn
-  U,V=c.target_fn*c.fp,c.target_fp*c.fn #Rescaling
-  #if U<1: U**=1/U #Accelerate decay of learning when in good region
-  #if V<1: V**=1/V
-  if U/V<c.min_gradient_ratio: #Make smaller
-    V=U/c.min_gradient_ratio
-  elif U/V>1/c.min_gradient_ratio:
-    U=V/c.min_gradient_ratio
-  mUmV=exp(U/V-V/U) if min(U,V)<c.target_fp*c.target_fn else 1
-  #U**=1/mUmV if U<1 else mUmV
-  #V**=mUmV if V<1 else 1/mUmV
-  c.U=.01*U/(1+1/mUmV)
-  c.V=.01*V/(1+mUmV)
+  U,V=c.fp/c.target_fp,c.fn/c.target_fn
+  #c.lr=4*max(c.fp,c.fn)**.5 May do...
+  max_conf=max(c.fp,c.fn)
+  c.lr=min(1,-2/log(max_conf*(1-max_conf)))
+  s=softmax(array([-1/U,-1/V]))
+  c.U=c.lr*s[0]#*U#/(1+1/mUmV)
+  c.V=c.lr*s[1]#*V#/(1+mUmV)
   return c
 
 def init_smooth_params(in_dim,layer_dims):
@@ -77,20 +67,20 @@ def mk_smooth_f(layer_dims,activation='sigmoid'):
     ret=vectorize(smooth_f_unbatched,excluded=[0],signature='(n)->()')
   return ret
 
-  
+
 def mk_smooth_b(layer_dims):
   smooth_f=mk_smooth_f(layer_dims)
   def c_fp(p,x,y):
     return dot(smooth_f(p,x),~y)
   def c_fn(p,x,y):
     return dot(1-smooth_f(p,x),y)
-  
+
   dfp=grad(c_fp,argnums=0)
   dfn=grad(c_fn,argnums=0)
-  
+
   def smooth_b(p,x,y):
     return SimpleNamespace(dfp=dfp(p,x,y),dfn=dfn(p,x,y))
-    
+
   return smooth_b
 
 
@@ -103,45 +93,35 @@ def reparameterisation_u(wmc):
   for k in wmc.d.dfp:
     wmc.m.dfp[k]*=wmc.m.beta1
     wmc.m.dfn[k]*=wmc.m.beta1
-    wmc.m.dfp[k]+=wmc.c.U*(1-wmc.m.beta1)*wmc.d.dfp[k]
-    wmc.m.dfn[k]+=wmc.c.V*(1-wmc.m.beta1)*wmc.d.dfn[k]
+    wmc.m.dfp[k]+=(1-wmc.m.beta1)*wmc.d.dfp[k]#wmc.c.U*
+    wmc.m.dfn[k]+=(1-wmc.m.beta1)*wmc.d.dfn[k]#wmc.c.V*
     size_dfp[k]=nsm(wmc.d.dfp[k]**2)
     size_dfn[k]=nsm(wmc.d.dfn[k]**2)
     wmc.m.v_fp+=(1-wmc.m.beta2)*size_dfp[k]
     wmc.m.v_fn+=(1-wmc.m.beta2)*size_dfn[k]
-
-  div_fp=(wmc.m.eps+wmc.m.v_fp)
-  div_fn=(wmc.m.eps+wmc.m.v_fn)
-  #div_fp=(wmc.m.eps+wmc.m.v_fp**.5)
-  #div_fn=(wmc.m.eps+wmc.m.v_fn**.5)
+  #div_fp=(wmc.m.eps+wmc.m.v_fp)
+  #div_fn=(wmc.m.eps+wmc.m.v_fn)
+  div_fp=(wmc.m.eps+wmc.m.v_fp**.5)
+  div_fn=(wmc.m.eps+wmc.m.v_fn**.5)
   max_recent_deltas=max(wmc.m.norm_step[-10:])
   min_recent_deltas=max(wmc.m.norm_step[-10:])
   delta_size=0
+  #delta_max_next=0
+  dw_l2=0
   for k in wmc.w:
-    #delta=wmc.m.lr*(wmc.m.dfp[k]/div_fp+wmc.m.dfn[k]/div_fn)
-    delta=wmc.m.dfp[k]/div_fp+wmc.m.dfn[k]/div_fn
-    div_l2=(size_dfp[k]+size_dfn[k])**.5
-    #if div_l2<1wmc.m.lr**2: #I gradient banishing, decay params
-    #  w_abs=maximum(abs(wmc.w[k]),1)/(1+div_l2)
-    #  wmc.w[k]*=w_abs**-.1*wmc.m.lr #Nonlinearly punish large coeffs
-    #elif div_l2>1: #I gradient banishing, decay params
-    #  delta/=div_l2
+    delta=wmc.c.U*wmc.m.dfp[k]/div_fp+wmc.c.V*wmc.m.dfn[k]/div_fn
+    wmc.m.w_l2[k]=nsm(wmc.w[k]**2)
+    wmc.m.dw_l2[k]=nsm(delta**2)
+    dw_l2+=wmc.m.dw_l2[k]
+    try:
+      l=wmc.w[k].shape[1]
+    except:
+      l=1
+    #wmc.w[k]*=exp(min(0,l-wmc.m.w_l2[k]))
 
-    delta_size+=nsm(delta*wmc.w[k]) #Related to change in L2 norm
     wmc.w[k]-=delta#/(wmc.m.eps+max_recent_deltas)
-
-  #if max_recent_deltas<wmc.m.lr**2:
-  #  mult=(wmc.m.lr_max-wmc.m.lr)
-  #  #wmc.m.lr+=wmc.m.lr*(wmc.m.lr_max-wmc.m.lr)**2#keep 0<lr<lrmax
-  #  wmc.m.lr*=(1+mult**(1+mult))
-  #elif min_recent_deltas**2>wmc.m.lr:
-  #  #wmc.m.lr-=(wmc.m.lr_max-wmc.m.lr)*wmc.m.lr**2
-  #  wmc.m.lr*=(1-wmc.m.lr**(1+wmc.m.lr))
-  #wmc.m.lr*=(1+(wmc.m.lr_max-wmc.m.lr)**(wmc.m.lr_max-wmc.m.lr+1))**(
-  #           /(1+wmc.m.lr**(wmx.m.lr+1)))**\
-  #           (min_recent_deltas-max_recent_deltas-.5*wmc.m.lr)
-
-  wmc.m.norm_step.append(abs(float(delta_size)))
+  #wmc.m.delta_max=delta_max_next
+  wmc.m.norm_step.append(dw_l2)
 
   if isnan(wmc.m.norm_step[-1] ):
     print('Encountered nans!')
@@ -168,11 +148,13 @@ def mk_model_b(layer_dims):
   return model_b
 
 def randomise_weights(w,k,sigma=1.):
+  k=split(k)[0]
   for i in w:
     try:
       w[i]=normal(k,w[i].shape)*sigma
-      #if len(w[i].shape)==2:
-      #  w[i]*=w[i].shape[1]**-.5
+      if len(w[i].shape)==2:
+        #w[i]/=w[i].shape[1]#*=w[i].shape[1]**-.5
+        w[i]*=w[i].shape[1]**-.5
     except AttributeError:
       w[i]=normal(k)*sigma
     k=split(k)[0]
@@ -213,30 +195,25 @@ def empirical_network_weight_variance(forward,w,v,in_dim,key,sigma_min=.1,sigma_
   return sum(sigmas)/len(sigmas)
 
 
-def init_model_params(in_dim,layer_dims,k,optimise_variance=False):
+def init_model_params(in_dim,layer_dims,k,sigma=1.,optimise_variance=False):
   #Smooth map weights
   w_shape=layer_dims
   w=init_smooth_params(in_dim,layer_dims)
-  randomise_weights(w,k)
-  if optimise_variance:
-    forward=mk_smooth_f(layer_dims)
-    sigma_model=1.#empirical_network_weight_variance(forward,w,.1,in_dim,key)
-    for k in w:
-      if(w[k].shape)==2:
-        w[k]*=sigma_model
+  randomise_weights(w,k,sigma=sigma)
 
   #Reparameterisation (here:adam) variables
   m=SimpleNamespace()
   m.dfp=init_smooth_params(in_dim,layer_dims) #average of gradients
   m.dfn=init_smooth_params(in_dim,layer_dims)
+  m.w_l2={k:0. for k in w}
+  m.dw_l2={k:0. for k in w}
+  m.delta_max=1
   m.v_fn=0. #averages of gradient norms
   m.v_fp=0.
   m.beta1=.9 #gradient and norm averaging rates
-  m.beta2=.999
+  m.beta2=.9
   m.eps=1e-8 #for numerical stability
   m.norm_step=[1]
-  #m.lr=.1# learning rate - use to compute $U$ and $V$
-  #m.lr_max=.5
 
   #Binary performance tracking
   c=SimpleNamespace()
@@ -244,14 +221,17 @@ def init_model_params(in_dim,layer_dims,k,optimise_variance=False):
   c.fn=.5
   c.target_fp=.001
   c.target_fn=.1
-  c.binomial_averaging_tolerance=.01
-  c.min_gradient_ratio=max(c.target_fp,c.target_fn)
-  #if c.min_gradient_ratio>0:c.min_gradient_ratio**=-1
+  c.target_max=max(c.target_fp,c.target_fn)
+  c.target_min=min(c.target_fp,c.target_fn)
+  c.binomial_averaging_tolerance=.1#.1
+  c.min_gradient_ratio=c.target_fp*c.target_fn
   c.U=c.V=0
+  c.lr=1
   return SimpleNamespace(w=w,m=m,c=c,w_shape=w_shape,in_dim=in_dim)
 
 def get_thresh(target_p,weights,tolerance,key,forward,in_dim):
   num_samples=1/(tolerance*target_p**3)
+  key=split(key)[0]
   x=normal(key,(int(num_samples),in_dim))
   y_raw=forward(weights,x).sort()
   thresh=y_raw[-int(target_p*num_samples)]

@@ -4,7 +4,7 @@ from select import select
 from pickle import load,dump
 
 from jax.random import key,normal,split
-from jax.numpy import array,linspace,sum as nsm
+from jax.numpy import array,var,linspace,sum as nsm
 
 from matplotlib.pyplot import imshow,legend,plot,show
 from matplotlib.patches import Patch
@@ -21,7 +21,7 @@ k=key(111000111)
 in_dim=2
 
 #Model
-layer_dims=[16]*16
+layer_dims=[256]*4
 try:
   with open('compmod.pkl','rb') as f:
     print('Loading existing model...')
@@ -29,11 +29,11 @@ try:
     in_dim=wmc.in_dim
 except FileNotFoundError:
   print('Generating new model...')
-  wmc=init_model_params(in_dim,layer_dims,k)
+  wmc=init_model_params(in_dim,layer_dims,k,sigma=1.)
   k=split(k)[0]
   
   #Target
-  target_layer_dims=[16]*16
+  target_layer_dims=[256]*4
   target_w=init_smooth_params(in_dim,target_layer_dims)
   k=split(k)[0]
   
@@ -42,15 +42,15 @@ except FileNotFoundError:
 
 target_smooth_f=mk_smooth_f(target_layer_dims,activation='sigmoid') 
 if not step_num:
-  randomise_weights(target_w,k)
+  randomise_weights(target_w,k,sigma=8.)
   k=split(k)[0]
   #target_var=.2
-  target_weight_variance=4.#empirical_network_weight_variance(target_smooth_f,target_w,
+  target_weight_variance=2#empirical_network_weight_variance(target_smooth_f,target_w,
                #                                  target_var,in_dim,k)
   print('Chosen variance for target network shape:',target_weight_variance)
   for i in target_w:
-    if len(target_w[i].shape)==2:
-      target_w[i]*=target_weight_variance
+    #if len(target_w[i].shape)==2:
+    target_w[i]*=target_weight_variance
   target_thresh=get_thresh(target_p=.1,weights=target_w,
                            tolerance=wmc.c.binomial_averaging_tolerance,
                            key=k,forward=target_smooth_f,in_dim=in_dim)
@@ -71,7 +71,7 @@ while True:
   if step_num%100:
     continue
   print('fp,fn',wmc.c.fp,wmc.c.fn)
-  print('U,V',wmc.c.U,wmc.c.V)
+  print('U,V,lr',wmc.c.U,wmc.c.V,wmc.c.lr)
   #print('lr',wmc.m.lr)
   print('Recent motion of weights:')
   for f in wmc.m.norm_step[-20:]:
@@ -84,6 +84,7 @@ while True:
   while True:
     if stdin in select([stdin],[],[],0)[0]:
       inp=stdin.readline().lower()
+      #wmc.c.lr_modifier*=2**(inp.count('+')-inp.count('-'))
       im_size_factor+=1
     else:
   
@@ -100,11 +101,13 @@ while True:
             norm+=nsm(b[l]**2)
           b=norm**.5
           a='|'+a+'|'
-        if a=='norm_step':continue
+        if a in ['norm_step','w_l2','dw_l2']:continue
         print(a.ljust(40),b)
       print('Neural network weights')
       for a,b in wmc.w.items():
-        print(('|'+a[0]+'_'+str(a[1])+'|').ljust(40),nsm(b**2)**.5)
+        l=a[0]+'_'+str(a[1])
+        print(('|'+l+'|,V_w,d'+l+'L2_t').ljust(50),nsm(b**2)**.5,
+              var(b),wmc.m.dw_l2[a])
       print('============================')
       break
     if 'x' in inp:
