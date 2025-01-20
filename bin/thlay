@@ -1,0 +1,426 @@
+#!/usr/bin/env python
+from argparse import ArgumentParser
+ap=ArgumentParser()
+ap.add_argument('mode',default='all',choices=['single','all','adaptive_lr','imbalances'])
+ap.add_argument('--seed',default=20255202,type=int)
+
+ap.add_argument('-lr_resolution',default=16,type=int)
+ap.add_argument('-all_resolution',default=5,type=int)
+
+ap.add_argument('-lr_init_min',default=1e-4,type=float)
+ap.add_argument('-lr_init_max',default=1e-2,type=float)
+ap.add_argument('-lr_min',default=1e-5,type=float)
+ap.add_argument('-lr_max',default=1e-1,type=float)
+
+ap.add_argument('-lr',default=1e-4,type=float)
+ap.add_argument('-lr_update_interval',default=1000,type=int)
+ap.add_argument('-lr_update_memory',default=1000,type=int)
+
+ap.add_argument('-bs',default=1,type=int)
+
+ap.add_argument('-res',default=1000,type=int)
+
+ap.add_argument('-pkl',default='thlay.pkl')
+
+ap.add_argument('-new',action='store_true')
+
+ap.add_argument('-lr_phase',default=0.,type=float)
+ap.add_argument('-lr_momentum',default=0.05,type=float)
+ap.add_argument('-lr_amplitude',default=0.,type=float)
+
+args=ap.parse_args()
+
+from types import SimpleNamespace
+from pickle import load,dump
+from time import perf_counter
+from matplotlib.pyplot import title,imshow,legend,show,scatter,xlabel,ylabel,gca,plot
+from matplotlib import colormaps
+from matplotlib.patches import Patch
+from matplotlib.cm import jet
+from numpy import geomspace,prod
+from jax.numpy import array,array_split,dot,vectorize,add,linspace,log,exp,eye,\
+                      maximum,minimum,unique,concat,sin,sum as nsm
+from jax.random import normal,key,uniform,split,choice
+from jax.nn import tanh,softmax
+from jax import grad
+from jax.lax import scan
+from sklearn.utils.extmath import cartesian
+from sys import path,stdin
+from select import select
+from pathlib import Path
+path.append(str(Path('.').absolute()))
+
+if args.mode in ['single','imbalances']:
+  lrs=array([args.lr])
+elif args.mode=='adaptive_lr':
+  lrs=geomspace(args.lr_init_min,args.lr_init_max,num=args.lr_resolution)
+else:
+  lrs=geomspace(args.lr_init_min,args.lr_init_max,num=args.all_resolution)
+
+
+
+n_splits=100
+
+x_max=10.
+
+def act(x):
+  return minimum(1,maximum(-1,x))
+act=tanh
+
+def f_unbatched(w,x):
+  i=0
+  while ('b',i) in w:
+    x=act(x.dot(w[('w',i)])+w[('b',i)])
+    i+=1
+  return x
+f=vectorize(f_unbatched,excluded=[0],signature='(m)->(n)')
+
+def loss(w,x,y,U,V):
+  y_smooth=f(w,x)
+  #cts_fp=nsm(maximum(V-U,y_smooth)[~y])
+  #cts_fn=nsm(maximum(U-V,-y_smooth)[y])
+  cts_fp=nsm(maximum(0,y_smooth)[~y])
+  cts_fn=nsm(maximum(0,-y_smooth)[y])
+  #cts_fp=nsm((~y)*(y_smooth+.5))
+  #cts_fn=nsm(y*(.5-y_smooth))
+  #cts_fp=nsm((y_smooth+1.)[~y])
+  #cts_fn=nsm((1.-y_smooth)[y])
+  return U*cts_fp+V*cts_fn
+
+dL=grad(loss)
+
+def init_layers(sigma_w,sigma_b,layer_dimensions,key,resid=False):
+  wb=[]
+  n_steps=len(layer_dimensions)-1
+  w_k=split(emit_key(),num=n_steps)
+  b_k=split(emit_key(),num=n_steps)
+  ret=dict()
+  for i,(k,l,d_i,d_o) in enumerate(zip(w_k,b_k,layer_dimensions,layer_dimensions[1:])):
+    ret[('w',i)],ret[('b',i)]=normal(shape=(d_i,d_o),key=k)*sigma_w,\
+                              normal(shape=d_o,key=l)*sigma_b
+    if resid:
+      ret[('w',i)]+=eye(*ret[('w',i)].shape)
+  return ret
+
+def sample_x(bs,key):
+  return 2*x_max*uniform(shape=(bs,2),key=key)-x_max
+
+global_key=key(args.seed)
+def emit_key():
+  global global_key
+  global_key,child_key=split(global_key)
+  return child_key
+
+def size_rescale(l):
+  return 25*(1+log(args.lr_max)-log(l))
+
+def colour_rescale(fpfn):
+  l=log(array(fpfn))-log(meta.fpfn_min)
+  l/=log(meta.fpfn_max)-log(meta.fpfn_min)
+  return jet(l)
+
+def mk_experiment(w_model_init,p,thresh,target_fp,target_fn,lr):
+  e=SimpleNamespace()
+  e.w_model=meta.w_model_init.copy()
+
+  e.lr=float(lr)
+  e.size=size_rescale(lr) #for plotting
+  e.p=float(p) #"imbalance"
+  e.target_fp=target_fp
+  e.target_fn=target_fn
+  e.colour=colour_rescale(target_fp/target_fn)
+  e.fp=e.fn=.25
+
+  e.U=e.V=1
+  e.thresh=thresh
+  e.history=SimpleNamespace(FP=[],FN=[],lr=[],cost=[])
+  return e
+
+try:
+  if args.new: raise Exception
+  with open(args.pkl,'rb') as fd:
+    args,experiments,global_key,meta=load(fd)
+    global_key=meta.global_key
+    print('Restored',args.pkl,'from disk')
+except:
+  print('New test will be saved in',args.pkl)
+  
+  meta=SimpleNamespace()
+  meta.global_key=global_key
+  meta.time_avgs=dict()
+  meta.target_shape=[2]+[16]*8+[1]
+  meta.model_width=16
+  meta.model_shape=[2]+[meta.model_width]*8+[1]#[2]+[128]*2+[1]
+  
+  meta.w_target=init_layers(.75,2,meta.target_shape,emit_key())
+  meta.w_model_init=init_layers(.1*meta.model_width**-.5,0,meta.model_shape,
+                                key=emit_key(),resid=True)
+  
+  meta.imbalance_min,meta.imbalance_max=.01,.1
+  meta.imbalances=geomspace(meta.imbalance_max,meta.imbalance_min,
+                            num=args.all_resolution)
+  meta.target_fp_min,meta.target_fp_max=.001,.01
+  meta.target_fps=geomspace(meta.target_fp_min,meta.target_fp_max,
+                            num=args.all_resolution)
+  
+  meta.target_fn_min,meta.target_fn_max=.001,.01
+  meta.target_fns=geomspace(meta.target_fn_max,meta.target_fn_min,
+                            num=args.all_resolution)
+  
+  print('Finding thresholds...')
+  meta.threshold_accuracy_tolerance=.01 #Within 1% of right value with high probability
+  
+  
+  thresholding_sample_size=int(1/(meta.threshold_accuracy_tolerance**2*\
+                                  meta.imbalance_min))
+  x_thresholding=sample_x(thresholding_sample_size,emit_key())
+  
+  y_t_cts=f(meta.w_target,x_thresholding).flatten()
+  y_t_cts_sorted=y_t_cts.sort()
+  meta.thresholds={p:y_t_cts_sorted[-int(p*len(y_t_cts_sorted))]\
+                  for p in meta.imbalances}
+  
+  print('Imbalances and thresholds')
+  for i,t in meta.thresholds.items(): print(i,t)
+  
+  meta.gamma1=.1#lr**1/3
+  meta.gamma2=.001#lr
+  meta.avg_rate=.1#.01
+  meta.clock_avg_rate=.1
+  meta.loop_master_key=emit_key()
+  meta.step=0
+
+
+  meta.fpfns=meta.target_fps/meta.target_fns
+  meta.fpfn_max,meta.fpfn_min=meta.fpfns[-1],meta.fpfns[0]
+  meta.fpfn_colours=zip(colour_rescale(meta.fpfns),meta.fpfns)
+  colour_handles=[Patch(color=c,label=str(s)) for c,s in meta.fpfn_colours]
+  
+  meta.targets=list(zip(meta.target_fps,meta.target_fns))
+
+  if args.mode=='all':
+    experiments=[mk_experiment(meta.w_model_init,p,thresh,target+fp,target_fn,lr)\
+                 for (p,thresh) in meta.imbalance_thresholds\
+                 for (target_fp,target_fn) in meta.targets\
+                 for lr in lrs]
+  elif args.mode=='single':
+    experiments=[mk_experiment(meta.w_model_init,.1,meta.thresholds[.1],.01,.01,args.lr)]
+  elif args.mode=='adaptive_lr':
+    experiments=[mk_experiment(meta.w_model_init,.1,meta.thresholds[.1],.01,.01,lr) for lr in lrs]
+  elif args.mode=='imbalances':
+    experiments=[mk_experiment(meta.w_model_init,imbalance,meta.thresholds[imbalance],
+                               imbalance/10.,imbalance/10.,args.lr)\
+                 for imbalance in meta.imbalances]
+
+
+def get_timestep(label):
+  global tl
+  t=perf_counter()
+  try: meta.time_avgs[label]+=(1+meta.clock_avg_rate)*meta.clock_avg_rate*float(t-tl)
+  except: meta.time_avgs[label]=(1+meta.clock_avg_rate)*float(t-tl)
+  meta.time_avgs[label]*=(1-meta.clock_avg_rate)
+  tl=t
+
+while True:
+  meta.step+=1
+  print(meta.step)
+  x=sample_x(args.bs,emit_key())
+  y_t_cts=f(meta.w_target,x)
+  y_ts={float(p):y_t_cts>thresh for p,thresh in meta.thresholds.items()}
+
+  args.lr_phase+=args.lr_momentum
+  for e in experiments:
+
+    if args.mode not in ['adaptive_lr','all']:
+      e.lr=args.lr*exp(args.lr_amplitude*sin(args.lr_phase))
+    e.y_t=y_ts[float(e.p)]
+    e.bs=len(e.y_t)
+    tl=perf_counter()
+    y_p_cts=f(e.w_model,x)
+    y_p=y_p_cts>0
+    get_timestep('threshold')
+
+    FP=int(nsm(y_p&(~e.y_t))) #Stop jax weirdness after ADC
+    FN=int(nsm(e.y_t&(~y_p)))
+    try:
+      e.FPs[meta.step%args.lr_update_memory]=FP
+      e.FNs[meta.step%args.lr_update_memory]=FN
+    except AttributeError:
+      e.FPs=[0]*args.lr_update_memory#[FP]*args.lr_update_interval
+      e.FNs=[0]*args.lr_update_memory#[FN]*args.lr_update_interval
+      e.FPs[meta.step%args.lr_update_memory]=FP
+      e.FNs[meta.step%args.lr_update_memory]=FN
+    window_div=min(meta.step,args.lr_update_memory)
+    e.fp_window=sum(e.FPs)/window_div
+    e.fn_window=sum(e.FNs)/window_div
+    e.cost_window=e.fp_window/e.target_fp+e.fn_window/e.target_fn
+    e.history.FP.append(FP)
+    e.history.FN.append(FN)
+    e.history.lr.append(e.lr)
+    e.history.cost.append(e.cost_window)
+
+    #e.fp_amnt=avg_rate*min(1,e.bs*e.target_fp)
+    #e.fn_amnt=avg_rate*min(1,e.bs*e.target_fn)
+    e.fp_amnt=meta.avg_rate*min(1,e.bs*e.fp)
+    e.fn_amnt=meta.avg_rate*min(1,e.bs*e.fn)
+    e.fp*=(1-e.fp_amnt)
+    e.fp+=e.fp_amnt*FP/e.bs
+    e.fn*=(1-e.fn_amnt)
+    e.fn+=e.fn_amnt*FN/e.bs
+
+    #e.p_empirical*=(1-min(e.fp_amnt,e.fn_amnt))
+    #e.p_empirical+=(1-min(e.fp_amnt,e.fn_amnt))*nsm(e.y_t)/e.bs
+    #U,V=log(1+fp/target_fp),log(1+fn/target_fn)
+    #U=u/(u+v)
+    #V=v/(u+v)
+    #U,V=softmax(array([gamma1*fp/target_fp,gamma1*fn/target_fn]))
+    #U,V=softmax(array([fp/target_fp,fn/target_fn]))
+
+    e.U,e.V=e.fp/e.target_fp,e.fn/e.target_fn
+    nUV=(e.U**2+e.V**2)**.5
+    e.U/=nUV #weight according to imbalance
+    e.V/=nUV
+    get_timestep('U,V')
+
+    upd=dL(e.w_model,x,e.y_t,e.U,e.V)
+    get_timestep('dL')
+
+    e.dw_l2=e.w_l2=0
+    try:
+      e.adam_M*=(1-meta.gamma2)
+      for k in upd:#Should apply to all bits simultaneously?
+        e.adam_V[k]*=(1-meta.gamma1)
+        e.adam_V[k]+=meta.gamma1*upd[k]
+        e.adam_M+=meta.gamma2*nsm(upd[k]**2)
+    except AttributeError:
+      print('Initialising adam weights...')
+      e.adam_V=upd
+      e.adam_M=sum([nsm(upd[k]**2) for k in upd])
+    get_timestep('adam')
+    for k in e.adam_V:
+      delta=e.lr*e.adam_V[k]/(e.adam_M**.5+1e-8)
+      e.w_model[k]-=delta
+      ch_l2=nsm(delta**2)
+      e.dw_l2+=ch_l2
+      weight_l2=nsm(e.w_model[k]**2)
+      e.w_l2+=weight_l2
+    get_timestep('updating')
+
+  if not meta.step%args.lr_update_interval and args.mode=='adaptive_lr':
+    experiments=sorted(experiments,key=lambda x:x.cost_window)
+    try:
+      goodnesses=array([1/e.cost_window for e in experiments])
+    except ZeroDivisionError:
+      print('!!!')
+      goodnesses=array([1/(1e-8+e.cost_window) for e in experiments])
+    e_lr=v_lr=0.
+    for e,g in zip(experiments,goodnesses):
+      print('lr,un-normalised goodnesses=',e.lr,g)
+      le_lr+=log(e.lr)
+      lv_lr+=log(e.lr)**2
+    le_lr/=len(experiments)
+    lv_lr/=len(experiments)
+    lv_lr-=le_le**2
+    print('E(log(lr)),V(log(lr))=',le_lr,lv_lr)
+    goodnesses/=nsm(goodnesses)
+    experiment_indices=array(range(len(experiments)))
+    e=experiments[-1]
+    parent=experiments[int(choice(emit_key(),experiment_indices,p=goodnesses))]
+    e.lr=parent.lr
+    print('Hi')
+    w=lambda x,y,z:(x*z,y/z)
+    if parent.lr>args.lr_max: rule=lambda x,y:(x,y*exp(-abs(normal(emit_key()))))
+    elif parent.lr<args.lr_min: rule=lambda x,y:(x,y*exp(abs(normal(emit_key()))))
+    else: rule=lambda x,y:w(x,y,exp(normal(emit_key())))
+    parent.lr,e.lr=rule(parent.lr,e.lr)
+
+    if uniform(emit_key())<e.cost_window/(1e-8+parent.cost_window)-1:
+      print('Weight copying')
+      e.w_model=parent.w_model.copy()
+      e.adam_M=parent.adam_M.copy()
+      e.adam_V=parent.adam_V.copy()
+      e.fp=float(parent.fp)
+      e.fn=float(parent.fn)
+    lrs=array([e.lr for e in experiments])
+
+  if args.mode=='single':
+    print('fp,fn=',e.fp,e.fn)
+  if not meta.step%2:
+    fp_perf=[]
+    fn_perf=[]
+    colours=[]
+    sizes=[]
+    if stdin in select([stdin],[],[],0)[0]:
+      line=stdin.readline().lower()
+      print('Timing:')
+      for k,v in meta.time_avgs.items():
+        print(k,log(v))
+
+      print('p'.ljust(23)+'|target_fp'.ljust(23)+'|target_fn'.ljust(23)+\
+            '|lr'.ljust(23)+'|fp'.ljust(23)+'|fn'.ljust(23)+\
+            '|w'.ljust(23)+'|dw'.ljust(23))
+      for e in experiments:
+        if stdin in select([stdin],[],[],0)[0] and 'x' in stdin.readline().lower():
+          break
+
+        if 'c' in line:
+          x=cartesian([linspace(-x_max,x_max,num=args.res)]*2)
+          x_split=array_split(x,n_splits)
+          y_t=concat([f(meta.w_target,_x)>e.thresh for _x in x_split])\
+              .reshape(args.res,args.res)
+          y_p=concat([f(e.w_model,_x)>0 for _x in x_split])\
+              .reshape(args.res,args.res)
+          fp_img=(y_p&(~y_t))
+          fn_img=((~y_p)&y_t)
+          tp_img=(y_p&y_t)
+          tn_img=(~(y_p|y_t))
+          col_mat=[[1.,0,0],[0,1,0],[1,1,1],[0,0,0]]#fp,fn,tp,tn
+          cols=array([fp_img,fn_img,tp_img,tn_img]).T.dot(array(col_mat))
+          imshow(cols,extent=[-x_max,x_max]*2)
+          legend(handles=[Patch(color=c,label=s) for c,s in\
+                               zip(col_mat,['FP','FN','TP','TN'])])
+          title('p='+str(e.p)+',target_fp='+str(e.target_fp)+\
+                ',target_fn='+str(e.target_fn)+',lr='+str(e.lr))
+          show()
+
+        fp_perf.append(e.fp/e.target_fp)
+        fn_perf.append(e.fn/e.target_fn)
+        colours.append(e.colour)
+        sizes.append(e.size)
+        print(str(e.p).ljust(23)+('|'+str(e.target_fp)).ljust(23)+\
+              ('|'+str(e.target_fn)).ljust(23)+('|'+str(e.lr)).ljust(23)+\
+              ('|'+str(e.fp)).ljust(23)+('|'+str(e.fn)).ljust(23)+\
+              ('|'+str(e.w_l2)).ljust(23)+('|'+str(e.dw_l2)).ljust(23))
+      if 's' in line:
+        sc=scatter(fp_perf,fn_perf,c=colours,s=sizes)
+        lr_sizes=size_rescale(lrs)
+        if args.mode=='all':
+          cl=legend(handles=colour_handles,\
+                    title='target_fp/target_fn',loc='upper right')
+        h=sc.legend_elements(prop="sizes",num=lr_sizes, alpha=0.6)[0]
+        legend(handles=h,labels=[str(r) for r in lrs],loc='lower right',title='lr')
+        if args.mode=='all': gca().add_artist(cl)
+        xlabel('fp/target_fp')
+        ylabel('fn/target_fn')
+        show()
+      if 'l' in line:
+        for e in experiments:
+          plot([log(1e-8+c) for c in e.history.cost])
+        xlabel('Step number')
+        ylabel('log(1e-8+fp/target_fp+fn/target_fn)')
+        title('Loss')
+        show()
+        for e in experiments:
+          plot(log(array(e.history.lr)))
+        xlabel('Step number')
+        ylabel('log(lr)')
+        title('Learning rate')
+        show()
+
+      while stdin in select([stdin],[],[],0)[0]:
+        stdin.readline()
+      
+  if not meta.step%10:
+    with open(args.pkl,'wb') as fd:
+      meta.global_key=global_key
+      dump((args,experiments,global_key,meta),fd)

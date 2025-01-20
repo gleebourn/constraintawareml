@@ -21,7 +21,7 @@ k=key(111000111)
 in_dim=2
 
 #Model
-layer_dims=[256]*4
+layer_dims=[16]*4#[64]*2#[256]*2
 try:
   with open('compmod.pkl','rb') as f:
     print('Loading existing model...')
@@ -29,11 +29,13 @@ try:
     in_dim=wmc.in_dim
 except FileNotFoundError:
   print('Generating new model...')
-  wmc=init_model_params(in_dim,layer_dims,k,sigma=1.)
+  wmc=init_model_params(in_dim,layer_dims,k,sigma_w=4,sigma_b=0.,
+                        target_fp=.001,target_fn=.001)
   k=split(k)[0]
   
   #Target
-  target_layer_dims=[256]*4
+  #target_layer_dims=[256]*3
+  target_layer_dims=[32]*16
   target_w=init_smooth_params(in_dim,target_layer_dims)
   k=split(k)[0]
   
@@ -42,17 +44,12 @@ except FileNotFoundError:
 
 target_smooth_f=mk_smooth_f(target_layer_dims,activation='sigmoid') 
 if not step_num:
-  randomise_weights(target_w,k,sigma=8.)
+  #empirical_network_weight_variance(target_smooth_f,target_w,
+  randomise_weights(target_w,k,sigma_w=6,sigma_b=.5)
   k=split(k)[0]
   #target_var=.2
-  target_weight_variance=2#empirical_network_weight_variance(target_smooth_f,target_w,
                #                                  target_var,in_dim,k)
-  print('Chosen variance for target network shape:',target_weight_variance)
-  for i in target_w:
-    #if len(target_w[i].shape)==2:
-    target_w[i]*=target_weight_variance
-  target_thresh=get_thresh(target_p=.1,weights=target_w,
-                           tolerance=wmc.c.binomial_averaging_tolerance,
+  target_thresh=get_thresh(target_p=.1,weights=target_w,tolerance=.01,
                            key=k,forward=target_smooth_f,in_dim=in_dim)
 
 target_f=lambda x:target_smooth_f(target_w,x)>target_thresh
@@ -68,7 +65,7 @@ while True:
   wmc=model_b(wmc,x,y)
   step_num+=1
 
-  if step_num%100:
+  if step_num%10:
     continue
   print('fp,fn',wmc.c.fp,wmc.c.fn)
   print('U,V,lr',wmc.c.U,wmc.c.V,wmc.c.lr)
@@ -76,6 +73,8 @@ while True:
   print('Recent motion of weights:')
   for f in wmc.m.norm_step[-20:]:
     print(f)
+  if step_num%100:
+    continue
   with open('compmod.pkl','wb') as f:
     dump((wmc,target_layer_dims,target_w,target_thresh,bs,step_num,k),f)
 
