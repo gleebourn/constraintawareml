@@ -58,7 +58,7 @@ from select import select
 from pathlib import Path
 path.append(str(Path('.').absolute()))
 
-f_to_str= lambda x:f'{x:.3g}'.ljust(10)
+f_to_str= lambda x:f'{x:.5g}'.ljust(10)
 
 if args.mode in ['single','imbalances','unsw']:
   lrs=array([args.lr])
@@ -67,13 +67,9 @@ elif args.mode=='adaptive_lr':
 else:
   lrs=geomspace(args.lr_init_min,args.lr_init_max,num=args.all_resolution)
 
+n_splits_img=100
 
-
-n_splits=100
-
-
-def act(x):
-  return minimum(1,maximum(-1,x))
+#def act(x):return minimum(1,maximum(-1,x))
 act=tanh
 
 def f_unbatched(w,x,act=act):
@@ -88,12 +84,12 @@ def loss(w,x,y,U,V):
   y_smooth=f(w,x)
   #cts_fp=nsm(maximum(V-U,y_smooth)[~y])
   #cts_fn=nsm(maximum(U-V,-y_smooth)[y])
-  cts_fp=nsm(maximum(0,y_smooth)[~y])
-  cts_fn=nsm(maximum(0,-y_smooth)[y])
+  #cts_fp=nsm(maximum(0,y_smooth)[~y])
+  #cts_fn=nsm(maximum(0,-y_smooth)[y])
   #cts_fp=nsm((~y)*(y_smooth+.5))
   #cts_fn=nsm(y*(.5-y_smooth))
-  #cts_fp=nsm((y_smooth+1.)[~y])
-  #cts_fn=nsm((1.-y_smooth)[y])
+  cts_fp=nsm((y_smooth+1.)[~y])
+  cts_fn=nsm((1.-y_smooth)[y])
   return U*cts_fp+V*cts_fn
 
 dL=grad(loss)
@@ -124,13 +120,13 @@ def size_rescale(l):
   return 25*(1+log(args.lr_max)-log(l))
 
 def colour_rescale(fpfn):
-  l=log(array(fpfn))-log(meta.fpfn_min)
-  l/=log(meta.fpfn_max)-log(meta.fpfn_min)
+  l=log(array(fpfn))-log(args.fpfn_min)
+  l/=log(args.fpfn_max)-log(args.fpfn_min)
   return jet(l)
 
 def mk_experiment(w_model_init,p,thresh,target_fp,target_fn,lr):
   e=SimpleNamespace()
-  e.w_model=meta.w_model_init.copy()
+  e.w_model=args.w_model_init.copy()
 
   e.lr=float(lr)
   e.size=size_rescale(lr) #for plotting
@@ -148,159 +144,148 @@ def mk_experiment(w_model_init,p,thresh,target_fp,target_fn,lr):
 try:
   if args.new: raise Exception
   with open(args.outf+'.pkl','rb') as fd:
-    args,experiments,global_key,meta=load(fd)
-    global_key=meta.global_key
+    try:
+      args,experiments,global_key=load(fd)
+    except:
+      args,experiments,global_key,_args=load(fd)
+      print('Merging args...')
+      args=SimpleNamespace(**vars(args),**vars(_args))
+    global_key=args.global_key
     print('Restored',args.outf+'.pkl','from disk')
 except:
   print('New test will be saved in',args.outf+'.pkl')
   
-  meta=SimpleNamespace()
-  meta.global_key=global_key
-  meta.time_avgs=dict()
-  meta.target_shape=[2]+[16]*8+[1]
+  args.global_key=global_key
+  args.time_avgs=dict()
+  args.target_shape=[2]+[16]*8+[1]
 
   if args.mode=='unsw':
     df_train=read_csv(args.unsw_train)
     df_test=read_csv(args.unsw_test)
-    meta.x_test=array(df_test[df_test.columns[(df_test.dtypes==int)|\
-                                              (df_test.dtypes==float)]].drop('id'))
-    meta.x_train=array(df_test[df_train.columns[(df_train.dtypes==int)|\
-                                                (df_train.dtypes==float)]].drop('id'))
-    meta.y_train=df_train['attack_cat']
-    meta.y_test=df_test['attack_cat']
-    meta.in_dim=len(meta.x_train[0])
+    args.x_test=array(df_test[df_test.columns[(df_test.dtypes==int)|\
+                                              (df_test.dtypes==float)]]).T[1:].T
+    args.x_train=array(df_test[df_train.columns[(df_train.dtypes==int)|\
+                                                (df_train.dtypes==float)]]).T[1:].T
+    args.y_train=df_train['attack_cat']
+    args.y_test=df_test['attack_cat']
+    args.in_dim=len(args.x_train[0])
   else:
-    meta.in_dim=2
+    args.in_dim=2
 
-  meta.target_sigma_w=.75
-  meta.target_sigma_b=2.
+  args.target_sigma_w=.75
+  args.target_sigma_b=2.
   
-  meta.w_target=init_layers(meta.target_sigma_w,meta.target_sigma_b,
-                            meta.target_shape,emit_key())
-  #meta.w_model_init=init_layers(meta.model_width**-.5,0.,meta.model_shape,
-  #                              key=emit_key())#,resid=True)
-  #meta.w_model_init=init_layers(1.,0.,meta.model_shape,key=emit_key())#,resid=True)
-  #meta.w_model_init=init_layers(.5,0.,meta.model_shape,key=emit_key())#,resid=True)
-  #meta.model_shape=[2,256,4,1]
-  #meta.model_shape=[2,512,1]
-  #meta.model_width=256#16#64
-  #meta.model_len=3#4
-  #meta.model_width=256
-  #meta.model_shape=[2]+[meta.model_width]*meta.model_len+[1]#[2]+[128]*2+[1]
-  #meta.model_shape=[2,64,16,4,1]
-  meta.model_shape=[meta.in_dim,64,32,16,8,4,2,1]
-  #meta.model_shape=[2,128,32,16,8,4,2,1]
-  #meta.model_shape=[2,4,64,4,1]#[2]+[128]*2+[1]
-  #meta.model_shape=[2]+[8]*4+[1]
-  meta.model_sigma_w=.5
-  meta.model_sigma_b=0.
-  meta.model_sqrt_normalise_w=False
-  meta.uniform_b_0=True
+  args.w_target=init_layers(args.target_sigma_w,args.target_sigma_b,
+                            args.target_shape,emit_key())
+  args.model_shape=[args.in_dim,256,128,64,32,16,8,4,2,1]
+  args.model_sigma_w=.5
+  args.model_sigma_b=0.
+  args.model_sqrt_normalise_w=False
+  args.uniform_b_0=True
+  args.model_resid=False
 
-  meta.w_model_init=init_layers(meta.model_sigma_w,meta.model_sigma_b,
-                                meta.model_shape,key=emit_key())#,resid=True)
-  #meta.w_model_init=init_layers(2.,0.,meta.model_shape,key=emit_key())#,resid=True)
-  if meta.model_sqrt_normalise_w:
-    for i,l in enumerate(meta.model_shape[1:]):
-      meta.w_model_init[('w',i)]/=l**.5
+  args.w_model_init=init_layers(args.model_sigma_w,args.model_sigma_b,args.model_shape,
+                                key=emit_key(),resid=args.model_resid)
+  if args.model_sqrt_normalise_w:
+    for i,l in enumerate(args.model_shape[1:]):
+      args.w_model_init[('w',i)]/=l**.5
 
-  if meta.uniform_b_0: #uniform biases
-    meta.w_model_init[('b',0)]=uniform(emit_key(),shape=meta.model_shape[1])*\
+  if args.uniform_b_0: #uniform biases
+    args.w_model_init[('b',0)]=uniform(emit_key(),shape=args.model_shape[1])*\
                                2*args.x_max-args.x_max
-  #meta.w_model_init=init_layers(1,0.,meta.model_shape,
-  #                              key=emit_key(),resid=True)
   
-  meta.imbalance_min,meta.imbalance_max=.01,.1
+  args.imbalance_min,args.imbalance_max=.01,.1
   if args.mode=='imbalances':
-    meta.imbalances=[meta.imbalance_max,.02,meta.imbalance_min]
-    meta.target_fps=[.15,.1,.05]
-    meta.target_fns=[.1]
+    args.imbalances=[args.imbalance_max,.02,args.imbalance_min]
+    args.target_fps=[.15,.1,.05]
+    args.target_fns=[.1]
   elif args.mode=='unsw':
-    meta.imbalances=(meta.y_train.value_counts()+meta.y_test.value_counts())/\
+    args.imbalances=(args.y_train.value_counts()+args.y_test.value_counts())/\
                     (len(df_train)+len(df_test))
-    meta.cats={float(p):s for p,s in\
-               zip(meta.imbalances,meta.y_train.value_counts().index)}
-    meta.target_fps=[.15,.1,.05]
-    meta.target_fns=[.1]
+    args.cats={float(p):s for p,s in\
+               zip(args.imbalances,args.y_train.value_counts().index)}
+    args.imbalances=args.imbalances[args.imbalances>.01] #Ignore really small p for now
+    args.target_fps=[.15,.1,.05]
+    args.target_fns=[.1]
   else:
-    meta.imbalances=geomspace(meta.imbalance_max,meta.imbalance_min,
+    args.imbalances=geomspace(args.imbalance_max,args.imbalance_min,
                               num=args.all_resolution)
 
-    meta.target_fp_min,meta.target_fp_max=.001,.01
-    meta.target_fps=geomspace(meta.target_fp_min,meta.target_fp_max,
+    args.target_fp_min,args.target_fp_max=.001,.01
+    args.target_fps=geomspace(args.target_fp_min,args.target_fp_max,
                             num=args.all_resolution)
   
   if args.mode=='unsw':
-    meta.thresholds={float(p):0. for p in meta.imbalances}
+    args.thresholds={float(p):0. for p in args.imbalances}
   else:
     print('Finding thresholds...')
-    meta.threshold_accuracy_tolerance=.01 #Within 1% of right value with high probability
+    args.threshold_accuracy_tolerance=.01 #Within 1% of right value with high probability
     
     
-    thresholding_sample_size=int(1/(meta.threshold_accuracy_tolerance**2*\
-                                    meta.imbalance_min))
+    thresholding_sample_size=int(1/(args.threshold_accuracy_tolerance**2*\
+                                    args.imbalance_min))
     x_thresholding=sample_x(thresholding_sample_size,emit_key())
     
-    y_t_cts=f(meta.w_target,x_thresholding).flatten()
+    y_t_cts=f(args.w_target,x_thresholding).flatten()
     y_t_cts_sorted=y_t_cts.sort()
-    meta.thresholds={float(p):y_t_cts_sorted[-int(p*len(y_t_cts_sorted))]\
-                    for p in meta.imbalances}
+    args.thresholds={float(p):y_t_cts_sorted[-int(p*len(y_t_cts_sorted))]\
+                    for p in args.imbalances}
     
     print('Imbalances and thresholds')
-    for i,t in meta.thresholds.items(): print(i,t)
+    for i,t in args.thresholds.items(): print(i,t)
   
-  meta.gamma1=.1#lr**1/3
-  meta.gamma2=.001#lr
-  meta.avg_rate=.1#.01
-  meta.clock_avg_rate=.1
-  meta.loop_master_key=emit_key()
-  meta.step=0
+  args.gamma1=.1#lr**1/3
+  args.gamma2=.001#lr
+  args.avg_rate=.1#.01
+  args.clock_avg_rate=.1
+  args.loop_master_key=emit_key()
+  args.step=0
 
 
-  meta.fpfns=[a/b for a,b in zip(meta.target_fps,meta.target_fns)]
-  meta.fpfn_max,meta.fpfn_min=meta.fpfns[-1],meta.fpfns[0]
-  meta.fpfn_colours=zip([colour_rescale(fpfn) for fpfn in meta.fpfns],meta.fpfns)
-  colour_handles=[Patch(color=c,label=str(s)) for c,s in meta.fpfn_colours]
+  args.fpfns=[a/b for a,b in zip(args.target_fps,args.target_fns)]
+  args.fpfn_max,args.fpfn_min=args.fpfns[-1],args.fpfns[0]
+  args.fpfn_colours=zip([colour_rescale(fpfn) for fpfn in args.fpfns],args.fpfns)
+  colour_handles=[Patch(color=c,label=str(s)) for c,s in args.fpfn_colours]
   
 
   if args.mode=='all':
-    meta.targets=list(zip(meta.target_fps,meta.target_fns))
-    experiments=[mk_experiment(meta.w_model_init,p,thresh,target+fp,target_fn,lr)\
-                 for (p,thresh) in meta.imbalance_thresholds\
-                 for (target_fp,target_fn) in meta.targets\
+    args.targets=list(zip(args.target_fps,args.target_fns))
+    experiments=[mk_experiment(args.w_model_init,p,thresh,target+fp,target_fn,lr)\
+                 for (p,thresh) in args.imbalance_thresholds\
+                 for (target_fp,target_fn) in args.targets\
                  for lr in lrs]
   elif args.mode=='single':
-    experiments=[mk_experiment(meta.w_model_init,.1,meta.thresholds[.1],.01,.01,args.lr)]
+    experiments=[mk_experiment(args.w_model_init,.1,args.thresholds[.1],.01,.01,args.lr)]
   elif args.mode=='adaptive_lr':
-    experiments=[mk_experiment(meta.w_model_init,.1,meta.thresholds[.1],.01,.01,lr) for lr in lrs]
+    experiments=[mk_experiment(args.w_model_init,.1,args.thresholds[.1],.01,.01,lr) for lr in lrs]
   elif args.mode in ['imbalances','unsw']:
-    experiments=[mk_experiment(meta.w_model_init,float(p),
-                               float(meta.thresholds[float(p)]),
+    experiments=[mk_experiment(args.w_model_init,float(p),
+                               float(args.thresholds[float(p)]),
                                float(p*target_fp),float(p*target_fn),args.lr)\
-                 for p in meta.imbalances\
-                 for target_fp in meta.target_fps\
-                 for target_fn in meta.target_fns]
+                 for p in args.imbalances\
+                 for target_fp in args.target_fps\
+                 for target_fn in args.target_fns]
 
 
 def get_timestep(label):
   global tl
   t=perf_counter()
-  try: meta.time_avgs[label]+=(1+meta.clock_avg_rate)*meta.clock_avg_rate*float(t-tl)
-  except: meta.time_avgs[label]=(1+meta.clock_avg_rate)*float(t-tl)
-  meta.time_avgs[label]*=(1-meta.clock_avg_rate)
+  try: args.time_avgs[label]+=(1+args.clock_avg_rate)*args.clock_avg_rate*float(t-tl)
+  except: args.time_avgs[label]=(1+args.clock_avg_rate)*float(t-tl)
+  args.time_avgs[label]*=(1-args.clock_avg_rate)
   tl=t
 
 while True:
-  meta.step+=1
-  if not(meta.step%10):print(meta.step)
+  args.step+=1
+  if not args.step%10:print(args.step)
   x=sample_x(args.bs,emit_key())
-  y_t_cts=f(meta.w_target,x)
+  y_t_cts=f(args.w_target,x)
   if args.mode=='unsw':
-    batch_indices=choice(emit_key(),len(meta.y_train),shape=(args.bs,))
-    x=meta.x_train[batch_indices]
-    y_ts={float(p):array(meta.y_train[batch_indices]==meta.cats[p]) for p in meta.imbalances}
+    batch_indices=choice(emit_key(),len(args.y_train),shape=(args.bs,))
+    x=args.x_train[batch_indices]
+    y_ts={float(p):array(args.y_train[batch_indices]==args.cats[p]) for p in args.imbalances}
   else:
-    y_ts={float(p):y_t_cts>thresh for p,thresh in meta.thresholds.items()}
+    y_ts={float(p):y_t_cts>thresh for p,thresh in args.thresholds.items()}
 
   args.lr_phase+=args.lr_momentum
   for e in experiments:
@@ -317,14 +302,14 @@ while True:
     FP=int(nsm(y_p&(~e.y_t))) #Stop jax weirdness after ADC
     FN=int(nsm(e.y_t&(~y_p)))
     try:
-      e.FPs[meta.step%args.lr_update_memory]=FP
-      e.FNs[meta.step%args.lr_update_memory]=FN
+      e.FPs[args.step%args.lr_update_memory]=FP
+      e.FNs[args.step%args.lr_update_memory]=FN
     except AttributeError:
       e.FPs=[0]*args.lr_update_memory#[FP]*args.lr_update_interval
       e.FNs=[0]*args.lr_update_memory#[FN]*args.lr_update_interval
-      e.FPs[meta.step%args.lr_update_memory]=FP
-      e.FNs[meta.step%args.lr_update_memory]=FN
-    window_div=min(meta.step,args.lr_update_memory)
+      e.FPs[args.step%args.lr_update_memory]=FP
+      e.FNs[args.step%args.lr_update_memory]=FN
+    window_div=min(args.step,args.lr_update_memory)
     e.fp_window=sum(e.FPs)/window_div
     e.fn_window=sum(e.FNs)/window_div
     e.cost_window=e.fp_window/e.target_fp+e.fn_window/e.target_fn
@@ -333,10 +318,8 @@ while True:
     e.history.lr.append(e.lr)
     e.history.cost.append(e.cost_window)
 
-    #e.fp_amnt=avg_rate*min(1,e.bs*e.target_fp)
-    #e.fn_amnt=avg_rate*min(1,e.bs*e.target_fn)
-    e.fp_amnt=meta.avg_rate*min(1,e.bs*e.fp)
-    e.fn_amnt=meta.avg_rate*min(1,e.bs*e.fn)
+    e.fp_amnt=args.avg_rate*min(1,e.bs*e.fp)
+    e.fn_amnt=args.avg_rate*min(1,e.bs*e.fn)
     e.fp*=(1-e.fp_amnt)
     e.fp+=e.fp_amnt*FP/e.bs
     e.fn*=(1-e.fn_amnt)
@@ -362,11 +345,11 @@ while True:
 
     e.dw_l2=e.w_l2=0
     try:
-      e.adam_M*=(1-meta.gamma2)
+      e.adam_M*=(1-args.gamma2)
       for k in upd:#Should apply to all bits simultaneously?
-        e.adam_V[k]*=(1-meta.gamma1)
-        e.adam_V[k]+=meta.gamma1*upd[k]
-        e.adam_M+=meta.gamma2*nsm(upd[k]**2)
+        e.adam_V[k]*=(1-args.gamma1)
+        e.adam_V[k]+=args.gamma1*upd[k]
+        e.adam_M+=args.gamma2*nsm(upd[k]**2)
     except AttributeError:
       print('Initialising adam weights...')
       e.adam_V=upd
@@ -382,7 +365,7 @@ while True:
     e.history.dw.append(e.dw_l2)
     get_timestep('updating')
 
-  if not meta.step%args.lr_update_interval and args.mode=='adaptive_lr':
+  if not args.step%args.lr_update_interval and args.mode=='adaptive_lr':
     experiments=sorted(experiments,key=lambda x:x.cost_window)
     try:
       goodnesses=array([1/e.cost_window for e in experiments])
@@ -421,7 +404,7 @@ while True:
 
   if args.mode=='single':
     print('fp,fn=',e.fp,e.fn)
-  if not meta.step%2:
+  if not args.step%2:
     fp_perf=[]
     fn_perf=[]
     colours=[]
@@ -429,7 +412,7 @@ while True:
     if stdin in select([stdin],[],[],0)[0]:
       line=stdin.readline().lower()
       print('Timing:')
-      for k,v in meta.time_avgs.items():
+      for k,v in args.time_avgs.items():
         print(k,log(v))
 
       print('|'.join([t.ljust(10) for t in ['p','target_fp','target_fn',
@@ -439,12 +422,12 @@ while True:
           break
 
         if 'c' in line:
-          if meta.in_dim!=2:
+          if args.in_dim!=2:
             print('No 2d representation of input data!')
           else:
             x=cartesian([linspace(-args.x_max,args.x_max,num=args.res)]*2)
-            x_split=array_split(x,n_splits)
-            y_t=concat([f(meta.w_target,_x)>e.thresh for _x in x_split])\
+            x_split=array_split(x,n_splits_img)
+            y_t=concat([f(args.w_target,_x)>e.thresh for _x in x_split])\
                 .reshape(args.res,args.res)
             y_p=concat([f(e.w_model,_x)>0 for _x in x_split])\
                 .reshape(args.res,args.res)
@@ -480,52 +463,47 @@ while True:
         ylabel('fn/target_fn')
         show()
       if 'l' in line:
-        for e in experiments:
-          to_plot=e.history.cost
+        hist_indices=range(args.step)
+        if args.step>10000:
+          t=args.step/10000
+          hist_indices=[int(t*i) for i in range(10000)]
+        else:
           t=1
-          if len(to_plot)>10000:
-            t=len(to_plot)/10000
-            to_plot=[to_plot[int(t*i)] for i in range(10000)]
-          plot([log(1e-8+c) for c in to_plot])
-        xlabel('Step number *'+str(t))
-        ylabel('log(1e-8+fp/target_fp+fn/target_fn)')
-        title('Loss')
-        show()
-        for e in experiments:
-          to_plot=e.history.lr
-          t=1
-          if len(to_plot)>10000:
-            t=len(to_plot)/10000
-            to_plot=[to_plot[int(t*i)] for i in range(10000)]
-          plot(log(array(to_plot)))
-        xlabel('Step number *'+str(t))
-        ylabel('log(lr)')
-        title('Learning rate')
-        show()
-        for e in experiments:
-          to_plot=e.history.dw
-          t=1
-          if len(to_plot)>10000:
-            t=len(to_plot)/10000
-            to_plot=[to_plot[int(t*i)] for i in range(10000)]
-          plot(log(array(to_plot)))
-        xlabel('Step number *'+str(t))
-        ylabel('log(1e-8+dw)')
-        title('Weight changes')
-        show()
+          hist_indices=range(args.step)
+        get_cost=lambda e:e.history.cost
+        get_lr=lambda e:e.history.lr
+        get_dw=lambda e:e.history.dw
+        for get_var,yl,desc in zip([get_cost,get_lr,get_dw],
+                                      ['log(1e-8+fp/target_fp+fn/target_fn)','log(lr)',
+                                       'log(dw)']
+                                   ,['Loss','Learning rate','Change in weights']):
+          for e in experiments:
+            arr=get_var(e)
+            if args.mode=='unsw':
+              lab='p='+f_to_str(e.p)+',target_fp='+f_to_str(e.target_fp)+\
+                  ',target_fn='+f_to_str(e.target_fp)
+            else:
+              lab=None
+            plot([log(arr[i]) for i in hist_indices],label=lab)
+          xlabel('Step number *'+str(t))
+          ylabel(yl)
+          title(desc)
+          #legend(framealpha=0.2)
+          show()
+
 
       while stdin in select([stdin],[],[],0)[0]:
         stdin.readline()
       
-  if not meta.step%10:
+  if not args.step%10:
     with open(args.outf+'.pkl','wb') as fd:
-      meta.global_key=global_key
-      dump((args,experiments,global_key,meta),fd)
+      args.global_key=global_key
+      dump((args,experiments,global_key),fd)
     with open(args.outf+'.csv','w') as fd:
       w=writer(fd)
       w.writerow(['imbalance','target_fps','target_fn','fps','fns'])
-      n_imbalances=len(meta.imbalances)
-      for p in meta.imbalances:
+      n_imbalances=len(args.imbalances)
+      for p in args.imbalances:
         tgt_fps=[]
         recent_fps=[]
         recent_fns=[]
