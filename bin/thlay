@@ -1,61 +1,4 @@
 #!/usr/bin/env python
-from argparse import ArgumentParser
-ap=ArgumentParser()
-ap.add_argument('mode',default='all',
-                choices=['single','all','adaptive_lr','imbalances','unsw'])
-ap.add_argument('--seed',default=20255202,type=int)
-
-ap.add_argument('-lr_resolution',default=16,type=int)
-ap.add_argument('-all_resolution',default=5,type=int)
-
-ap.add_argument('-max_history_len',default=16384,type=int)
-
-ap.add_argument('-reporting_interval',default=10,type=int)
-ap.add_argument('-saving_interval',default=100,type=int)
-
-ap.add_argument('-lr_init_min',default=1e-4,type=float)
-ap.add_argument('-lr_init_max',default=1e-2,type=float)
-ap.add_argument('-lr_min',default=1e-5,type=float)
-ap.add_argument('-lr_max',default=1e-1,type=float)
-
-ap.add_argument('-lr',default=1e-4,type=float)
-ap.add_argument('-lr_update_interval',default=1000,type=int)
-ap.add_argument('-lr_update_memory',default=1000,type=int)
-
-ap.add_argument('-avg_rate',default=.1,type=float)#.01
-
-ap.add_argument('-unsw_test',default='~/data/UNSW_NB15_testing-set.csv')
-ap.add_argument('-unsw_train',default='~/data/UNSW_NB15_training-set.csv')
-
-ap.add_argument('-model_inner_dims',default=[1024,256,4],type=int,nargs='+')
-
-ap.add_argument('-bs',default=1,type=int)
-
-ap.add_argument('-res',default=1000,type=int)
-
-ap.add_argument('-outf',default='thlay')
-
-ap.add_argument('-new',action='store_true')
-
-ap.add_argument('-model_sigma_w',default=.3,type=float)
-ap.add_argument('-model_sigma_b',default=0.,type=float)
-ap.add_argument('-model_sqrt_normalise_w',action='store_true')
-ap.add_argument('-glorot',action='store_true')
-ap.add_argument('-uniform_b_0',action='store_true')
-ap.add_argument('-model_resid',default=False,type=bool)
-
-ap.add_argument('-p',default=.1,type=float)
-ap.add_argument('-target_fp',default=.01,type=float)
-ap.add_argument('-target_fn',default=.01,type=float)
-
-#Silly
-ap.add_argument('-lr_phase',default=0.,type=float)
-ap.add_argument('-lr_momentum',default=0.05,type=float)
-ap.add_argument('-lr_amplitude',default=0.,type=float)
-ap.add_argument('-x_max',default=10.,type=float)
-
-args=ap.parse_args()
-
 from csv import writer
 from pandas import read_csv
 from types import SimpleNamespace
@@ -77,8 +20,65 @@ from sklearn.utils.extmath import cartesian
 from sys import path,stdin
 from os import mkdir
 from select import select
-from pathlib import Path
-path.append(str(Path('.').absolute()))
+from argparse import ArgumentParser
+ap=ArgumentParser()
+ap.add_argument('mode',default='all',
+                choices=['single','all','adaptive_lr','imbalances','unsw'])
+ap.add_argument('-act',choices=['relu','tanh'],default='tanh')
+ap.add_argument('--seed',default=20255202,type=int)
+
+ap.add_argument('-unsw_cat_thresh',default=.1,type=int)
+
+ap.add_argument('-lr_resolution',default=16,type=int)
+ap.add_argument('-all_resolution',default=5,type=int)
+
+ap.add_argument('-max_history_len',default=16384,type=int)
+
+ap.add_argument('-reporting_interval',default=10,type=int)
+ap.add_argument('-saving_interval',default=100,type=int)
+
+ap.add_argument('-lr_init_min',default=1e-4,type=float)
+ap.add_argument('-lr_init_max',default=1e-2,type=float)
+ap.add_argument('-lr_min',default=1e-5,type=float)
+ap.add_argument('-lr_max',default=1e-1,type=float)
+
+ap.add_argument('-lr',default=1e-4,type=float)
+ap.add_argument('-lr_update_interval',default=1000,type=int)
+ap.add_argument('-lr_update_memory',default=1000,type=int)
+
+ap.add_argument('-avg_rate',default=.01,type=float)#.1
+
+ap.add_argument('-unsw_test',default='~/data/UNSW_NB15_testing-set.csv')
+ap.add_argument('-unsw_train',default='~/data/UNSW_NB15_training-set.csv')
+
+ap.add_argument('-model_inner_dims',default=[1024,256,4],type=int,nargs='+')
+
+ap.add_argument('-bs',default=1,type=int)
+
+ap.add_argument('-res',default=1000,type=int)
+
+ap.add_argument('-outf',default='thlay')
+
+ap.add_argument('-new',action='store_true')
+
+ap.add_argument('-model_sigma_w',default=1.,type=float)#.3
+ap.add_argument('-model_sigma_b',default=0.,type=float)
+ap.add_argument('-model_sqrt_normalise_w',action='store_true')
+ap.add_argument('-glorot',action='store_true')
+ap.add_argument('-uniform_b_0',action='store_true')
+ap.add_argument('-model_resid',default=False,type=bool)
+
+ap.add_argument('-p',default=.1,type=float)
+ap.add_argument('-target_fp',default=.01,type=float)
+ap.add_argument('-target_fn',default=.01,type=float)
+
+#Silly
+ap.add_argument('-lr_phase',default=0.,type=float)
+ap.add_argument('-lr_momentum',default=0.05,type=float)
+ap.add_argument('-lr_amplitude',default=0.,type=float)
+ap.add_argument('-x_max',default=10.,type=float)
+
+args=ap.parse_args()
 
 f_to_str= lambda x,p=True:f'{x:.5g}'.ljust(10) if p else f'{x:.5g}'
 exp_to_str=lambda e:'exp_p'+f_to_str(e.p,p=False)+'fpt'+f_to_str(e.target_fp,p=False)+\
@@ -100,10 +100,9 @@ else:
 
 n_splits_img=100
 
-#def act(x):return minimum(1,maximum(-1,x))
-act=tanh
+def relu(x):return minimum(1,maximum(-1,x))
 
-def f_unbatched(w,x,act=act):
+def f_unbatched(w,x,act=tanh):
   i=0
   while ('b',i) in w:
     x=act(x.dot(w[('w',i)])+w[('b',i)])
@@ -247,7 +246,7 @@ if mk_new:
                     (len(df_train)+len(df_test))
     args.cats={float(p):s for p,s in\
                zip(args.imbalances,args.y_train.value_counts().index)}
-    args.imbalances=args.imbalances[args.imbalances>.01] #Ignore really small p for now
+    args.imbalances=args.imbalances[args.imbalances>args.unsw_cat_thresh]
     args.target_fps=[.15,.1,.05]
     args.target_fns=[.1]
   elif args.mode=='single':
@@ -259,7 +258,10 @@ if mk_new:
                               num=args.all_resolution)
 
     args.target_fp_min,args.target_fp_max=.001,.01
+    args.target_fn_min,args.target_fn_max=.001,.01
     args.target_fps=geomspace(args.target_fp_min,args.target_fp_max,
+                            num=args.all_resolution)
+    args.target_fns=geomspace(args.target_fn_min,args.target_fn_max,
                             num=args.all_resolution)
   
   if args.mode=='unsw':
@@ -297,8 +299,9 @@ if mk_new:
 
   if args.mode=='all':
     args.targets=list(zip(args.target_fps,args.target_fns))
-    experiments=[mk_experiment(args.w_model_init,p,thresh,target+fp,target_fn,lr)\
-                 for (p,thresh) in args.imbalance_thresholds\
+    experiments=[mk_experiment(args.w_model_init,p,args.thresholds[p],
+                               target_fp,target_fn,lr)\
+                 for p in args.imbalances\
                  for (target_fp,target_fn) in args.targets\
                  for lr in lrs]
   elif args.mode=='single':
@@ -344,7 +347,7 @@ while True:
     e.y_t=y_ts[float(e.p)]
     e.bs=len(e.y_t)
     tl=perf_counter()
-    y_p_cts=f(e.w_model,x).flatten()
+    y_p_cts=f(e.w_model,x,act=tanh if args.act=='tanh' else relu).flatten()
     y_p=y_p_cts>0
     get_timestep('threshold')
 
@@ -521,10 +524,13 @@ while True:
         n_fps=len(args.target_fps)
         row=['imbalance','target_fps']+['']*(n_fps-1)+['target_fn','fps']+\
             ['']*(n_fps-1)+['fns']+['']*(n_fps-1)
+        if args.mode=='unsw':
+          row=['attack_cat']+row
         w.writerow(row)
         if fd_tex:
           conf_fill='r'*n_fps
-          print('\\begin{tabular}{l|'+conf_fill+'|r|'+conf_fill+'|'+conf_fill+'}',
+          ct='l' if args.mode=='unsw' else ''
+          print('\\begin{tabular}{l'+ct+'|'+conf_fill+'|r|'+conf_fill+'|'+conf_fill+'}',
                 file=fd_tex)
           print(' & '.join(row).replace('_',' ')+'\\\\',file=fd_tex)
           print('\\hline',file=fd_tex)
@@ -540,6 +546,8 @@ while True:
             recent_fps.append(f_to_str(sum(fp_hist)/(e.bs*len(fp_hist))))
             recent_fns.append(f_to_str(sum(fn_hist)/(e.bs*len(fn_hist))))
           row=[f_to_str(p)]+tgt_fps+[f_to_str(p/10)]+recent_fps+recent_fns
+          if args.mode=='unsw':
+            row=[args.cats[p]]+row
           w.writerow(row)
           if fd_tex:
             print('&'.join(row)+'\\\\',file=fd_tex)
@@ -582,7 +590,7 @@ while True:
               ',target_fn='+str(e.target_fn)+',lr='+str(e.lr))
         img_name=exp_to_str(e)+'.png'
         if fd_tex:
-          savefig(args.report_dir+'/'+img_name)
+          savefig(args.report_dir+'/'+img_name,dpi=500)
           print('\n\\includegraphics[width=.3\\textwidth]{'+img_name+'}',file=fd_tex)
           close()
         else:
@@ -617,7 +625,7 @@ while True:
         print('Here the batch size was set to '+str(args.bs)+'.\\\\',file=fd_tex)
         print('\\texttt{'+(model_desc.replace('\n','}\\\\\n\\texttt{'))+'}\\\\',
               file=fd_tex)
-    if 's' in line:
+    if 's' in line and args.mode=='all':
       sc=scatter(fp_perf,fn_perf,c=colours,s=sizes)
       lr_sizes=size_rescale(lrs)
       if args.mode=='all':
@@ -629,7 +637,7 @@ while True:
       xlabel('fp/target_fp')
       ylabel('fn/target_fn')
       if fd_tex:
-        savefig(args.report_dir+'/scatter.png')
+        savefig(args.report_dir+'/scatter.png',dpi=500)
         close()
         print('\\subsection{Comparing performance}',file=fd_tex)
         print('\n\\begin{figure}[H]',file=fd_tex)
@@ -651,8 +659,8 @@ while True:
         for e in experiments:
           arr=get_var(e)
           if args.mode=='unsw':
-            lab='p='+f_to_str(e.p)+',target_fp='+f_to_str(e.target_fp)+\
-                ',target_fn='+f_to_str(e.target_fp)
+            lab=args.cats[e.p]#'p='+f_to_str(e.p)+',target_fp='+f_to_str(e.target_fp)+\
+                #',target_fn='+f_to_str(e.target_fp)
           else:
             lab=None
           #plot([log(arr[i]) for i in hist_indices],label=lab)
@@ -660,9 +668,9 @@ while True:
         xlabel('Step number *'+str(e.history.resolution))
         ylabel(yl)
         title(desc.replace('_',' '))
-        #legend(framealpha=0.2)
+        legend(framealpha=0.2,fontsize='x-small')
         if fd_tex:
-          savefig(args.report_dir+'/'+desc+'.png')
+          savefig(args.report_dir+'/'+desc+'.png',dpi=500)
           close()
           print('\n\\begin{figure}[H]',file=fd_tex)
           print('\\centering',file=fd_tex)
