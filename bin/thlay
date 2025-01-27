@@ -10,8 +10,10 @@ from matplotlib import colormaps
 from matplotlib.patches import Patch
 from matplotlib.cm import jet
 from numpy import geomspace,prod
-from jax.numpy import array,array_split,dot,vectorize,add,linspace,log,exp,eye,\
-                      maximum,minimum,unique,concat,sin,zeros,sum as nsm
+from jax.numpy import array,array_split,dot,vectorize,add,linspace,convolve,\
+                      log,exp,eye,flip,maximum,minimum,unique,concat,ones,\
+                      sin,zeros,sum as nsm,max as nmx
+from jax.numpy.linalg import svd
 from jax.random import normal,key,uniform,split,choice
 from jax.nn import tanh,softmax
 from jax import grad
@@ -23,9 +25,20 @@ from select import select
 from argparse import ArgumentParser
 ap=ArgumentParser()
 ap.add_argument('mode',default='all',
-                choices=['single','all','adaptive_lr','imbalances','unsw'])
-ap.add_argument('-act',choices=['relu','tanh'],default='tanh')
+                choices=['single','all','adaptive_lr','imbalances','unsw','gmm'])
+
+ap.add_argument('-n_gaussians',default=4,type=int)
+ap.add_argument('-gmm_spread',default=.05,type=float)
+ap.add_argument('-gmm_scatter_samples',default=10000,type=int)
+
+ap.add_argument('-act',choices=['relu','tanh','softmax'],default='tanh')
 ap.add_argument('--seed',default=20255202,type=int)
+ap.add_argument('-n_splits_img',default=100,type=int)
+
+ap.add_argument('-imbalances',default=array([.01,.02,.1]),nargs='+')
+                #,type=lambda x:array(x),
+
+ap.add_argument('-in_dim',default=2,type=int)
 
 ap.add_argument('-unsw_cat_thresh',default=.1,type=int)
 
@@ -33,6 +46,9 @@ ap.add_argument('-lr_resolution',default=16,type=int)
 ap.add_argument('-all_resolution',default=5,type=int)
 
 ap.add_argument('-max_history_len',default=16384,type=int)
+
+ap.add_argument('-weight_normalisation',default=0.,type=float)#.0001
+ap.add_argument('-orthonormalise',action='store_true')
 
 ap.add_argument('-reporting_interval',default=10,type=int)
 ap.add_argument('-saving_interval',default=100,type=int)
@@ -46,12 +62,17 @@ ap.add_argument('-lr',default=1e-4,type=float)
 ap.add_argument('-lr_update_interval',default=1000,type=int)
 ap.add_argument('-lr_update_memory',default=1000,type=int)
 
-ap.add_argument('-avg_rate',default=.01,type=float)#.1
+ap.add_argument('-gamma1',default=.1,type=float) #1- beta1 in adam
+ap.add_argument('-gamma2',default=.001,type=float)
+
+ap.add_argument('-avg_rate',default=.1,type=float)#.01,type=float)
 
 ap.add_argument('-unsw_test',default='~/data/UNSW_NB15_testing-set.csv')
 ap.add_argument('-unsw_train',default='~/data/UNSW_NB15_training-set.csv')
 
-ap.add_argument('-model_inner_dims',default=[1024,256,4],type=int,nargs='+')
+#ap.add_argument('-model_inner_dims',default=[64,16,4],type=int,nargs='+')
+#ap.add_argument('-model_inner_dims',default=[32,16,8],type=int,nargs='+')
+ap.add_argument('-model_inner_dims',default=[128,16,8],type=int,nargs='+')
 
 ap.add_argument('-bs',default=1,type=int)
 
@@ -62,10 +83,9 @@ ap.add_argument('-outf',default='thlay')
 ap.add_argument('-new',action='store_true')
 
 ap.add_argument('-model_sigma_w',default=1.,type=float)#.3
-ap.add_argument('-model_sigma_b',default=0.,type=float)
-ap.add_argument('-model_sqrt_normalise_w',action='store_true')
-ap.add_argument('-glorot',action='store_true')
-ap.add_argument('-uniform_b_0',action='store_true')
+ap.add_argument('-model_sigma_b',default=1.,type=float)#0.
+ap.add_argument('-no_sqrt_normalise_w',action='store_true')
+ap.add_argument('-no_glorot_uniform',action='store_true')
 ap.add_argument('-model_resid',default=False,type=bool)
 
 ap.add_argument('-p',default=.1,type=float)
@@ -79,26 +99,30 @@ ap.add_argument('-lr_amplitude',default=0.,type=float)
 ap.add_argument('-x_max',default=10.,type=float)
 
 args=ap.parse_args()
+args.uniform_b_0=False#args.mode in ['gmm','single','all']
+args.step=0
 
 f_to_str= lambda x,p=True:f'{x:.5g}'.ljust(10) if p else f'{x:.5g}'
+
 exp_to_str=lambda e:'exp_p'+f_to_str(e.p,p=False)+'fpt'+f_to_str(e.target_fp,p=False)+\
                     'fnt'+f_to_str(e.target_fn,p=False)+'lr'+f_to_str(e.lr,p=False)
 
+fpfnp_lab=lambda e:'FP_t,FN_t,p='+f_to_str(e.target_fp,p=False)+','+\
+                   f_to_str(e.target_fn,p=False)+','+f_to_str(e.p,p=False)
+
+leg=lambda t=None,h=None,l='upper right':legend(framealpha=0.2,fontsize='x-small',
+                                         loc=l,handles=h,title=t)
+
 
 args.out_dir=args.outf+'_report'
-try:
-  mkdir(args.out_dir)
-except FileExistsError:
-  pass
 
-if args.mode in ['single','imbalances','unsw']:
+if args.mode in ['single','imbalances','unsw','gmm']:
   lrs=array([args.lr])
 elif args.mode=='adaptive_lr':
   lrs=geomspace(args.lr_init_min,args.lr_init_max,num=args.lr_resolution)
 else:
   lrs=geomspace(args.lr_init_min,args.lr_init_max,num=args.all_resolution)
 
-n_splits_img=100
 
 def relu(x):return minimum(1,maximum(-1,x))
 
@@ -107,11 +131,13 @@ def f_unbatched(w,x,act=tanh):
   while ('b',i) in w:
     x=act(x.dot(w[('w',i)])+w[('b',i)])
     i+=1
+  if act==softmax:
+    x-=.5
   return x
 f=vectorize(f_unbatched,excluded=[0],signature='(m)->(n)')
 
-def loss(w,x,y,U,V):
-  y_smooth=f(w,x)
+def loss(w,x,y,U,V,act=tanh,normalisation=False):
+  y_smooth=f(w,x,act=act)
   #cts_fp=nsm(maximum(V-U,y_smooth)[~y])
   #cts_fn=nsm(maximum(U-V,-y_smooth)[y])
   #cts_fp=nsm(maximum(0,y_smooth)[~y])
@@ -120,37 +146,54 @@ def loss(w,x,y,U,V):
   #cts_fn=nsm(y*(.5-y_smooth))
   cts_fp=nsm((y_smooth+1.)[~y])
   cts_fn=nsm((1.-y_smooth)[y])
-  return U*cts_fp+V*cts_fn
+  if normalisation:
+    l2=sum([nsm(w[('w',i)]**2)*nf for\
+            i,nf in enumerate(normalisation)])
+  return U*cts_fp+V*cts_fn+l2
 
 dL=grad(loss)
-
-def init_layers(sigma_w,sigma_b,layer_dimensions,key,resid=False,glorot=False):
-  wb=[]
-  n_steps=len(layer_dimensions)-1
-  w_k=split(emit_key(),num=n_steps)
-  b_k=split(emit_key(),num=n_steps)
-  ret=dict()
-  for i,(k,l,d_i,d_o) in enumerate(zip(w_k,b_k,layer_dimensions,layer_dimensions[1:])):
-    if glorot:
-      ret[('w',i)]=2*(6/(d_i+d_o))**.5*(uniform(shape=(d_i,d_o),key=k)-.5)
-      ret[('b',i)]=zeros(shape=d_o)
-    else:
-      ret[('w',i)]=normal(shape=(d_i,d_o),key=k)
-      ret[('b',i)]=normal(shape=d_o,key=l)
-      ret[('w',i)]*=sigma_w
-      ret[('b',i)]*=sigma_b
-    if resid:
-      ret[('w',i)]+=eye(*ret[('w',i)].shape)
-  return ret
-
-def sample_x(bs,key):
-  return 2*args.x_max*uniform(shape=(bs,2),key=key)-args.x_max
 
 global_key=key(args.seed)
 def emit_key():
   global global_key
   global_key,child_key=split(global_key)
   return child_key
+
+def init_layers(sigma_w,sigma_b,layer_dimensions,key,no_sqrt_normalise=False,
+                resid=False,glorot_uniform=False,orthonormalise=False):
+  wb=[]
+  n_steps=len(layer_dimensions)-1
+  w_k=split(emit_key(),num=n_steps)
+  b_k=split(emit_key(),num=n_steps)
+  ret=dict()
+  for i,(k,l,d_i,d_o) in enumerate(zip(w_k,b_k,layer_dimensions,layer_dimensions[1:])):
+    if glorot_uniform:
+      ret[('w',i)]=2*(6/(d_i+d_o))**.5*(uniform(shape=(d_i,d_o),key=k)-.5)
+      ret[('b',i)]=zeros(shape=d_o)
+    else:
+      ret[('w',i)]=normal(shape=(d_i,d_o),key=k)
+      ret[('b',i)]=normal(shape=d_o,key=l)
+    if resid:
+      ret[('w',i)]+=eye(*ret[('w',i)].shape)
+  if glorot_uniform:
+    return ret
+  if orthonormalise:
+    for i,(d_i,d_o) in enumerate(zip(layer_dimensions,layer_dimensions[1:])):
+      if d_i>d_o:
+        ret[('w',i)]=svd(ret[('w',i)],full_matrices=False)[0]
+      else:
+        ret[('w',i)]=svd(ret[('w',i)],full_matrices=False)[2]
+  for i in range(len(layer_dimensions)-1):
+    ret[('w',i)]*=sigma_w
+    ret[('b',i)]*=sigma_b
+  if no_sqrt_normalise:
+    return ret
+  for i,d_i in enumerate(layer_dimensions[1:]):
+    ret[('w',i)]/=d_i**.5
+  return ret
+
+def sample_x(bs,key):
+  return 2*args.x_max*uniform(shape=(bs,2),key=key)-args.x_max
 
 def size_rescale(l):
   return 25*(1+log(args.lr_max)-log(l))
@@ -160,8 +203,11 @@ def colour_rescale(fpfn):
   l/=log(args.fpfn_max)-log(args.fpfn_min)
   return jet(l)
 
-def mk_experiment(w_model_init,p,thresh,target_fp,target_fn,lr):
+def mk_experiment(w_model_init,p,thresh,target_fp,target_fn,lr,
+                  mem=args.lr_update_memory):
   e=SimpleNamespace()
+  e.FPs=[0]*mem
+  e.FNs=[0]*mem
   e.w_model=args.w_model_init.copy()
 
   e.lr=float(lr)
@@ -171,32 +217,47 @@ def mk_experiment(w_model_init,p,thresh,target_fp,target_fn,lr):
   e.target_fn=target_fn
   if args.mode=='all':
     e.colour=colour_rescale(target_fp/target_fn)
-  e.fp=e.fn=.25
+  e.fp=target_fp
+  e.fn=target_fn#.25 #softer start if a priori assume doing well
 
   e.U=e.V=1
   e.thresh=thresh
   e.history=SimpleNamespace(FP=[],FN=[],lr=[],cost=[],dw=[],resolution=1,l=0)
   return e
 
-if args.new:
-  print('Overwriting any existing ensembles...')
-  mk_new=True
-else:
+try:
+  mkdir(args.out_dir)
+  args.new=True
+except FileExistsError:
+  if args.new:
+    print('Already seems to be something there... [O]verwrite, [L]oad or [A]bort?')
+    ln=stdin.readline()[0].lower()
+    if ln[0]=='l':
+      args.new=False
+    elif ln[0]=='o':
+      print('Overwriting any existing ensembles...')
+    else:
+      print('Abort!')
+      exit()
+  else:
+    print('Directory already exists!')
+    exit(1)
+
+if not args.new:
   try:
     with open(args.out_dir+'/ensemble.pkl','rb') as fd:
       print('Opening experiment ensemble',args.outf,'...')
       od=args.out_dir #Correct the actual directory if opened somewhere else
       args,experiments,global_key=load(fd)
       args.out_dir=od
-      mk_new=False
+      args.new=False
       global_key=args.global_key
       print('Restored',args.outf+'.pkl','from disk')
-      mk_new=False
   except FileNotFoundError:
-    print('No saved ensemble...')
-    mk_new=True
+    print('No pkl in directory...')
+    args.new=True
 
-if mk_new:
+if args.new:
   print('Generating new ensemble...')
   
   args.global_key=global_key
@@ -213,32 +274,29 @@ if mk_new:
     args.y_train=df_train['attack_cat']
     args.y_test=df_test['attack_cat']
     args.in_dim=len(args.x_train[0])
-  else:
-    args.in_dim=2
 
   args.target_sigma_w=.75
   args.target_sigma_b=2.
   
   args.w_target=init_layers(args.target_sigma_w,args.target_sigma_b,
                             args.target_shape,emit_key())
-  #args.model_shape=[args.in_dim,256,256,4,1]
   args.model_shape=[args.in_dim]+args.model_inner_dims+[1]
-  #args.model_shape=[args.in_dim,64,64,32,32,1]
-  #args.model_shape=[args.in_dim,256,128,64,32,16,8,4,2,1]
 
   args.w_model_init=init_layers(args.model_sigma_w,args.model_sigma_b,args.model_shape,
-                                resid=args.model_resid,glorot=args.glorot,key=emit_key())
-  if args.model_sqrt_normalise_w:
-    for i,l in enumerate(args.model_shape[:-1]):# was 1: - bug?!
-      args.w_model_init[('w',i)]/=l**.5
+                                resid=args.model_resid,
+                                glorot_uniform=not args.no_glorot_uniform,key=emit_key(),
+                                no_sqrt_normalise=args.no_sqrt_normalise_w,
+                                orthonormalise=args.orthonormalise)
+  args.normalisation_factors=[args.weight_normalisation/\
+                              (nsm(args.w_model_init[('w',i)]**2)*\
+                               args.w_model_init[('w',i)].size) for\
+                              i in range(len(args.model_shape)-1)]
 
   if args.uniform_b_0: #uniform biases
     args.w_model_init[('b',0)]=uniform(emit_key(),shape=args.model_shape[1])*\
                                2*args.x_max-args.x_max
   
-  args.imbalance_min,args.imbalance_max=.01,.1
-  if args.mode=='imbalances':
-    args.imbalances=[args.imbalance_max,.02,args.imbalance_min]
+  if args.mode in ['imbalances','gmm']:
     args.target_fps=[.15,.1,.05]
     args.target_fns=[.1]
   elif args.mode=='unsw':
@@ -254,8 +312,6 @@ if mk_new:
     args.target_fps=[args.target_fp]
     args.target_fns=[args.target_fn]
   else:
-    args.imbalances=geomspace(args.imbalance_max,args.imbalance_min,
-                              num=args.all_resolution)
 
     args.target_fp_min,args.target_fp_max=.001,.01
     args.target_fn_min,args.target_fn_max=.001,.01
@@ -264,7 +320,7 @@ if mk_new:
     args.target_fns=geomspace(args.target_fn_min,args.target_fn_max,
                             num=args.all_resolution)
   
-  if args.mode=='unsw':
+  if args.mode in ['unsw','gmm']:
     args.thresholds={float(p):0. for p in args.imbalances}
   else:
     print('Finding thresholds...')
@@ -283,8 +339,6 @@ if mk_new:
     print('Imbalances and thresholds')
     for i,t in args.thresholds.items(): print(i,t)
   
-  args.gamma1=.1#.01#.1#lr**1/3
-  args.gamma2=.001#lr
   args.clock_avg_rate=.1
   args.loop_master_key=emit_key()
   args.step=0
@@ -296,20 +350,25 @@ if mk_new:
     args.fpfn_colours=zip([colour_rescale(fpfn) for fpfn in args.fpfns],args.fpfns)
     colour_handles=[Patch(color=c,label=str(s)) for c,s in args.fpfn_colours]
   
-
-  if args.mode=='all':
     args.targets=list(zip(args.target_fps,args.target_fns))
     experiments=[mk_experiment(args.w_model_init,p,args.thresholds[p],
                                target_fp,target_fn,lr)\
                  for p in args.imbalances\
                  for (target_fp,target_fn) in args.targets\
                  for lr in lrs]
+
   elif args.mode=='single':
     experiments=[mk_experiment(args.w_model_init,.1,args.thresholds[.1],.01,.01,args.lr)]
   elif args.mode=='adaptive_lr':
     experiments=[mk_experiment(args.w_model_init,.1,args.thresholds[.1],.01,.01,lr) for\
                  lr in lrs]
-  elif args.mode in ['imbalances','unsw']:
+  elif args.mode in ['unsw','gmm']:
+    experiments=[mk_experiment(args.w_model_init,float(p),0.,
+                               float(p*target_fp),float(p*target_fn),args.lr)\
+                 for p in args.imbalances\
+                 for target_fp in args.target_fps\
+                 for target_fn in args.target_fns]
+  elif args.mode in ['imbalances']:
     experiments=[mk_experiment(args.w_model_init,float(p),
                                float(args.thresholds[float(p)]),
                                float(p*target_fp),float(p*target_fn),args.lr)\
@@ -317,6 +376,24 @@ if mk_new:
                  for target_fp in args.target_fps\
                  for target_fn in args.target_fns]
 
+  if args.mode=='gmm':
+    args.means=2*args.x_max*uniform(emit_key(),(2*args.n_gaussians,args.in_dim))-\
+               args.x_max
+    args.variances=2*args.x_max*uniform(emit_key(),2*args.n_gaussians)*\
+                   args.gmm_spread #hmm
+
+
+#Would like to pickle but unable to do so to lambdas
+act={'tanh':tanh,'relu':relu,'softmax':softmax}[args.act]
+probs=lambda p:array(([(1.-p)/args.n_gaussians]*args.n_gaussians)+\
+                     ([p/args.n_gaussians]*args.n_gaussians))
+def get_gmm_xy(p,bs):
+  mix=choice(emit_key(),2*args.n_gaussians,shape=(bs,),p=probs(p))
+  y=mix>=args.n_gaussians
+  z=normal(emit_key(),shape=(bs,args.in_dim))
+  x=z*args.variances[mix,None]+\
+    args.means[mix]
+  return x,y
 
 def get_timestep(label):
   global tl
@@ -329,49 +406,50 @@ def get_timestep(label):
 while True:
   args.step+=1
   if not args.step%10:print(args.step)
-  x=sample_x(args.bs,emit_key())
-  y_t_cts=f(args.w_target,x).flatten()
   if args.mode=='unsw':
     batch_indices=choice(emit_key(),len(args.y_train),shape=(args.bs,))
     x=args.x_train[batch_indices]
     y_ts={float(p):array(args.y_train[batch_indices]==args.cats[p]) for\
           p in args.imbalances}
+
+  elif args.mode=='gmm':
+    xy=dict()
+    for p in args.imbalances:
+      xy[float(p)]=get_gmm_xy(p,args.bs)
   else:
+    x=sample_x(args.bs,emit_key())
+    y_t_cts=f(args.w_target,x).flatten()
     y_ts={float(p):y_t_cts>thresh for p,thresh in args.thresholds.items()}
 
   args.lr_phase+=args.lr_momentum
   for e in experiments:
+    if args.mode=='gmm':
+      x,e.y_t=xy[float(e.p)]
+    else:
+      e.y_t=y_ts[float(e.p)]
 
     if args.mode not in ['adaptive_lr','all']:
       e.lr=args.lr*exp(args.lr_amplitude*sin(args.lr_phase))
-    e.y_t=y_ts[float(e.p)]
     e.bs=len(e.y_t)
     tl=perf_counter()
-    y_p_cts=f(e.w_model,x,act=tanh if args.act=='tanh' else relu).flatten()
+    y_p_cts=f(e.w_model,x,act=act).flatten()
     y_p=y_p_cts>0
     get_timestep('threshold')
 
     FP=int(nsm(y_p&(~e.y_t))) #Stop jax weirdness after ADC
     FN=int(nsm(e.y_t&(~y_p)))
-    try:
-      e.FPs[args.step%args.lr_update_memory]=FP
-      e.FNs[args.step%args.lr_update_memory]=FN
-    except AttributeError:
-      e.FPs=[0]*args.lr_update_memory#[FP]*args.lr_update_interval
-      e.FNs=[0]*args.lr_update_memory#[FN]*args.lr_update_interval
-      e.FPs[args.step%args.lr_update_memory]=FP
-      e.FNs[args.step%args.lr_update_memory]=FN
+    e.FPs[args.step%args.lr_update_memory]=FP
+    e.FNs[args.step%args.lr_update_memory]=FN
     window_div=min(args.step,args.lr_update_memory)
     e.fp_window=sum(e.FPs)/window_div
     e.fn_window=sum(e.FNs)/window_div
-    e.cost_window=e.fp_window/e.target_fp+e.fn_window/e.target_fn
+    e.cost_window=(e.fp_window/e.target_fp+e.fn_window/e.target_fn)/e.bs
     if not args.step%e.history.resolution:
       e.history.FP.append(FP)
       e.history.FN.append(FN)
       e.history.lr.append(e.lr)
       e.history.cost.append(e.cost_window)
       e.history.l+=1
-      args.max_history_len=16384
       if e.history.l>args.max_history_len:
         e.history.resolution*=2
         e.history.FP=[fp for i,fp in enumerate(e.history.FP) if i%2]
@@ -384,6 +462,8 @@ while True:
 
     e.fp_amnt=args.avg_rate*min(1,e.bs*e.fp)
     e.fn_amnt=args.avg_rate*min(1,e.bs*e.fn)
+    #e.fp_amnt=1.
+    #e.fn_amnt=1.
     e.fp*=(1-e.fp_amnt)
     e.fp+=e.fp_amnt*FP/e.bs
     e.fn*=(1-e.fn_amnt)
@@ -399,12 +479,14 @@ while True:
 
     e.U,e.V=e.fp/e.target_fp,e.fn/e.target_fn
     e.V/=e.p #scale dfn with the imbalance
-    nUV=(e.U**2+e.V**2)**.5
-    e.U/=nUV
-    e.V/=nUV
+    #nUV=(e.U**2+e.V**2)**.5
+    nUV=e.U+e.V
+    if nUV>0:
+      e.U/=nUV
+      e.V/=nUV
     get_timestep('U,V')
 
-    upd=dL(e.w_model,x,e.y_t,e.U,e.V)
+    upd=dL(e.w_model,x,e.y_t,e.U,e.V,act=act,normalisation=args.normalisation_factors)
     get_timestep('dL')
 
     e.dw_l2=e.w_l2=0
@@ -472,6 +554,12 @@ while True:
     for e in experiments:
       print('|'.join([f_to_str(t) for t in [e.p,e.target_fp,e.target_fn,e.lr,
                                             e.fp,e.fn,e.w_l2,e.dw_l2,e.U,e.V]]))
+    for e in experiments:
+      print('Recent outcomes:')
+      print('FP by batch',e.FPs[args.step%args.lr_update_memory-5:\
+                                args.step%args.lr_update_memory])
+      print('FN by batch',e.FNs[args.step%args.lr_update_memory-5:\
+                                args.step%args.lr_update_memory])
     if stdin in select([stdin],[],[],0)[0]:
       line+=stdin.readline().lower()
       if ':' in line:
@@ -509,6 +597,8 @@ while True:
             '\\usepackage[utf8]{inputenc}\n'
             '\\usepackage{graphicx}\n'
             '\\usepackage{float}\n'
+            '\\usepackage{caption}\n'
+            '\\usepackage{subcaption}\n'
             '\\usepackage{amsmath,amssymb,amsfonts,amsthm}\n'
             '\n'
             '\\title{Experiment ensemble report: '+args.mode+'}\n'
@@ -571,27 +661,60 @@ while True:
         print('\n\\begin{figure}[H]',file=fd_tex)
         print('\\centering',file=fd_tex)
       for e in experiments:
-        x=cartesian([linspace(-args.x_max,args.x_max,num=args.res)]*2)
-        x_split=array_split(x,n_splits_img)
-        y_t=concat([f(args.w_target,_x)>e.thresh for _x in x_split])\
-            .reshape(args.res,args.res)
-        y_p=concat([f(e.w_model,_x)>0 for _x in x_split])\
-            .reshape(args.res,args.res)
-        fp_img=(y_p&(~y_t))
-        fn_img=((~y_p)&y_t)
-        tp_img=(y_p&y_t)
-        tn_img=(~(y_p|y_t))
-        col_mat=[[1.,0,0],[0,1,0],[1,1,1],[0,0,0]]#fp,fn,tp,tn
-        cols=array([fp_img,fn_img,tp_img,tn_img]).T.dot(array(col_mat))
-        imshow(cols,extent=[-args.x_max,args.x_max]*2)
-        legend(handles=[Patch(color=c,label=s) for c,s in\
-                             zip(col_mat,['FP','FN','TP','TN'])])
-        title('p='+str(e.p)+',target_fp='+str(e.target_fp)+\
-              ',target_fn='+str(e.target_fn)+',lr='+str(e.lr))
-        img_name=exp_to_str(e)+'.png'
+        if args.mode=='gmm':
+          x_t,y_t=get_gmm_xy(e.p,args.gmm_scatter_samples)
+          col_mat=[[1.,1,1],[0,0,0]]#fp,fn,tp,tn
+          labs=['Predict +','Predict -']
+          x_0_max=nmx(x_t[:,0])
+          x_0_min=-nmx(-x_t[:,0])
+          x_1_max=nmx(x_t[:,1])
+          x_1_min=-nmx(-x_t[:,1])
+        else:
+          x_0_max=x_1_max=args.x_max
+          x_0_min=x_1_min=-args.x_max
+        x=cartesian([linspace(x_0_min,x_0_max,num=args.res),
+                     linspace(x_1_min,x_1_max,num=args.res)])
+        x_split=array_split(x,args.n_splits_img)
+        #y_p=array([(f(e.w_model,xax,act=act)>0).flatten() for xax in x])
+        y_p=concat([(f(e.w_model,_x,act=act)>0).flatten() for _x in x_split])
+        y_p=flip(y_p.reshape(args.res,args.res),axis=1) #?!?!?!
+
+        if args.mode=='gmm':
+          regions=array([y_p,~y_p]).T
+        else:
+          y_t=concat([f(args.w_target,_x)>e.thresh for _x in x_split])\
+              .reshape(args.res,args.res)
+          fp_img=(y_p&~y_t)
+          fn_img=(~y_p&y_t)
+          tp_img=(y_p&y_t)
+          tn_img=(~y_p&~y_t)
+          regions=array([fp_img,fn_img,tp_img,tn_img]).T
+          col_mat=[[1.,0,0],[0,1,0],[1,1,1],[0,0,0]]#fp,fn,tp,tn
+          labs=['FP','FN','TP','TN']
+        cols=regions.dot(array(col_mat))
+        imshow(cols,extent=[x_0_min,x_0_max,x_1_min,x_1_max])
+        handles=[Patch(color=c,label=s) for c,s in zip(col_mat,labs)]
+        if args.mode=='gmm':
+          x_0,x_1=tuple(x_t.T)
+          y_p_s=f(e.w_model,x_t,act=act).flatten()>0
+          scatter(x_0[y_t&y_p_s],x_1[y_t&y_p_s],c='darkgreen',s=1,label='TP')
+          scatter(x_0[y_t&~y_p_s],x_1[y_t&~y_p_s],c='palegreen',s=1,label='FP')
+          scatter(x_0[~y_t&~y_p_s],x_1[~y_t&~y_p_s],c='cyan',s=1,label='TN')
+          scatter(x_0[~y_t&y_p_s],x_1[~y_t&y_p_s],c='blue',s=1,label='FN')
+          handles+=[Patch(color=c,label=s) for c,s in\
+                    zip(['blue','palegreen','darkgreen','cyan'],['FP','FN','TP','TN'])]
+        leg(h=handles,l='lower left')
+        title('p='+f_to_str(e.p,p=False)+',target_fp='+f_to_str(e.target_fp,p=False)+\
+              ',target_fn='+f_to_str(e.target_fn,p=False)+',lr='+f_to_str(e.lr,p=False))
         if fd_tex:
+          img_name=exp_to_str(e)+'.png'
           savefig(args.report_dir+'/'+img_name,dpi=500)
-          print('\n\\includegraphics[width=.3\\textwidth]{'+img_name+'}',file=fd_tex)
+          print('\\begin{subfigure}{.33\\textwidth}',file=fd_tex)
+          print('\\centering',file=fd_tex)
+          print('\\includegraphics[width=.9\\linewidth,scale=1]{'+img_name+'}',
+                file=fd_tex)
+          print('\\end{subfigure}%',file=fd_tex)
+          print('\\hfill',file=fd_tex)
           close()
         else:
           show()
@@ -607,18 +730,22 @@ while True:
 
       sizes.append(e.size)
     if 'i' in line:
-      model_desc='\n'.join(['Model shape:','->'.join([str(l) for l in args.model_shape]),
-                            'Model initialisation parameters:',
-                            '- matrix weight variance:'+\
-                            f_to_str(args.model_sigma_w,p=False),
-                            '- bias variance:'+f_to_str(args.model_sigma_b,p=False),
-                            '- residual initialisation:'+\
-                            f_to_str(args.model_resid,p=False),
-                            '- matrix weight distribution:'+\
-                            ('Glorot' if args.glorot else 'Normal'),
-                            '- matrix dimension **-.5 normalisation:'+\
-                            str(args.model_sqrt_normalise_w),
-                            '- uniform first layer bias:'+str(args.uniform_b_0)])
+      model_desc='Model shape:\n'+('->'.join([str(l) for l in args.model_shape]))+'\n'
+    
+      args.no_glorot_uniform=False
+      if args.no_glorot_uniform:
+        model_desc+='\n'.join(['- matrix weight variance:'+\
+                               f_to_str(args.model_sigma_w,p=False),
+                               '- bias variance:'+f_to_str(args.model_sigma_b,p=False),
+                               '- residual initialisation:'+\
+                               f_to_str(args.model_resid,p=False),
+                               'sqrt variance correction:'+\
+                               str(not args.no_sqrt_normalise_w)])
+      else:
+        model_desc+='\n- Glorot uniform initialisation'
+      model_desc+='\n- batch size:'+str(args.bs)
+      if args.mode in ['single','gmm']:
+        model_desc+='\n- learning rate:'+str(args.lr)
       print(model_desc)
       if fd_tex:
         print('\\subsection{Model parameters}',file=fd_tex)
@@ -629,8 +756,7 @@ while True:
       sc=scatter(fp_perf,fn_perf,c=colours,s=sizes)
       lr_sizes=size_rescale(lrs)
       if args.mode=='all':
-        cl=legend(handles=colour_handles,\
-                  title='target_fp/target_fn',loc='upper right')
+        cl=leg(h=colour_handles,t='target_fp/target_fn')
       #h=sc.legend_elements(prop="sizes",num=lr_sizes, alpha=0.6)[0]
       #legend(handles=h,labels=[str(r) for r in lrs],loc='lower right',title='lr')
       if args.mode=='all': gca().add_artist(cl)
@@ -659,16 +785,14 @@ while True:
         for e in experiments:
           arr=get_var(e)
           if args.mode=='unsw':
-            lab=args.cats[e.p]#'p='+f_to_str(e.p)+',target_fp='+f_to_str(e.target_fp)+\
-                #',target_fn='+f_to_str(e.target_fp)
+            lab=args.cats[e.p]
           else:
-            lab=None
-          #plot([log(arr[i]) for i in hist_indices],label=lab)
+            lab=fpfnp_lab(e)
           plot([log(a)/log(2) for a in arr],label=lab)
         xlabel('Step number *'+str(e.history.resolution))
         ylabel(yl)
         title(desc.replace('_',' '))
-        legend(framealpha=0.2,fontsize='x-small')
+        leg()
         if fd_tex:
           savefig(args.report_dir+'/'+desc+'.png',dpi=500)
           close()
@@ -678,6 +802,23 @@ while True:
           print('\\end{figure}',file=fd_tex)
         else:
           show()
+      for e in experiments:
+        conv_len=min(int(args.step**.5),int(1/p))
+        ker=ones(conv_len)/conv_len
+        smoothed_fp=convolve(array(e.history.FP,dtype=float),ker,'valid')
+        smoothed_fn=convolve(array(e.history.FN,dtype=float),ker,'valid')
+        plot(smoothed_fp,smoothed_fn,label=fpfnp_lab(e))
+        title('FP versus FN rate')
+      leg()
+      if fd_tex:
+        savefig(args.report_dir+'/phase.png',dpi=500)
+        close()
+        print('\n\\begin{figure}[H]',file=fd_tex)
+        print('\\centering',file=fd_tex)
+        print('\\includegraphics[width=.9\\textwidth]{phase.png}',file=fd_tex)
+        print('\\end{figure}',file=fd_tex)
+      else:
+        show()
 
   if fd_tex:
     print('\\end{document}',file=fd_tex,flush=True)
