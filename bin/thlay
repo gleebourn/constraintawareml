@@ -10,7 +10,7 @@ from matplotlib import colormaps
 from matplotlib.patches import Patch
 from matplotlib.cm import jet
 from numpy import geomspace,prod
-from jax.numpy import array,array_split,dot,vectorize,add,linspace,convolve,\
+from jax.numpy import array,array_split,dot,vectorize,add,linspace,\
                       log,exp,eye,flip,maximum,minimum,unique,concat,ones,\
                       sin,zeros,sum as nsm,max as nmx
 from jax.numpy.linalg import svd
@@ -18,6 +18,7 @@ from jax.random import normal,key,uniform,split,choice
 from jax.nn import tanh,softmax
 from jax import grad
 from jax.lax import scan
+from jax.scipy.signal import convolve
 from sklearn.utils.extmath import cartesian
 from sys import path,stdin
 from os import mkdir
@@ -679,20 +680,28 @@ while True:
         y_p=concat([(f(e.w_model,_x,act=act)>0).flatten() for _x in x_split])
         y_p=flip(y_p.reshape(args.res,args.res),axis=1) #?!?!?!
 
-        if args.mode=='gmm':
-          regions=array([y_p,~y_p]).T
+        cm=None
+        if 'b' in line: #draw boundary
+          cols=abs(convolve(y_p,array([[1,1,1],[1,-8,1],[1,1,1]]))).T
+          cols/=-(nmx(cols)+nmx(-cols))
+          cols+=nmx(-cols)
+          cm='gray'
         else:
-          y_t=concat([f(args.w_target,_x)>e.thresh for _x in x_split])\
-              .reshape(args.res,args.res)
-          fp_img=(y_p&~y_t)
-          fn_img=(~y_p&y_t)
-          tp_img=(y_p&y_t)
-          tn_img=(~y_p&~y_t)
-          regions=array([fp_img,fn_img,tp_img,tn_img]).T
-          col_mat=[[1.,0,0],[0,1,0],[1,1,1],[0,0,0]]#fp,fn,tp,tn
-          labs=['FP','FN','TP','TN']
-        cols=regions.dot(array(col_mat))
-        imshow(cols,extent=[x_0_min,x_0_max,x_1_min,x_1_max])
+
+          if args.mode=='gmm':
+            regions=array([y_p,~y_p]).T
+          else:
+            y_t=concat([f(args.w_target,_x)>e.thresh for _x in x_split])\
+                .reshape(args.res,args.res)
+            fp_img=(y_p&~y_t)
+            fn_img=(~y_p&y_t)
+            tp_img=(y_p&y_t)
+            tn_img=(~y_p&~y_t)
+            regions=array([fp_img,fn_img,tp_img,tn_img]).T
+            col_mat=[[1.,0,0],[0,1,0],[1,1,1],[0,0,0]]#fp,fn,tp,tn
+            labs=['FP','FN','TP','TN']
+          cols=regions.dot(array(col_mat))
+        imshow(cols,extent=[x_0_min,x_0_max,x_1_min,x_1_max],cmap=cm)
         handles=[Patch(color=c,label=s) for c,s in zip(col_mat,labs)]
         if args.mode=='gmm':
           x_0,x_1=tuple(x_t.T)
@@ -803,7 +812,7 @@ while True:
         else:
           show()
       for e in experiments:
-        conv_len=min(int(args.step**.5),int(1/p))
+        conv_len=min(int(args.step**.5),int(1/e.p))
         ker=ones(conv_len)/conv_len
         smoothed_fp=convolve(array(e.history.FP,dtype=float),ker,'valid')
         smoothed_fn=convolve(array(e.history.FN,dtype=float),ker,'valid')
