@@ -829,8 +829,3 @@ while True:
     with open(args.out_dir+'/ensemble.pkl','wb') as fd:
       args.global_key=global_key
       dump((args,experiments,global_key),fd)
-
-  if line:
-    while stdin in select([stdin],[],[],0)[0]:
-      stdin.readline()
-
