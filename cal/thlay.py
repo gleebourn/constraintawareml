@@ -2,8 +2,8 @@ from argparse import ArgumentParser
 from pickle import load,dump
 from types import SimpleNamespace
 from csv import writer
-from jax.numpy import array,vectorize,zeros,log,flip,maximum,minimum,concat,exp,ones,\
-     sum as nsm,max as nmx
+from jax.numpy import array,vectorize,zeros,log,flip,maximum,minimum,concat,exp,\
+                      ones,linspace,array_split, sum as nsm,max as nmx
 from jax.scipy.signal import convolve
 from jax.nn import tanh,softmax
 from jax import grad
@@ -22,7 +22,9 @@ def init_ensemble():
   ap=ArgumentParser()
   ap.add_argument('mode',default='all',
                   choices=['single','all','adaptive_lr','imbalances','unsw','gmm'])
+  ap.add_argument('-no_U_V',action='store_true')
   ap.add_argument('-n_gaussians',default=4,type=int)
+  ap.add_argument('-loss',default='loss',choices=list(dlosses))
   ap.add_argument('-reporting_interval',default=10,type=int)
   ap.add_argument('-gmm_spread',default=.025,type=float)
   ap.add_argument('-gmm_scatter_samples',default=10000,type=int)
@@ -53,7 +55,7 @@ def init_ensemble():
   ap.add_argument('-avg_rate',default=.1,type=float)#binom avg parameter
   ap.add_argument('-unsw_test',default='~/data/UNSW_NB15_testing-set.csv')
   ap.add_argument('-unsw_train',default='~/data/UNSW_NB15_training-set.csv')
-  ap.add_argument('-model_inner_dims',default=[32,16,8],type=int,nargs='+')
+  ap.add_argument('-model_inner_dims',default=[32,16],type=int,nargs='+')
   ap.add_argument('-bs',default=1,type=int)
   ap.add_argument('-res',default=1000,type=int)
   ap.add_argument('-outf',default='thlay')
@@ -61,6 +63,7 @@ def init_ensemble():
   ap.add_argument('-model_sigma_b',default=1.,type=float)#0.
   ap.add_argument('-no_sqrt_normalise_w',action='store_true')
   ap.add_argument('-no_glorot_uniform',action='store_true')
+  ap.add_argument('-glorot_normal',action='store_true')
   ap.add_argument('-model_resid',default=False,type=bool)
   ap.add_argument('-p',default=.1,type=float)
   ap.add_argument('-target_fp',default=.01,type=float)
@@ -76,6 +79,8 @@ def init_ensemble():
   ap.add_argument('-x_max',default=10.,type=float)
   
   a=ap.parse_args()
+  a.glorot_uniform=(not a.no_glorot_uniform) and (not a.glorot_normal)
+  a.adam=not a.no_adam
   a.target_fps,a.target_fns,a.lrs=array(a.target_fps),array(a.target_fns),array(a.lrs)
   a.out_dir=a.outf+'_report'
   a.step=0
@@ -105,7 +110,8 @@ def f_unbatched(w,x,act=tanh):
   return x
 f=vectorize(f_unbatched,excluded=[0],signature='(m)->(n)')
 
-def loss(w,x,y,U,V,act=tanh,normalisation=False):
+'''
+def l1(w,x,y,U,V,act=tanh,normalisation=False):
   y_smooth=f(w,x,act=act)
   #cts_fp=nsm(maximum(V-U,y_smooth)[~y])
   #cts_fn=nsm(maximum(U-V,-y_smooth)[y])
@@ -113,17 +119,46 @@ def loss(w,x,y,U,V,act=tanh,normalisation=False):
   #cts_fn=nsm(maximum(0,-y_smooth)[y])
   #cts_fp=nsm((~y)*(y_smooth+.5))
   #cts_fn=nsm(y*(.5-y_smooth))
-  cts_fp=nsm((y_smooth+1.)[~y])
+  cts_fp=nsm((1.+y_smooth)[~y])
   cts_fn=nsm((1.-y_smooth)[y])
-  if normalisation:
-    l2=sum([nsm(w[('w',i)]**2)*nf for\
-            i,nf in enumerate(normalisation)])
-  return U*cts_fp+V*cts_fn+l2
+  If normalisation:
+    l2=sum([nsm(w[('w',i)]**2)*nf for i,nf in enumerate(normalisation)])
+  return U*cts_fp+V*cts_fn+(l2 if normalisation else 0.)
+'''
 
-dloss=grad(loss)
+def l1_soft(w,x,y,U,V,softness=.1,act=tanh,normalisation=False):
+  y_smooth=f(w,x,act=act)
+  a_p,a_n=y_smooth[y],y_smooth[~y]
+  cts_fp=nsm(1.+a_n)
+  cts_fn=nsm(1.-a_p)
+  #if normalisation:
+  #  l2=sum([nsm(w[('w',i)]**2)*nf for i,nf in enumerate(normalisation)])
+  return U*cts_fp+V*cts_fn#+(l1 if normalisation else 0)
 
-def init_layers(k,sigma_w,sigma_b,layer_dimensions,no_sqrt_normalise=False,
-                resid=False,glorot_uniform=False,orthonormalise=False):
+def l1(w,x,y,U,V,act=tanh,normalisation=False):
+  return l1_soft(w,x,y,U,V,0.,act,normalisation)
+
+def cross_entropy(w,x,y,U,V,act=tanh,normalisation=False,eps=1e-8):
+  y_smooth=f(w,x,act=act)
+  a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
+  cts_fn=-nsm(log(eps+1.+a_p)) #y=1 => H(y,y')=-log(y'')=-log((1+y')/2)
+  cts_fp=-nsm(log(eps+1.-a_n)) #y=0 => H(y,y')=-log(1-y'')=-log((1-y')/2)
+  return U*cts_fp+V*cts_fn
+
+'''
+def cross_entropy(w,x,y,U,V,act=tanh,normalisation=False):
+  return cross_entropy_soft(w,x,y,U,V,0.,act,normalisation)
+  '''
+
+dl1=grad(l1)
+dcross_entropy=grad(cross_entropy)
+dl1_soft=grad(l1_soft)
+#dcross_entropy_soft=grad(cross_entropy_soft)
+dlosses={'loss':dl1,'l1':dl1,'cross_entropy':dcross_entropy,'l1_soft':dl1_soft}
+         #'cross_entropy_soft':dcross_entropy_soft}
+
+def init_layers(k,sigma_w,sigma_b,layer_dimensions,no_sqrt_normalise=False,resid=False,
+                glorot_uniform=False,glorot_normal=False,orthonormalise=False):
   k1,k2=split(k)
   wb=[]
   n_steps=len(layer_dimensions)-1
@@ -132,14 +167,17 @@ def init_layers(k,sigma_w,sigma_b,layer_dimensions,no_sqrt_normalise=False,
   ret=dict()
   for i,(k,l,d_i,d_o) in enumerate(zip(w_k,b_k,layer_dimensions,layer_dimensions[1:])):
     if glorot_uniform:
-      ret[('w',i)]=2*(6/(d_i+d_o))**.5*(uniform(shape=(d_i,d_o),key=k)-.5)
+      ret[('w',i)]=(2*(6/(d_i+d_o))**.5)*(uniform(shape=(d_i,d_o),key=k)-.5)
+      ret[('b',i)]=zeros(shape=d_o)
+    elif glorot_normal:
+      ret[('w',i)]=((2/(d_i+d_o))**.5)*(normal(shape=(d_i,d_o),key=k))
       ret[('b',i)]=zeros(shape=d_o)
     else:
       ret[('w',i)]=normal(shape=(d_i,d_o),key=k)
       ret[('b',i)]=normal(shape=d_o,key=l)
     if resid:
       ret[('w',i)]+=eye(*ret[('w',i)].shape)
-  if glorot_uniform:
+  if glorot_uniform or glorot_normal:
     return ret
   if orthonormalise:
     for i,(d_i,d_o) in enumerate(zip(layer_dimensions,layer_dimensions[1:])):
@@ -176,6 +214,9 @@ def mk_experiment(w_model_init,p,thresh,target_fp,target_fn,lr,fpfn_memory_len,
   e.fpfn_memory_len=fpfn_memory_len
   e.step=0
 
+  e.adam_V={k:0.*v for k,v in w_model_init.items()}
+  e.adam_M=0.
+
   e.lr=float(lr)
   e.p=float(p) #"imbalance"
   e.target_fp=target_fp
@@ -205,16 +246,17 @@ def init_experiments(a,global_key):
     a.y_test=df_test['attack_cat']
     a.in_dim=len(a.x_train[0])
 
-  a.target_sigma_w=.75
-  a.target_sigma_b=2.
+  if a.mode in ['single','all']:
+    a.target_sigma_w=.75
+    a.target_sigma_b=2.
   
-  a.w_target=init_layers(k1,a.target_sigma_w,a.target_sigma_b,
-                         a.target_shape)
+    a.w_target=init_layers(k1,a.target_sigma_w,a.target_sigma_b,
+                           a.target_shape)
+
   a.model_shape=[a.in_dim]+a.model_inner_dims+[1]
 
   a.w_model_init=init_layers(k2,a.model_sigma_w,a.model_sigma_b,a.model_shape,
-                             resid=a.model_resid,
-                             glorot_uniform=not a.no_glorot_uniform,
+                             resid=a.model_resid,glorot_uniform=a.glorot_uniform,
                              no_sqrt_normalise=a.no_sqrt_normalise_w,
                              orthonormalise=a.orthonormalise)
   a.normalisation_factors=[a.weight_normalisation/(nsm(a.w_model_init[('w',i)]**2)*\
@@ -369,7 +411,8 @@ def compute_U_V(fp,fn,target_fp,target_fn,p):
     V/=nUV
   return U,V
 
-def update_lrs(a,experiments): 
+def update_lrs(a,experiments,k): 
+  k1,k2,k3=split(k,3)
   experiments=sorted(experiments,key=lambda x:x.cost_window)
   goodnesses=array([1/(1e-8+e.cost_window) for e in experiments])
   e_lr=v_lr=0.
@@ -384,15 +427,15 @@ def update_lrs(a,experiments):
   goodnesses/=nsm(goodnesses)
   experiment_indices=array(range(len(experiments)))
   e=experiments[-1]
-  parent=experiments[int(choice(emit_key(),experiment_indices,p=goodnesses))]
+  parent=experiments[int(choice(k1,experiment_indices,p=goodnesses))]
   e.lr=parent.lr
   w=lambda x,y,z:(x*z,y/z)
-  if parent.lr>a.lr_max: rule=lambda x,y:(x,y*exp(-abs(normal(emit_key()))))
-  elif parent.lr<a.lr_min: rule=lambda x,y:(x,y*exp(abs(normal(emit_key()))))
-  else: rule=lambda x,y:w(x,y,exp(normal(emit_key())))
+  if parent.lr>a.lr_max: rule=lambda x,y:(x,y*exp(-abs(normal(k2))))
+  elif parent.lr<a.lr_min: rule=lambda x,y:(x,y*exp(abs(normal(k2))))
+  else: rule=lambda x,y:w(x,y,exp(normal(k2)))
   parent.lr,e.lr=rule(parent.lr,e.lr)
 
-  if uniform(emit_key())<e.cost_window/(1e-8+parent.cost_window)-1:
+  if uniform(k3)<e.cost_window/(1e-8+parent.cost_window)-1:
     print('Weight copying')
     e.w_model=parent.w_model.copy()
     e.adam_M=parent.adam_M.copy()
@@ -404,31 +447,28 @@ def update_lrs(a,experiments):
 
 def update_weights(a,e,upd):
   e.dw_l2=e.w_l2=0
-  if a.no_adam:
+  if a.adam:
+    e.adam_M*=(1-a.gamma2)
+    for k in upd:#Should apply to all bits simultaneously?
+      e.adam_V[k]*=(1-a.gamma1)
+      e.adam_V[k]+=a.gamma1*upd[k]
+      e.adam_M+=a.gamma2*nsm(upd[k]**2)
+    for k in upd:
+      delta=e.lr*e.adam_V[k]/(e.adam_M**.5+1e-8)
+      e.w_model[k]-=delta
+      ch_l2=nsm(delta**2)
+      weight_l2=nsm(e.w_model[k]**2)
+      e.w_l2+=weight_l2
+      e.dw_l2+=ch_l2
+  else:
     for k in upd:
       delta=e.lr*upd[k]
       e.dw_l2+=nsm(delta**2)
       e.w_model[k]-=delta
       e.w_l2+=nsm(e.w_model[k]**2)
-  else:
-    try:
-      e.adam_M*=(1-a.gamma2)
-      for k in upd:#Should apply to all bits simultaneously?
-        e.adam_V[k]*=(1-a.gamma1)
-        e.adam_V[k]+=a.gamma1*upd[k]
-        e.adam_M+=a.gamma2*nsm(upd[k]**2)
-    except AttributeError: #initialise adam weights
-      e.adam_V=upd
-      e.adam_M=sum([nsm(upd[k]**2) for k in upd])
-    for k in e.adam_V:
-      delta=e.lr*e.adam_V[k]/(e.adam_M**.5+1e-8)
-      e.w_model[k]-=delta
-      ch_l2=nsm(delta**2)
-      e.dw_l2+=ch_l2
-      weight_l2=nsm(e.w_model[k]**2)
-      e.w_l2+=weight_l2
 
-def report_progress(a,experiments,line,act):
+def report_progress(a,experiments,line,act,k):
+  k1,k2=split(k)
   print('|'.join([t.ljust(10) for t in ['p','target_fp','target_fn',
                                         'lr','fp','fn','w','dw','U','V']]))
   for e in experiments:
@@ -542,7 +582,7 @@ def report_progress(a,experiments,line,act):
       print('\\centering',file=fd_tex)
     for e in experiments:
       if a.mode=='gmm':
-        x_t,y_t=get_xy(a,e.p,a.gmm_scatter_samples,emit_key())
+        x_t,y_t=get_xy(a,e.p,a.gmm_scatter_samples,k1)
         col_mat=[[1.,1,1],[0,0,0]]#fp,fn,tp,tn
         labs=['Predict +','Predict -']
         x_0_max=nmx(x_t[:,0])
@@ -613,7 +653,6 @@ def report_progress(a,experiments,line,act):
   if 'i' in line:
     model_desc='Model shape:\n'+('->'.join([str(l) for l in a.model_shape]))+'\n'
   
-    a.no_glorot_uniform=False
     if a.no_glorot_uniform:
       model_desc+='\n'.join(['- matrix weight variance:'+\
                              f_to_str(a.model_sigma_w,p=False),

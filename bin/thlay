@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 from pickle import load
-from pandas import read_csv
 from time import perf_counter
 from jax.numpy import exp,sin
 from jax.random import key,split
@@ -12,7 +11,7 @@ from os.path import dirname,abspath
 from sys import path
 path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import init_ensemble,init_experiments,activations,f_to_str,save_ensemble,\
-                      exp_to_str,fpfnp_lab,f,loss,dloss,get_xy,report_progress,\
+                      exp_to_str,fpfnp_lab,f,dlosses,get_xy,report_progress,update_lrs,\
                       evaluate_fp_fn,update_fp_fn,compute_U_V,update_weights
 
 a=init_ensemble()
@@ -91,10 +90,14 @@ while True:
          a.force_batch_cost:
         break
 
-      e.U,e.V=compute_U_V(e.fp,e.fn,e.target_fp,e.target_fn,e.p)
+      if a.no_U_V:
+        e.U=e.V=1
+      else:
+        e.U,e.V=compute_U_V(e.fp,e.fn,e.target_fp,e.target_fn,e.p)
       get_timestep('U,V')
 
-      upd=dloss(e.w_model,x,y_t,e.U,e.V,act=act,normalisation=a.normalisation_factors)
+      upd=dlosses[a.loss](e.w_model,x,y_t,e.U,e.V,act=act,
+                          normalisation=a.normalisation_factors)
       get_timestep('dloss')
 
       update_weights(a,e,upd)
@@ -107,12 +110,12 @@ while True:
     update_fp_fn(e)
     
   if not a.step%a.lr_update_interval and a.mode=='adaptive_lr':
-    experiments=update_lrs(a,experiments)
+    experiments=update_lrs(a,experiments,emit_key())
 
   line=stdin.readline().lower() if stdin in select([stdin],[],[],0)[0] else ''
 
-  if line or not a.step%a.reporting_interval:
-    report_progress(a,experiments,line,act)
-
   if not a.step%a.saving_interval:
     save_ensemble(a,experiments,global_key)
+
+  if line or not a.step%a.reporting_interval:
+    report_progress(a,experiments,line,act,emit_key())
