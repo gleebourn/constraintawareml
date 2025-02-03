@@ -26,8 +26,9 @@ def init_ensemble():
   ap.add_argument('-n_gaussians',default=4,type=int)
   ap.add_argument('-loss',default='loss',choices=list(dlosses))
   ap.add_argument('-reporting_interval',default=10,type=int)
-  ap.add_argument('-gmm_spread',default=.025,type=float)
+  ap.add_argument('-gmm_spread',default=.05,type=float)
   ap.add_argument('-gmm_scatter_samples',default=10000,type=int)
+  ap.add_argument('-gmm_compensate_variances',action='store_true')
   ap.add_argument('-force_batch_cost',default=0.,type=float)
   ap.add_argument('-no_adam',action='store_true')
   ap.add_argument('-adaptive_threshold',action='store_true')
@@ -39,7 +40,7 @@ def init_ensemble():
   ap.add_argument('-unsw_cat_thresh',default=.1,type=int)
   ap.add_argument('-lr_resolution',default=16,type=int)
   ap.add_argument('-all_resolution',default=5,type=int)
-  ap.add_argument('-max_history_len',default=16384,type=int)
+  ap.add_argument('-history_len',default=16384,type=int)
   ap.add_argument('-weight_normalisation',default=0.,type=float)
   ap.add_argument('-orthonormalise',action='store_true')
   ap.add_argument('-saving_interval',default=100,type=int)
@@ -47,16 +48,16 @@ def init_ensemble():
   ap.add_argument('-lr_init_max',default=1e-2,type=float)
   ap.add_argument('-lr_min',default=1e-5,type=float)
   ap.add_argument('-lr_max',default=1e-1,type=float)
-  ap.add_argument('-lrs',default=[1e-4],type=float,nargs='+')
+  ap.add_argument('-lrs',default=[1e-2],type=float,nargs='+')
   ap.add_argument('-lr_update_interval',default=1000,type=int)
-  ap.add_argument('-fpfn_memory_len',default=1000,type=int)
+  ap.add_argument('-recent_memory_len',default=1000,type=int)
   ap.add_argument('-gamma1',default=.1,type=float) #1- beta1 in adam
   ap.add_argument('-gamma2',default=.001,type=float)
   ap.add_argument('-avg_rate',default=.1,type=float)#binom avg parameter
   ap.add_argument('-unsw_test',default='~/data/UNSW_NB15_testing-set.csv')
   ap.add_argument('-unsw_train',default='~/data/UNSW_NB15_training-set.csv')
-  ap.add_argument('-model_inner_dims',default=[32,16],type=int,nargs='+')
-  ap.add_argument('-bs',default=1,type=int)
+  ap.add_argument('-model_inner_dims',default=[16,8],type=int,nargs='+')
+  ap.add_argument('-bs',default=128,type=int)
   ap.add_argument('-res',default=1000,type=int)
   ap.add_argument('-outf',default='thlay')
   ap.add_argument('-model_sigma_w',default=1.,type=float)#.3
@@ -69,9 +70,11 @@ def init_ensemble():
   ap.add_argument('-target_fp',default=.01,type=float)
   ap.add_argument('-target_fn',default=.01,type=float)
   ap.add_argument('-clock_avg_rate',default=.1,type=float) #Track timings
-  ap.add_argument('-threshold_accuracy_tolerance',default=.01,type=float)
-  ap.add_argument('-target_fps',default=[.2,.05],nargs='+',type=float)
+  ap.add_argument('-threshold_accuracy_tolerance',default=.5,type=float)
+  ap.add_argument('-fpfn_ratios',default=[2,.5],nargs='+',type=float)
   ap.add_argument('-target_fns',default=[.1],nargs='+',type=float)
+  ap.add_argument('-target_tolerance',default=.8,type=float)
+  ap.add_argument('-stop_on_target',action='store_true')
   #Silly
   ap.add_argument('-lr_phase',default=0.,type=float)
   ap.add_argument('-lr_momentum',default=0.05,type=float)
@@ -81,7 +84,7 @@ def init_ensemble():
   a=ap.parse_args()
   a.glorot_uniform=(not a.no_glorot_uniform) and (not a.glorot_normal)
   a.adam=not a.no_adam
-  a.target_fps,a.target_fns,a.lrs=array(a.target_fps),array(a.target_fns),array(a.lrs)
+  a.fpfn_ratios,a.target_fns,a.lrs=array(a.fpfn_ratios),array(a.target_fns),array(a.lrs)
   a.out_dir=a.outf+'_report'
   a.step=0
   if len(a.lrs)==1:
@@ -154,7 +157,7 @@ dl1=grad(l1)
 dcross_entropy=grad(cross_entropy)
 dl1_soft=grad(l1_soft)
 #dcross_entropy_soft=grad(cross_entropy_soft)
-dlosses={'loss':dl1,'l1':dl1,'cross_entropy':dcross_entropy,'l1_soft':dl1_soft}
+dlosses={'loss':dcross_entropy,'l1':dl1,'cross_entropy':dcross_entropy,'l1_soft':dl1_soft}
          #'cross_entropy_soft':dcross_entropy_soft}
 
 def init_layers(k,sigma_w,sigma_b,layer_dimensions,no_sqrt_normalise=False,resid=False,
@@ -202,16 +205,19 @@ def colour_rescale(fpfn):
   l/=log(a.fpfn_max)-log(a.fpfn_min)
   return jet(l)
 
-def mk_experiment(w_model_init,p,thresh,target_fp,target_fn,lr,fpfn_memory_len,
-                  max_history_len,avg_rate):
+def mk_experiment(w_model_init,p,thresh,fpfn_ratio,target_fn,lr,recent_memory_len,
+                  history_len,avg_rate,target_tolerance):
   e=SimpleNamespace()
+  e.fpfn_ratio=float(fpfn_ratio)
+  e.target_tolerance=target_tolerance
+  e.steps_to_target=False
   e.avg_rate=avg_rate
-  e.FPs=[0]*fpfn_memory_len
-  e.FNs=[0]*fpfn_memory_len
+  e.FPs=[0]*recent_memory_len
+  e.FNs=[0]*recent_memory_len
   e.dw_l2=e.w_l2=0
   e.w_model=w_model_init.copy()
-  e.max_history_len=max_history_len
-  e.fpfn_memory_len=fpfn_memory_len
+  e.history_len=history_len
+  e.recent_memory_len=recent_memory_len
   e.step=0
 
   e.adam_V={k:0.*v for k,v in w_model_init.items()}
@@ -219,9 +225,9 @@ def mk_experiment(w_model_init,p,thresh,target_fp,target_fn,lr,fpfn_memory_len,
 
   e.lr=float(lr)
   e.p=float(p) #"imbalance"
-  e.target_fp=target_fp
+  e.target_fp=target_fn*fpfn_ratio
   e.target_fn=target_fn
-  e.fp=target_fp
+  e.fp=e.target_fp
   e.fn=target_fn#.25 #softer start if a priori assume doing well
 
   e.U=e.V=1
@@ -290,32 +296,36 @@ def init_experiments(a,global_key):
   a.step=0
 
   if a.mode=='all':
-    a.targets=list(zip(a.target_fps,a.target_fns))
-    experiments=[mk_experiment(a.w_model_init,p,a.thresholds[p],target_fp,target_fn,lr,
-                               a.fpfn_memory_len,a.max_history_len,a.avg_rate)\
-                 for p in a.imbalances for (target_fp,target_fn) in a.targets\
+    a.targets=list(zip(a.fpfn_ratios,a.target_fns))
+    experiments=[mk_experiment(a.w_model_init,p,a.thresholds[p],fpfn_ratio,target_fn,lr,
+                               a.recent_memory_len,a.history_len,a.avg_rate,
+                               a.target_tolerance)\
+                 for p in a.imbalances for (fpfn_ratio,target_fn) in a.targets\
                  for lr in a.lrs]
 
   elif a.mode=='single':
-    experiments=[mk_experiment(a.w_model_init,.1,a.thresholds[.1],.01,.01,
-                               a.lr,a.fpfn_memory_len,a.max_history_len,a.avg_rate)]
+    experiments=[mk_experiment(a.w_model_init,.1,a.thresholds[.1],1.,.01,
+                               a.lr,a.recent_memory_len,a.history_len,a.avg_rate,
+                               a.target_tolerance)]
   elif a.mode=='adaptive_lr':
-    experiments=[mk_experiment(a.w_model_init,.1,a.thresholds[.1],.01,.01,
-                               lr,a.fpfn_memory_len,a.max_history_len,a.avg_rate) for\
+    experiments=[mk_experiment(a.w_model_init,.1,a.thresholds[.1],1.,.01,lr,
+                               a.recent_memory_len,a.history_len,a.avg_rate,
+                               a.target_tolerance) for\
                  lr in a.lrs]
   elif a.mode in ['unsw','gmm']:
-    experiments=[mk_experiment(a.w_model_init,float(p),0.,float(p*target_fp),
-                               float(p*target_fn),a.lr,a.fpfn_memory_len,
-                               a.max_history_len,a.avg_rate)\
+    experiments=[mk_experiment(a.w_model_init,float(p),0.,fpfn_ratio,
+                               float(p*target_fn),a.lr,a.recent_memory_len,
+                               a.history_len,a.avg_rate,a.target_tolerance,)\
                  for p in a.imbalances\
-                 for target_fp in a.target_fps\
+                 for fpfn_ratio in a.fpfn_ratios\
                  for target_fn in a.target_fns]
   elif a.mode in ['imbalances']:
     experiments=[mk_experiment(a.w_model_init,float(p),float(a.thresholds[float(p)]),
-                               float(p*target_fp),float(p*target_fn),
-                               a.lr,a.fpfn_memory_len,a.max_history_len,a.avg_rate)\
+                               fpfn_ratio,float(p*target_fn),a.lr,
+                               a.recent_memory_len,a.history_len,a.avg_rate,
+                               a.target_tolerance)\
                  for p in a.imbalances\
-                 for target_fp in a.target_fps\
+                 for fpfn_ratio in a.fpfn_ratios\
                  for target_fn in a.target_fns]
 
   if a.mode=='gmm':
@@ -342,6 +352,8 @@ def get_xy(a,imbs,bs,k):
       mix=choice(k1,2*a.n_gaussians,shape=(bs,),p=probs)
       y=mix>=a.n_gaussians
       z=normal(k2,shape=(bs,a.in_dim))
+      if a.gmm_compensate_variances:
+        z/=(-2*log(p))**.5
       x=z*a.variances[mix,None]+a.means[mix]
       ret[float(p)]=x,y
 
@@ -362,9 +374,9 @@ def evaluate_fp_fn(e,y_p,y_t,cost_multiplier):
   e.FN=int(nsm(y_t&(~y_p)))
   e.fp_cost=(e.FP/(e.bs*e.target_fp))*cost_multiplier
   e.fn_cost=(e.FN/(e.bs*e.target_fp))*cost_multiplier
-  e.FPs[e.step%e.fpfn_memory_len]=e.FP
-  e.FNs[e.step%e.fpfn_memory_len]=e.FN
-  window_div=min(e.step,e.fpfn_memory_len)
+  e.FPs[e.step%e.recent_memory_len]=e.FP
+  e.FNs[e.step%e.recent_memory_len]=e.FN
+  window_div=min(e.step,e.recent_memory_len)
   e.fp_window=sum(e.FPs)/window_div
   e.fn_window=sum(e.FNs)/window_div
   e.cost_window=(e.fp_window/e.target_fp+e.fn_window/e.target_fn)/e.bs
@@ -380,13 +392,13 @@ def update_fp_fn(e):
   e.fp+=e.fp_amnt*e.FP/e.bs
   e.fn*=(1-e.fn_amnt)
   e.fn+=e.fn_amnt*e.FN/e.bs
-  if not e.step%e.history.resolution:
+  if not e.step%e.history.resolution: #for plotting purposes
     e.history.FP.append(e.FP)
     e.history.FN.append(e.FN)
     e.history.lr.append(e.lr)
     e.history.cost.append(e.cost_window)
     e.history.l+=1
-    if e.history.l>e.max_history_len:
+    if e.history.l>e.history_len:
       e.history.resolution*=2
       e.history.FP=even_indices(e.history.FP)
       e.history.FN=even_indices(e.history.FN)
@@ -394,6 +406,11 @@ def update_fp_fn(e):
       e.history.cost=even_indices(e.history.cost)
       e.history.dw=even_indices(e.history.dw)
       e.history.l//=2
+  if e.fp<e.target_tolerance*e.target_fp and\
+     e.fn<e.target_tolerance*e.target_fn and\
+     not e.steps_to_target:
+       e.steps_to_target=e.step
+    
 
 def compute_U_V(fp,fn,target_fp,target_fn,p):
   #e.p_empirical*=(1-min(e.fp_amnt,e.fn_amnt))
@@ -470,14 +487,15 @@ def update_weights(a,e,upd):
 def report_progress(a,experiments,line,act,k):
   k1,k2=split(k)
   print('|'.join([t.ljust(10) for t in ['p','target_fp','target_fn',
-                                        'lr','fp','fn','w','dw','U','V']]))
+                                        'lr','fp','fn','w','dw','U','V','complete']]))
   for e in experiments:
     print('|'.join([f_to_str(t) for t in [e.p,e.target_fp,e.target_fn,e.lr,
-                                          e.fp,e.fn,e.w_l2,e.dw_l2,e.U,e.V]]))
+                                          e.fp,e.fn,e.w_l2,e.dw_l2,e.U,e.V]])+'|'+\
+          (f_to_str(e.steps_to_target) if e.steps_to_target else 'no'))
   for e in experiments:
-    print('Recent outcomes:')
-    print('FP by batch',e.FPs[a.step%a.fpfn_memory_len-5:a.step%a.fpfn_memory_len])
-    print('FN by batch',e.FNs[a.step%a.fpfn_memory_len-5:a.step%a.fpfn_memory_len])
+    print('Recent batches: FPs:',
+          e.FPs[a.step%a.recent_memory_len-5:a.step%a.recent_memory_len],'FNs:',
+          e.FNs[a.step%a.recent_memory_len-5:a.step%a.recent_memory_len])
 
   if ':' in line:
     l=line.split(':')
@@ -509,7 +527,7 @@ def report_progress(a,experiments,line,act,k):
   fp_perf=[]
   fn_perf=[]
   if 'r' in line:
-    line+='clis'
+    line+='clist'
     a.report_dir=a.outf+'_report'
     fd_tex=open(a.outf+'_report/report.tex','w')
     print('\\documentclass[landscape]{article}\n'
@@ -531,7 +549,7 @@ def report_progress(a,experiments,line,act,k):
     
     with open(a.out_dir+'/performance.csv','w') as fd_csv:
       w=writer(fd_csv)
-      n_fps=len(a.target_fps)
+      n_fps=len(a.fpfn_ratios)
       row=['imbalance','target_fps']+['']*(n_fps-1)+['target_fn','fps']+\
           ['']*(n_fps-1)+['fns']+['']*(n_fps-1)
       if a.mode=='unsw':
@@ -687,6 +705,32 @@ def report_progress(a,experiments,line,act,k):
       print('\\end{figure}',file=fd_tex)
     else:
       show()
+  if 't' in line:
+    for e in experiments: e.fpfn_ratio=float(e.fpfn_ratio)
+    completed_experiments=[e for e in experiments if e.steps_to_target]
+    try:
+      fpfn_ratios=list(set([e.fpfn_ratio for e in experiments]))
+      for rat in fpfn_ratios:
+        x=[log(e.p)/log(2) for e in completed_experiments if e.fpfn_ratio==rat]
+        y=[log(e.steps_to_target)/log(2) for e in completed_experiments if\
+           e.fpfn_ratio==rat]
+        plot(x,y)
+        title('Stopping times for target fp/fn='+f_to_str(rat))
+        xlabel('log(imbalance)')
+        ylabel('log(Stopping step)')
+        if fd_tex:
+          savefig(a.report_dir+'/stopping_times_'+f_to_str(rat)+'.png',dpi=500)
+          close()
+          print('\n\\begin{figure}[H]',file=fd_tex)
+          print('\\centering',file=fd_tex)
+          print('\\includegraphics[width=.9\\textwidth]'
+                '{stopping_times_'+f_to_str(rat)+'.png}',file=fd_tex)
+          print('\\end{figure}',file=fd_tex)
+        else:
+          show()
+    except AttributeError:
+      print('fpfn ratios not found, skipping stopping time analysis')
+
   if 'l' in line:
     if fd_tex:
       print('\\subsection{Historical statistics}',file=fd_tex)

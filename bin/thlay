@@ -16,10 +16,14 @@ from cal.thlay import init_ensemble,init_experiments,activations,f_to_str,save_e
 
 a=init_ensemble()
 
-global_key=key(a.seed)
-def emit_key():
-  global global_key
-  global_key,child_key=split(global_key)
+global_key,report_key=split(key(a.seed))
+def emit_key(report=False):
+  global global_key,report_key
+  new_key,child_key=split(report_key if report else global_key)
+  if report:
+    report_key=new_key
+  else:
+    global_key=new_key
   return child_key
 
 try:
@@ -73,6 +77,9 @@ while True:
 
   a.lr_phase+=a.lr_momentum
   for e in experiments:
+    if a.stop_on_target and e.steps_to_target:
+      continue
+    tl=perf_counter()
     e.step+=1
     x,y_t=xy[float(e.p)]
 
@@ -80,8 +87,8 @@ while True:
     e.bs=len(y_t)
     e.fp_cost=e.fn_cost=2
     batch_steps=0
+    get_timestep('start_loop')
     while True: #when force_batch_cost
-      tl=perf_counter()
       y_p_cts=f(e.w_model,x,act=act).flatten()
       y_p=y_p_cts>0
       get_timestep('threshold')
@@ -89,6 +96,7 @@ while True:
       if evaluate_fp_fn(e,y_p,y_t,exp(-batch_steps*a.force_batch_cost)) and\
          a.force_batch_cost:
         break
+      get_timestep('evaluate_fp_fn')
 
       if a.no_U_V:
         e.U=e.V=1
@@ -108,9 +116,12 @@ while True:
       else:
         batch_steps+=1
     update_fp_fn(e)
+    get_timestep('update_fp_fn')
     
   if not a.step%a.lr_update_interval and a.mode=='adaptive_lr':
-    experiments=update_lrs(a,experiments,emit_key())
+    experiments=update_lrs(a,[e for e in experiments if (not a.stop_on_target) and\
+                                                        (not e.steps_to_target)],
+                           emit_key())
 
   line=stdin.readline().lower() if stdin in select([stdin],[],[],0)[0] else ''
 
@@ -118,4 +129,4 @@ while True:
     save_ensemble(a,experiments,global_key)
 
   if line or not a.step%a.reporting_interval:
-    report_progress(a,experiments,line,act,emit_key())
+    report_progress(a,experiments,line,act,emit_key(report=True))
