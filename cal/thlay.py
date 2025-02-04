@@ -2,12 +2,14 @@ from argparse import ArgumentParser
 from pickle import load,dump
 from types import SimpleNamespace
 from csv import writer
+from itertools import cycle
 from jax.numpy import array,vectorize,zeros,log,flip,maximum,minimum,concat,exp,\
-                      ones,linspace,array_split, sum as nsm,max as nmx
+                      ones,linspace,array_split,reshape,concatenate,\
+                      sum as nsm,max as nmx
 from jax.scipy.signal import convolve
 from jax.nn import tanh,softmax
 from jax import grad
-from jax.random import uniform,normal,split,key,choice
+from jax.random import uniform,normal,split,key,choice,binomial,permutation
 from sklearn.utils.extmath import cartesian
 from pandas import read_csv
 from matplotlib.pyplot import imshow,legend,show,scatter,xlabel,ylabel,\
@@ -17,25 +19,45 @@ from matplotlib.cm import jet
 
 leg=lambda t=None,h=None,l='upper right':legend(fontsize='x-small',loc=l,
                                                 handles=h,title=t)
+class cyc:
+  def __init__(self,n):
+    self.list=[0]*n
+    self.n=n
+
+  def __getitem__(self,k):
+    if isinstance(k,slice):
+      return [self.list[i%self.n] for i in range(k.start,k.stop)]
+    return self.list[k%self.n]
+
+  def __setitem__(self,k,v):
+    self.list[k%self.n]=v
+
+  def sum(self):
+    return sum(self.list)
 
 def init_ensemble():
   ap=ArgumentParser()
   ap.add_argument('mode',default='all',
-                  choices=['single','all','adaptive_lr','imbalances','unsw','gmm'])
+                  choices=['single','all','adaptive_lr','imbalances',
+                           'unsw','gmm','mnist'])
   ap.add_argument('-no_U_V',action='store_true')
   ap.add_argument('-n_gaussians',default=4,type=int)
   ap.add_argument('-loss',default='loss',choices=list(dlosses))
   ap.add_argument('-reporting_interval',default=10,type=int)
   ap.add_argument('-gmm_spread',default=.05,type=float)
   ap.add_argument('-gmm_scatter_samples',default=10000,type=int)
-  ap.add_argument('-gmm_compensate_variances',action='store_true')
+  ap.add_argument('-no_gmm_compensate_variances',action='store_true')
+  ap.add_argument('-gmm_min_dist',default=4,type=float)
   ap.add_argument('-force_batch_cost',default=0.,type=float)
   ap.add_argument('-no_adam',action='store_true')
   ap.add_argument('-adaptive_threshold',action='store_true')
   ap.add_argument('-act',choices=['relu','tanh','softmax'],default='tanh')
   ap.add_argument('--seed',default=20255202,type=int)
   ap.add_argument('-n_splits_img',default=100,type=int)
-  ap.add_argument('-imbalances',type=float,default=[.01,.02,.1],nargs='+')
+  ap.add_argument('-imbalances',type=float,
+                  default=[0.1,0.06812921,0.04641589,0.03162278,0.02154435,
+                           0.01467799,0.01,0.00681292,0.00464159,0.00316228,
+                           0.00215443,0.0014678,0.001],nargs='+')
   ap.add_argument('-in_dim',default=2,type=int)
   ap.add_argument('-unsw_cat_thresh',default=.1,type=int)
   ap.add_argument('-lr_resolution',default=16,type=int)
@@ -56,8 +78,8 @@ def init_ensemble():
   ap.add_argument('-avg_rate',default=.1,type=float)#binom avg parameter
   ap.add_argument('-unsw_test',default='~/data/UNSW_NB15_testing-set.csv')
   ap.add_argument('-unsw_train',default='~/data/UNSW_NB15_training-set.csv')
-  ap.add_argument('-model_inner_dims',default=[16,8],type=int,nargs='+')
-  ap.add_argument('-bs',default=128,type=int)
+  ap.add_argument('-model_inner_dims',default=[],type=int,nargs='+')
+  ap.add_argument('-bs',default=32,type=int)
   ap.add_argument('-res',default=1000,type=int)
   ap.add_argument('-outf',default='thlay')
   ap.add_argument('-model_sigma_w',default=1.,type=float)#.3
@@ -70,11 +92,12 @@ def init_ensemble():
   ap.add_argument('-target_fp',default=.01,type=float)
   ap.add_argument('-target_fn',default=.01,type=float)
   ap.add_argument('-clock_avg_rate',default=.1,type=float) #Track timings
-  ap.add_argument('-threshold_accuracy_tolerance',default=.5,type=float)
+  ap.add_argument('-threshold_accuracy_tolerance',default=.1,type=float)
   ap.add_argument('-fpfn_ratios',default=[2,.5],nargs='+',type=float)
   ap.add_argument('-target_fns',default=[.1],nargs='+',type=float)
-  ap.add_argument('-target_tolerance',default=.8,type=float)
-  ap.add_argument('-stop_on_target',action='store_true')
+  ap.add_argument('-target_tolerance',default=.5,type=float)
+  ap.add_argument('-no_stop_on_target',action='store_true')
+  ap.add_argument('-iterate_minority',action='store_true')
   #Silly
   ap.add_argument('-lr_phase',default=0.,type=float)
   ap.add_argument('-lr_momentum',default=0.05,type=float)
@@ -82,13 +105,26 @@ def init_ensemble():
   ap.add_argument('-x_max',default=10.,type=float)
   
   a=ap.parse_args()
+  a.n_imb=len(a.imbalances)
   a.glorot_uniform=(not a.no_glorot_uniform) and (not a.glorot_normal)
+  a.stop_on_target=not a.no_stop_on_target
+  a.gmm_compensate_variances=not a.no_gmm_compensate_variances
   a.adam=not a.no_adam
   a.fpfn_ratios,a.target_fns,a.lrs=array(a.fpfn_ratios),array(a.target_fns),array(a.lrs)
   a.out_dir=a.outf+'_report'
   a.step=0
+  if a.bs>1 and a.iterate_minority:
+    print('Minority iterating unavailable since bs>1, continuing without')
+    a.iterate_minority=False
   if len(a.lrs)==1:
     a.lr=a.lrs[0]
+  if not a.model_inner_dims:
+    if a.mode=='gmm':
+      a.model_inner_dims=[32,16]
+    elif a.mode=='mnist':
+      a.model_inner_dims=[256,64]
+    else:
+      a.model_inner_dims=[64,32]
   return a
 
 f_to_str=lambda x,p=True:f'{x:.5g}'.ljust(10) if p else f'{x:.5g}'
@@ -113,22 +149,6 @@ def f_unbatched(w,x,act=tanh):
   return x
 f=vectorize(f_unbatched,excluded=[0],signature='(m)->(n)')
 
-'''
-def l1(w,x,y,U,V,act=tanh,normalisation=False):
-  y_smooth=f(w,x,act=act)
-  #cts_fp=nsm(maximum(V-U,y_smooth)[~y])
-  #cts_fn=nsm(maximum(U-V,-y_smooth)[y])
-  #cts_fp=nsm(maximum(0,y_smooth)[~y])
-  #cts_fn=nsm(maximum(0,-y_smooth)[y])
-  #cts_fp=nsm((~y)*(y_smooth+.5))
-  #cts_fn=nsm(y*(.5-y_smooth))
-  cts_fp=nsm((1.+y_smooth)[~y])
-  cts_fn=nsm((1.-y_smooth)[y])
-  If normalisation:
-    l2=sum([nsm(w[('w',i)]**2)*nf for i,nf in enumerate(normalisation)])
-  return U*cts_fp+V*cts_fn+(l2 if normalisation else 0.)
-'''
-
 def l1_soft(w,x,y,U,V,softness=.1,act=tanh,normalisation=False):
   y_smooth=f(w,x,act=act)
   a_p,a_n=y_smooth[y],y_smooth[~y]
@@ -148,17 +168,20 @@ def cross_entropy(w,x,y,U,V,act=tanh,normalisation=False,eps=1e-8):
   cts_fp=-nsm(log(eps+1.-a_n)) #y=0 => H(y,y')=-log(1-y'')=-log((1-y')/2)
   return U*cts_fp+V*cts_fn
 
-'''
-def cross_entropy(w,x,y,U,V,act=tanh,normalisation=False):
-  return cross_entropy_soft(w,x,y,U,V,0.,act,normalisation)
-  '''
+def cross_entropy_soft(w,x,y,U,V,act=tanh,normalisation=False,softness=.1,eps=1e-8):
+  y_smooth=f(w,x,act=act)
+  a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
+  cts_fn=-(1-softness)*nsm(log(eps+1.+a_p))-softness*nsm(log(eps+1.-a_p))
+  cts_fp=-(1-softness)*nsm(log(eps+1.-a_n))-softness*nsm(log(eps+1.+a_n))
+  return U*cts_fp+V*cts_fn
 
 dl1=grad(l1)
 dcross_entropy=grad(cross_entropy)
+dcross_entropy_soft=grad(cross_entropy_soft)
 dl1_soft=grad(l1_soft)
 #dcross_entropy_soft=grad(cross_entropy_soft)
-dlosses={'loss':dcross_entropy,'l1':dl1,'cross_entropy':dcross_entropy,'l1_soft':dl1_soft}
-         #'cross_entropy_soft':dcross_entropy_soft}
+dlosses={'loss':dcross_entropy,'l1':dl1,'cross_entropy':dcross_entropy,'l1_soft':dl1_soft,
+         'cross_entropy_soft':dcross_entropy_soft}
 
 def init_layers(k,sigma_w,sigma_b,layer_dimensions,no_sqrt_normalise=False,resid=False,
                 glorot_uniform=False,glorot_normal=False,orthonormalise=False):
@@ -212,8 +235,8 @@ def mk_experiment(w_model_init,p,thresh,fpfn_ratio,target_fn,lr,recent_memory_le
   e.target_tolerance=target_tolerance
   e.steps_to_target=False
   e.avg_rate=avg_rate
-  e.FPs=[0]*recent_memory_len
-  e.FNs=[0]*recent_memory_len
+  e.FPs=cyc(recent_memory_len)
+  e.FNs=cyc(recent_memory_len)
   e.dw_l2=e.w_l2=0
   e.w_model=w_model_init.copy()
   e.history_len=history_len
@@ -225,6 +248,7 @@ def mk_experiment(w_model_init,p,thresh,fpfn_ratio,target_fn,lr,recent_memory_le
 
   e.lr=float(lr)
   e.p=float(p) #"imbalance"
+  e.p_its=int(1/p) #if repeating minority class iterations
   e.target_fp=target_fn*fpfn_ratio
   e.target_fn=target_fn
   e.fp=e.target_fp
@@ -232,14 +256,23 @@ def mk_experiment(w_model_init,p,thresh,fpfn_ratio,target_fn,lr,recent_memory_le
 
   e.U=e.V=1
   e.thresh=thresh
-  e.history=SimpleNamespace(FP=[],FN=[],lr=[],cost=[],dw=[],resolution=1,l=0)
+  e.history=SimpleNamespace(FP=[],FN=[],lr=[],cost=[],w=[],dw=[],resolution=1,l=0)
   return e
 
 def init_experiments(a,global_key):
   a.global_key=global_key
   k1,k2,k3,k4,k5,k6=split(global_key,6)
   a.time_avgs=dict()
-  a.target_shape=[2]+[16]*8+[1]
+  if a.mode=='mnist':
+    from tensorflow.keras.datasets import mnist
+    (a.x_train,a.y_train),(a.x_test,a.y_test)=mnist.load_data()
+    y_ones=a.y_train==1 #1 detector
+    a.in_dim=784
+    a.x_train_pos=reshape(a.x_train[y_ones],(-1,a.in_dim))
+    a.x_train_neg=reshape(a.x_train[~y_ones],(-1,a.in_dim))
+
+  if a.mode in ['single','all']:
+    a.target_shape=[2]+[16]*8+[1]
 
   if a.mode=='unsw':
     df_train=read_csv(a.unsw_train)
@@ -252,7 +285,7 @@ def init_experiments(a,global_key):
     a.y_test=df_test['attack_cat']
     a.in_dim=len(a.x_train[0])
 
-  if a.mode in ['single','all']:
+  elif a.mode in ['single','all']:
     a.target_sigma_w=.75
     a.target_sigma_b=2.
   
@@ -275,7 +308,7 @@ def init_experiments(a,global_key):
     a.cats={float(p):s for p,s in zip(a.imbalances,a.y_train.value_counts().index)}
     a.imbalances=a.imbalances[a.imbalances>a.unsw_cat_thresh]
   
-  if a.mode in ['unsw','gmm']:
+  if a.mode in ['unsw','gmm','mnist']:
     a.thresholds={float(p):0. for p in a.imbalances}
   else:
     print('Finding thresholds...')
@@ -312,7 +345,7 @@ def init_experiments(a,global_key):
                                a.recent_memory_len,a.history_len,a.avg_rate,
                                a.target_tolerance) for\
                  lr in a.lrs]
-  elif a.mode in ['unsw','gmm']:
+  elif a.mode in ['unsw','gmm','mnist']:
     experiments=[mk_experiment(a.w_model_init,float(p),0.,fpfn_ratio,
                                float(p*target_fn),a.lr,a.recent_memory_len,
                                a.history_len,a.avg_rate,a.target_tolerance,)\
@@ -329,7 +362,10 @@ def init_experiments(a,global_key):
                  for target_fn in a.target_fns]
 
   if a.mode=='gmm':
-    a.means=2*a.x_max*uniform(k5,(2*a.n_gaussians,a.in_dim))-a.x_max
+    min_dist=0
+    while min_dist<a.gmm_min_dist:
+      a.means=2*a.x_max*uniform(k5,(2*a.n_gaussians,a.in_dim))-a.x_max
+      min_dist=min([nsm((A-B)**2) for b,A in enumerate(a.means) for B in a.means[b+1:]])
     a.variances=2*a.x_max*uniform(k6,2*a.n_gaussians)*a.gmm_spread #hmm
 
   return experiments
@@ -337,7 +373,7 @@ def init_experiments(a,global_key):
 activations={'tanh':tanh,'relu':relu,'softmax':softmax}
 
 def get_xy(a,imbs,bs,k):
-  k1,k2=split(k)
+  k1,k2,k3,k4=split(k,4)
   if type(imbs)==float:
     ret_single=imbs
     imbs=[imbs]
@@ -349,9 +385,9 @@ def get_xy(a,imbs,bs,k):
     for p in imbs:
       probs=array(([(1.-p)/a.n_gaussians]*a.n_gaussians)+\
                   ([p/a.n_gaussians]*a.n_gaussians))
-      mix=choice(k1,2*a.n_gaussians,shape=(bs,),p=probs)
+      mix=choice(k,2*a.n_gaussians,shape=(bs,),p=probs)
       y=mix>=a.n_gaussians
-      z=normal(k2,shape=(bs,a.in_dim))
+      z=normal(k1,shape=(bs,a.in_dim))
       if a.gmm_compensate_variances:
         z/=(-2*log(p))**.5
       x=z*a.variances[mix,None]+a.means[mix]
@@ -361,6 +397,17 @@ def get_xy(a,imbs,bs,k):
     batch_indices=choice(k1,len(a.y_train),shape=(a.bs,))
     ret={float(p):(a.x_train[batch_indices],
                    array(a.y_train[batch_indices]==a.cats[p])) for p in a.imbalances}
+  elif a.mode=='mnist': #force imbalance of mnist dataset
+    n_pos=[int(binomial(k,a.bs,p)) for k,p in zip(split(k1,a.n_imb),a.imbalances)]
+    x_pos=[choice(k,a.x_train_pos,shape=(np,)) for k,np in\
+           zip(split(k2,a.n_imb),n_pos)]
+    x_neg=[choice(k,a.x_train_neg,shape=(a.bs-np,)) for k,np in\
+           zip(split(k3,a.n_imb),n_pos)]
+    x_all=[(xn if not len(xp) else(xp if not len(xn) else concatenate([xp,xn]))) for\
+           xp,xn in zip(x_pos,x_neg)]
+    perms=[permutation(k,a.bs) for k in split(k4,a.n_imb)]
+
+    ret={p:(x[perm],perm<np) for p,x,np,perm in zip(a.imbalances,x_all,n_pos,perms)}
   else:
     ret=dict()
     for p in imbs:
@@ -374,11 +421,11 @@ def evaluate_fp_fn(e,y_p,y_t,cost_multiplier):
   e.FN=int(nsm(y_t&(~y_p)))
   e.fp_cost=(e.FP/(e.bs*e.target_fp))*cost_multiplier
   e.fn_cost=(e.FN/(e.bs*e.target_fp))*cost_multiplier
-  e.FPs[e.step%e.recent_memory_len]=e.FP
-  e.FNs[e.step%e.recent_memory_len]=e.FN
+  e.FPs[e.step]=e.FP
+  e.FNs[e.step]=e.FN
   window_div=min(e.step,e.recent_memory_len)
-  e.fp_window=sum(e.FPs)/window_div
-  e.fn_window=sum(e.FNs)/window_div
+  e.fp_window=e.FPs.sum()/window_div
+  e.fn_window=e.FNs.sum()/window_div
   e.cost_window=(e.fp_window/e.target_fp+e.fn_window/e.target_fn)/e.bs
 
   return e.fp_cost<1 and e.fn_cost<1
@@ -396,6 +443,8 @@ def update_fp_fn(e):
     e.history.FP.append(e.FP)
     e.history.FN.append(e.FN)
     e.history.lr.append(e.lr)
+    e.history.w.append(e.w_l2)
+    e.history.dw.append(e.dw_l2)
     e.history.cost.append(e.cost_window)
     e.history.l+=1
     if e.history.l>e.history_len:
@@ -435,8 +484,8 @@ def update_lrs(a,experiments,k):
   e_lr=v_lr=0.
   for e,g in zip(experiments,goodnesses):
     print('lr,un-normalised goodnesses=',e.lr,g)
-    le_lr+=log(e.lr)/log(2)
-    lv_lr+=(log(e.lr)/log(2))**2
+    le_lr+=log(e.lr)/log(10)
+    lv_lr+=(log(e.lr)/log(10))**2
   le_lr/=len(experiments)
   lv_lr/=len(experiments)
   lv_lr-=le_le**2
@@ -484,6 +533,177 @@ def update_weights(a,e,upd):
       e.w_model[k]-=delta
       e.w_l2+=nsm(e.w_model[k]**2)
 
+def plot_stopping_times(experiments,fd_tex,report_dir):
+  for e in experiments: e.fpfn_ratio=float(e.fpfn_ratio)
+  completed_experiments=[e for e in experiments if e.steps_to_target]
+  try:
+    fpfn_ratios=list(set([e.fpfn_ratio for e in experiments]))
+    for rat in fpfn_ratios:
+      x=[log(e.p)/log(10) for e in completed_experiments if e.fpfn_ratio==rat]
+      y=[log(e.steps_to_target)/log(10) for e in completed_experiments if\
+         e.fpfn_ratio==rat]
+      plot(x,y)
+      title('Stopping times for target fp/fn='+f_to_str(rat))
+      xlabel('log(imbalance)')
+      ylabel('log(Stopping step)')
+      if fd_tex:
+        savefig(report_dir+'/stopping_times_'+str(rat)+'.png',dpi=500)
+        close()
+        print('\n\\begin{figure}[H]',file=fd_tex)
+        print('\\centering',file=fd_tex)
+        print('\\includegraphics[width=.9\\textwidth]'
+              '{stopping_times_'+str(rat)+'.png}',file=fd_tex)
+        print('\\end{figure}',file=fd_tex)
+      else:
+        show()
+  except AttributeError:
+    print('fpfn ratios not found, skipping stopping time analysis')
+
+def plot_2d(experiments,fd_tex,a,act,line,k):
+  if fd_tex:
+    print('\\subsection{2d visualisation of classifications}',file=fd_tex)
+    print('Here a 2d region is learned.\\\\',file=fd_tex)
+  plot_num=0
+  for e in experiments:
+    if a.mode=='gmm':
+      x_t,y_t=get_xy(a,e.p,a.gmm_scatter_samples,k)
+      col_mat=[[1.,1,1],[0,0,0]]#fp,fn,tp,tn
+      labs=['Predict +','Predict -']
+      x_0_max=nmx(x_t[:,0])
+      x_0_min=-nmx(-x_t[:,0])
+      x_1_max=nmx(x_t[:,1])
+      x_1_min=-nmx(-x_t[:,1])
+    else:
+      x_0_max=x_1_max=a.x_max
+      x_0_min=x_1_min=-a.x_max
+    x=cartesian([linspace(x_0_min,x_0_max,num=a.res),
+                 linspace(x_1_min,x_1_max,num=a.res)])
+    x_split=array_split(x,a.n_splits_img)
+    y_p=concat([(f(e.w_model,_x,act=act)>0).flatten() for _x in x_split])
+    y_p=flip(y_p.reshape(a.res,a.res),axis=1) #?!?!?!
+
+    cm=None
+    if 'b' in line: #draw boundary
+      cols=abs(convolve(y_p,array([[1,1,1],[1,-8,1],[1,1,1]]))).T
+      cols/=-(nmx(cols)+nmx(-cols))
+      cols+=nmx(-cols)
+      cm='gray'
+    else:
+      if a.mode=='gmm':
+        regions=array([y_p,~y_p]).T
+      else:
+        y_t=concat([f(a.w_target,_x)>e.thresh for _x in x_split])\
+            .reshape(a.res,a.res)
+        fp_img=(y_p&~y_t)
+        fn_img=(~y_p&y_t)
+        tp_img=(y_p&y_t)
+        tn_img=(~y_p&~y_t)
+        regions=array([fp_img,fn_img,tp_img,tn_img]).T
+        col_mat=[[1.,0,0],[0,1,0],[1,1,1],[0,0,0]]#fp,fn,tp,tn
+        labs=['FP','FN','TP','TN']
+      cols=regions.dot(array(col_mat))
+    imshow(cols,extent=[x_0_min,x_0_max,x_1_min,x_1_max],cmap=cm)
+    handles=[Patch(color=c,label=s) for c,s in zip(col_mat,labs)]
+    if a.mode=='gmm':
+      x_0,x_1=tuple(x_t.T)
+      y_p_s=f(e.w_model,x_t,act=act).flatten()>0
+      scatter(x_0[y_t&y_p_s],x_1[y_t&y_p_s],c='darkgreen',s=1,label='TP')
+      scatter(x_0[y_t&~y_p_s],x_1[y_t&~y_p_s],c='palegreen',s=1,label='FP')
+      scatter(x_0[~y_t&~y_p_s],x_1[~y_t&~y_p_s],c='cyan',s=1,label='TN')
+      scatter(x_0[~y_t&y_p_s],x_1[~y_t&y_p_s],c='blue',s=1,label='FN')
+      handles+=[Patch(color=c,label=s) for c,s in\
+                zip(['blue','palegreen','darkgreen','cyan'],['FP','FN','TP','TN'])]
+    leg(h=handles,l='lower left')
+    title('p='+f_to_str(e.p,p=False)+',target_fp='+f_to_str(e.target_fp,p=False)+\
+          ',target_fn='+f_to_str(e.target_fn,p=False)+',lr='+f_to_str(e.lr,p=False))
+    if fd_tex:
+      if not plot_num%9:
+        print('\\begin{figure}',file=fd_tex)
+        print('\\centering',file=fd_tex)
+      plot_num+=1
+      img_name=exp_to_str(e)+'.png'
+      savefig(a.report_dir+'/'+img_name,dpi=500)
+      print('\\begin{subfigure}{.33\\textwidth}',file=fd_tex)
+      print('\\centering',file=fd_tex)
+      print('\\includegraphics[width=.9\\linewidth,scale=1]{'+img_name+'}',
+            file=fd_tex)
+      print('\\end{subfigure}%',file=fd_tex)
+      print('\\hfill',file=fd_tex)
+      if not plot_num%9:
+        print('\\end{figure}',file=fd_tex)
+      close()
+    else:
+      show()
+  if fd_tex and plot_num%9: print('\\end{figure}',file=fd_tex)
+
+get_cost=lambda e:e.history.cost
+get_lr=lambda e:e.history.lr
+get_dw=lambda e:e.history.dw
+def plot_historical_statistics(experiments,fd_tex,a):
+  if fd_tex:
+    print('\\subsection{Historical statistics}',file=fd_tex)
+  for get_var,yl,desc in zip([get_cost,get_lr,get_dw],
+                             ['log(1e-8+fp/target_fp+fn/target_fn)','log(lr)',
+                              'log(dw)'],
+                             ['Loss','Learning_rate','Change_in_weights']):
+    for e in experiments:
+      arr=get_var(e)
+      if a.mode=='unsw':
+        lab=a.cats[e.p]
+      else:
+        lab=fpfnp_lab(e)
+      plot([log(a)/log(10) for a in arr],label=lab)
+    xlabel('Step number *'+str(e.history.resolution))
+    ylabel(yl)
+    title(desc.replace('_',' '))
+    leg()
+    if fd_tex:
+      savefig(a.report_dir+'/'+desc+'.png',dpi=500)
+      close()
+      print('\n\\begin{figure}[H]',file=fd_tex)
+      print('\\centering',file=fd_tex)
+      print('\\includegraphics[width=.9\\textwidth]{'+desc+'.png}',file=fd_tex)
+      print('\\end{figure}',file=fd_tex)
+    else:
+      show()
+  for e in experiments:
+    conv_len=min(int(a.step**.5),int(1/e.p))
+    ker=ones(conv_len)/conv_len
+    smoothed_fp=convolve(array(e.history.FP,dtype=float),ker,'valid')
+    smoothed_fn=convolve(array(e.history.FN,dtype=float),ker,'valid')
+    plot(log(smoothed_fp)/log(10),log(smoothed_fn)/log(10),label=fpfnp_lab(e))
+    xlabel('log(fp)')
+    ylabel('log(fn)')
+    title('FP versus FN rate')
+  leg()
+  if fd_tex:
+    savefig(a.report_dir+'/phase.png',dpi=500)
+    close()
+    print('\n\\begin{figure}[H]',file=fd_tex)
+    print('\\centering',file=fd_tex)
+    print('\\includegraphics[width=.9\\textwidth]{phase.png}',file=fd_tex)
+    print('\\end{figure}',file=fd_tex)
+  else:
+    show()
+
+def plot_fpfn_scatter(experiments,fd_tex,a):
+  fp_perf=[e.fp/e.target_fp for e in experiments]
+  fn_perf=[e.fn/e.target_fn for e in experiments]
+  sc=scatter(fp_perf,fn_perf)#,c=colours)#,s=sizes)
+  if a.mode=='all': gca().add_artist(cl)
+  xlabel('fp/target_fp')
+  ylabel('fn/target_fn')
+  if fd_tex:
+    savefig(a.report_dir+'/scatter.png',dpi=500)
+    close()
+    print('\\subsection{Comparing performance}',file=fd_tex)
+    print('\n\\begin{figure}[H]',file=fd_tex)
+    print('\\centering',file=fd_tex)
+    print('\\includegraphics[width=.9\\textwidth]{scatter.png}',file=fd_tex)
+    print('\\end{figure}',file=fd_tex)
+  else:
+    show()
+
 def report_progress(a,experiments,line,act,k):
   k1,k2=split(k)
   print('|'.join([t.ljust(10) for t in ['p','target_fp','target_fn',
@@ -494,8 +714,8 @@ def report_progress(a,experiments,line,act,k):
           (f_to_str(e.steps_to_target) if e.steps_to_target else 'no'))
   for e in experiments:
     print('Recent batches: FPs:',
-          e.FPs[a.step%a.recent_memory_len-5:a.step%a.recent_memory_len],'FNs:',
-          e.FNs[a.step%a.recent_memory_len-5:a.step%a.recent_memory_len])
+          e.FPs[e.step-5:e.step],'FNs:',
+          e.FNs[e.step-5:e.step])
 
   if ':' in line:
     l=line.split(':')
@@ -524,8 +744,6 @@ def report_progress(a,experiments,line,act,k):
   if 'x' in line:
     print('Bye!')
     exit()
-  fp_perf=[]
-  fn_perf=[]
   if 'r' in line:
     line+='clist'
     a.report_dir=a.outf+'_report'
@@ -551,29 +769,30 @@ def report_progress(a,experiments,line,act,k):
       w=writer(fd_csv)
       n_fps=len(a.fpfn_ratios)
       row=['imbalance','target_fps']+['']*(n_fps-1)+['target_fn','fps']+\
-          ['']*(n_fps-1)+['fns']+['']*(n_fps-1)
+          ['']*(n_fps-1)+['fns']+['']*(n_fps-1)+['steps_to_target']
       if a.mode=='unsw':
         row=['attack_cat']+row
       w.writerow(row)
       if fd_tex:
         conf_fill='r'*n_fps
         ct='l' if a.mode=='unsw' else ''
-        print('\\begin{tabular}{l'+ct+'|'+conf_fill+'|r|'+conf_fill+'|'+conf_fill+'}',
+        print('\\begin{tabular}{l'+ct+'|'+conf_fill+'|r'+(('|'+conf_fill)*4)+'}',
               file=fd_tex)
         print(' & '.join(row).replace('_',' ')+'\\\\',file=fd_tex)
         print('\\hline',file=fd_tex)
-      n_imbalances=len(a.imbalances)
       for p in a.imbalances:
         tgt_fps=[]
         recent_fps=[]
         recent_fns=[]
+        steps_to_target=[]
         for e in [e for e in experiments if e.p==p]:
           tgt_fps.append(f_to_str(e.target_fp))
           fp_hist=e.history.FP[-int(10/e.p**2):]
           fn_hist=e.history.FN[-int(10/e.p**2):]
           recent_fps.append(f_to_str(sum(fp_hist)/(e.bs*len(fp_hist))))
           recent_fns.append(f_to_str(sum(fn_hist)/(e.bs*len(fn_hist))))
-        row=[f_to_str(p)]+tgt_fps+[f_to_str(p/10)]+recent_fps+recent_fns
+          steps_to_target.append(str(e.steps_to_target) if e.steps_to_target else '-')
+        row=[f_to_str(p)]+tgt_fps+[f_to_str(p/10)]+recent_fps+recent_fns+steps_to_target
         if a.mode=='unsw':
           row=[a.cats[p]]+row
         w.writerow(row)
@@ -588,85 +807,13 @@ def report_progress(a,experiments,line,act,k):
 
   print('Timing:')
   for k,v in a.time_avgs.items():
-    print(k,log(v)/log(2))
-    if fd_tex: print('\\texttt{'+k+'}&'+f_to_str(log(v)/log(2))+'\\\\\n',file=fd_tex)
+    print(k,log(v)/log(10))
+    if fd_tex: print('\\texttt{'+k.replace('_','\\_')+'}&'+\
+                     f_to_str(log(v)/log(10))+'\\\\\n',file=fd_tex)
   if fd_tex: print('\\end{tabular}',file=fd_tex)
 
   if a.in_dim==2 and 'c' in line:
-    if fd_tex:
-      print('\\subsection{2d visualisation of classifications}',file=fd_tex)
-      print('Here a 2d region is learned.\\\\',file=fd_tex)
-      print('\n\\begin{figure}[H]',file=fd_tex)
-      print('\\centering',file=fd_tex)
-    for e in experiments:
-      if a.mode=='gmm':
-        x_t,y_t=get_xy(a,e.p,a.gmm_scatter_samples,k1)
-        col_mat=[[1.,1,1],[0,0,0]]#fp,fn,tp,tn
-        labs=['Predict +','Predict -']
-        x_0_max=nmx(x_t[:,0])
-        x_0_min=-nmx(-x_t[:,0])
-        x_1_max=nmx(x_t[:,1])
-        x_1_min=-nmx(-x_t[:,1])
-      else:
-        x_0_max=x_1_max=a.x_max
-        x_0_min=x_1_min=-a.x_max
-      x=cartesian([linspace(x_0_min,x_0_max,num=a.res),
-                   linspace(x_1_min,x_1_max,num=a.res)])
-      x_split=array_split(x,a.n_splits_img)
-      y_p=concat([(f(e.w_model,_x,act=act)>0).flatten() for _x in x_split])
-      y_p=flip(y_p.reshape(a.res,a.res),axis=1) #?!?!?!
-
-      cm=None
-      if 'b' in line: #draw boundary
-        cols=abs(convolve(y_p,array([[1,1,1],[1,-8,1],[1,1,1]]))).T
-        cols/=-(nmx(cols)+nmx(-cols))
-        cols+=nmx(-cols)
-        cm='gray'
-      else:
-        if a.mode=='gmm':
-          regions=array([y_p,~y_p]).T
-        else:
-          y_t=concat([f(a.w_target,_x)>e.thresh for _x in x_split])\
-              .reshape(a.res,a.res)
-          fp_img=(y_p&~y_t)
-          fn_img=(~y_p&y_t)
-          tp_img=(y_p&y_t)
-          tn_img=(~y_p&~y_t)
-          regions=array([fp_img,fn_img,tp_img,tn_img]).T
-          col_mat=[[1.,0,0],[0,1,0],[1,1,1],[0,0,0]]#fp,fn,tp,tn
-          labs=['FP','FN','TP','TN']
-        cols=regions.dot(array(col_mat))
-      imshow(cols,extent=[x_0_min,x_0_max,x_1_min,x_1_max],cmap=cm)
-      handles=[Patch(color=c,label=s) for c,s in zip(col_mat,labs)]
-      if a.mode=='gmm':
-        x_0,x_1=tuple(x_t.T)
-        y_p_s=f(e.w_model,x_t,act=act).flatten()>0
-        scatter(x_0[y_t&y_p_s],x_1[y_t&y_p_s],c='darkgreen',s=1,label='TP')
-        scatter(x_0[y_t&~y_p_s],x_1[y_t&~y_p_s],c='palegreen',s=1,label='FP')
-        scatter(x_0[~y_t&~y_p_s],x_1[~y_t&~y_p_s],c='cyan',s=1,label='TN')
-        scatter(x_0[~y_t&y_p_s],x_1[~y_t&y_p_s],c='blue',s=1,label='FN')
-        handles+=[Patch(color=c,label=s) for c,s in\
-                  zip(['blue','palegreen','darkgreen','cyan'],['FP','FN','TP','TN'])]
-      leg(h=handles,l='lower left')
-      title('p='+f_to_str(e.p,p=False)+',target_fp='+f_to_str(e.target_fp,p=False)+\
-            ',target_fn='+f_to_str(e.target_fn,p=False)+',lr='+f_to_str(e.lr,p=False))
-      if fd_tex:
-        img_name=exp_to_str(e)+'.png'
-        savefig(a.report_dir+'/'+img_name,dpi=500)
-        print('\\begin{subfigure}{.33\\textwidth}',file=fd_tex)
-        print('\\centering',file=fd_tex)
-        print('\\includegraphics[width=.9\\linewidth,scale=1]{'+img_name+'}',
-              file=fd_tex)
-        print('\\end{subfigure}%',file=fd_tex)
-        print('\\hfill',file=fd_tex)
-        close()
-      else:
-        show()
-
-    if fd_tex:
-      print('\\end{figure}',file=fd_tex)
-    fp_perf.append(e.fp/e.target_fp)
-    fn_perf.append(e.fn/e.target_fn)
+    plot_2d(experiments,fd_tex,a,act,line,k1)
 
   if 'i' in line:
     model_desc='Model shape:\n'+('->'.join([str(l) for l in a.model_shape]))+'\n'
@@ -684,100 +831,21 @@ def report_progress(a,experiments,line,act,k):
     model_desc+='\n- batch size:'+str(a.bs)
     if a.mode in ['single','gmm']:
       model_desc+='\n- learning rate:'+str(a.lr)
+    if a.iterate_minority:
+      model_desc+='Iterating minority class 1/p times'
     print(model_desc)
     if fd_tex:
       print('\\subsection{Model parameters}',file=fd_tex)
       print('Here the batch size was set to '+str(a.bs)+'.\\\\',file=fd_tex)
       print('\\texttt{'+(model_desc.replace('\n','}\\\\\n\\texttt{'))+'}\\\\',
             file=fd_tex)
-  if 's' in line and a.mode=='all':
-    sc=scatter(fp_perf,fn_perf)#,c=colours)#,s=sizes)
-    if a.mode=='all': gca().add_artist(cl)
-    xlabel('fp/target_fp')
-    ylabel('fn/target_fn')
-    if fd_tex:
-      savefig(a.report_dir+'/scatter.png',dpi=500)
-      close()
-      print('\\subsection{Comparing performance}',file=fd_tex)
-      print('\n\\begin{figure}[H]',file=fd_tex)
-      print('\\centering',file=fd_tex)
-      print('\\includegraphics[width=.9\\textwidth]{scatter.png}',file=fd_tex)
-      print('\\end{figure}',file=fd_tex)
-    else:
-      show()
-  if 't' in line:
-    for e in experiments: e.fpfn_ratio=float(e.fpfn_ratio)
-    completed_experiments=[e for e in experiments if e.steps_to_target]
-    try:
-      fpfn_ratios=list(set([e.fpfn_ratio for e in experiments]))
-      for rat in fpfn_ratios:
-        x=[log(e.p)/log(2) for e in completed_experiments if e.fpfn_ratio==rat]
-        y=[log(e.steps_to_target)/log(2) for e in completed_experiments if\
-           e.fpfn_ratio==rat]
-        plot(x,y)
-        title('Stopping times for target fp/fn='+f_to_str(rat))
-        xlabel('log(imbalance)')
-        ylabel('log(Stopping step)')
-        if fd_tex:
-          savefig(a.report_dir+'/stopping_times_'+f_to_str(rat)+'.png',dpi=500)
-          close()
-          print('\n\\begin{figure}[H]',file=fd_tex)
-          print('\\centering',file=fd_tex)
-          print('\\includegraphics[width=.9\\textwidth]'
-                '{stopping_times_'+f_to_str(rat)+'.png}',file=fd_tex)
-          print('\\end{figure}',file=fd_tex)
-        else:
-          show()
-    except AttributeError:
-      print('fpfn ratios not found, skipping stopping time analysis')
 
+  if 's' in line and a.mode=='all':
+    plot_fpfn_scatter(experiments,fd_tex,a)
+  if 't' in line:
+    plot_stopping_times(experiments,fd_tex,a.report_dir)
   if 'l' in line:
-    if fd_tex:
-      print('\\subsection{Historical statistics}',file=fd_tex)
-    get_cost=lambda e:e.history.cost
-    get_lr=lambda e:e.history.lr
-    get_dw=lambda e:e.history.dw
-    for get_var,yl,desc in zip([get_cost,get_lr,get_dw],
-                               ['log(1e-8+fp/target_fp+fn/target_fn)','log(lr)',
-                                'log(dw)'],
-                               ['Loss','Learning_rate','Change_in_weights']):
-      for e in experiments:
-        arr=get_var(e)
-        if a.mode=='unsw':
-          lab=a.cats[e.p]
-        else:
-          lab=fpfnp_lab(e)
-        plot([log(a)/log(2) for a in arr],label=lab)
-      xlabel('Step number *'+str(e.history.resolution))
-      ylabel(yl)
-      title(desc.replace('_',' '))
-      leg()
-      if fd_tex:
-        savefig(a.report_dir+'/'+desc+'.png',dpi=500)
-        close()
-        print('\n\\begin{figure}[H]',file=fd_tex)
-        print('\\centering',file=fd_tex)
-        print('\\includegraphics[width=.9\\textwidth]{'+desc+'.png}',file=fd_tex)
-        print('\\end{figure}',file=fd_tex)
-      else:
-        show()
-    for e in experiments:
-      conv_len=min(int(a.step**.5),int(1/e.p))
-      ker=ones(conv_len)/conv_len
-      smoothed_fp=convolve(array(e.history.FP,dtype=float),ker,'valid')
-      smoothed_fn=convolve(array(e.history.FN,dtype=float),ker,'valid')
-      plot(log(smoothed_fp)/log(2),log(smoothed_fn)/log(2),label=fpfnp_lab(e))
-      title('FP versus FN rate')
-    leg()
-    if fd_tex:
-      savefig(a.report_dir+'/phase.png',dpi=500)
-      close()
-      print('\n\\begin{figure}[H]',file=fd_tex)
-      print('\\centering',file=fd_tex)
-      print('\\includegraphics[width=.9\\textwidth]{phase.png}',file=fd_tex)
-      print('\\end{figure}',file=fd_tex)
-    else:
-      show()
+    plot_historical_statistics(experiments,fd_tex,a)
 
   if fd_tex:
     print('\\end{document}',file=fd_tex,flush=True)
