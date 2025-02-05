@@ -3,6 +3,12 @@ from pickle import load,dump
 from types import SimpleNamespace
 from csv import writer
 from itertools import cycle
+from os.path import isdir
+from os import mkdir
+from io import BytesIO
+from urllib.request import urlopen
+from zipfile import ZipFile
+from pathlib import Path
 from jax.numpy import array,vectorize,zeros,log,flip,maximum,minimum,concat,exp,\
                       ones,linspace,array_split,reshape,concatenate,\
                       sum as nsm,max as nmx
@@ -16,12 +22,13 @@ from matplotlib.pyplot import imshow,legend,show,scatter,xlabel,ylabel,\
                               gca,plot,title,savefig,close
 from matplotlib.patches import Patch
 from matplotlib.cm import jet
+from pandas import read_pickle,read_parquet,concat
 
 leg=lambda t=None,h=None,l='upper right':legend(fontsize='x-small',loc=l,
                                                 handles=h,title=t)
 class cyc:
-  def __init__(self,n):
-    self.list=[0]*n
+  def __init__(self,n,x0=1):
+    self.list=[x0]*n
     self.n=n
 
   def __getitem__(self,k):
@@ -32,15 +39,18 @@ class cyc:
   def __setitem__(self,k,v):
     self.list[k%self.n]=v
 
-  def sum(self):
-    return sum(self.list)
+  def avg(self):
+    return sum(self.list)/self.n
 
 def init_ensemble():
   ap=ArgumentParser()
   ap.add_argument('mode',default='all',
-                  choices=['single','all','adaptive_lr','imbalances',
-                           'unsw','gmm','mnist'])
+                  choices=['all','adaptive_lr','imbalances',
+                           'unsw','gmm','mnist','rbd24'])
   ap.add_argument('-no_U_V',action='store_true')
+  ap.add_argument('-p_scale',default=.5,type=float)
+  ap.add_argument('-softmax_U_V',action='store_true')
+  ap.add_argument('-window_avg',action='store_true')
   ap.add_argument('-n_gaussians',default=4,type=int)
   ap.add_argument('-loss',default='loss',choices=list(dlosses))
   ap.add_argument('-reporting_interval',default=10,type=int)
@@ -79,7 +89,7 @@ def init_ensemble():
   ap.add_argument('-unsw_test',default='~/data/UNSW_NB15_testing-set.csv')
   ap.add_argument('-unsw_train',default='~/data/UNSW_NB15_training-set.csv')
   ap.add_argument('-model_inner_dims',default=[],type=int,nargs='+')
-  ap.add_argument('-bs',default=32,type=int)
+  ap.add_argument('-bs',default=0,type=int)
   ap.add_argument('-res',default=1000,type=int)
   ap.add_argument('-outf',default='thlay')
   ap.add_argument('-model_sigma_w',default=1.,type=float)#.3
@@ -118,16 +128,21 @@ def init_ensemble():
     a.iterate_minority=False
   if len(a.lrs)==1:
     a.lr=a.lrs[0]
+  if not a.bs:
+    if a.mode=='mnist':
+      a.bs=128
+    else:
+      a.bs=1
   if not a.model_inner_dims:
     if a.mode=='gmm':
       a.model_inner_dims=[32,16]
     elif a.mode=='mnist':
-      a.model_inner_dims=[256,64]
+      a.model_inner_dims=[64,32,16]
     else:
       a.model_inner_dims=[64,32]
   return a
 
-f_to_str=lambda x,p=True:f'{x:.5g}'.ljust(10) if p else f'{x:.5g}'
+f_to_str=lambda x,p=True:f'{x:.3g}'.ljust(10) if p else f'{x:.3g}'
 
 exp_to_str=lambda e:'exp_p'+f_to_str(e.p,p=False)+'fpt'+f_to_str(e.target_fp,p=False)+\
                     'fnt'+f_to_str(e.target_fn,p=False)+'lr'+f_to_str(e.lr,p=False)
@@ -228,31 +243,34 @@ def colour_rescale(fpfn):
   l/=log(a.fpfn_max)-log(a.fpfn_min)
   return jet(l)
 
-def mk_experiment(w_model_init,p,thresh,fpfn_ratio,target_fn,lr,recent_memory_len,
-                  history_len,avg_rate,target_tolerance):
+def mk_experiment(p,thresh,fpfn_ratio,target_fn,lr,a):
   e=SimpleNamespace()
+  e.bs=a.bs
   e.fpfn_ratio=float(fpfn_ratio)
-  e.target_tolerance=target_tolerance
+  e.target_tolerance=a.target_tolerance
   e.steps_to_target=False
-  e.avg_rate=avg_rate
-  e.FPs=cyc(recent_memory_len)
-  e.FNs=cyc(recent_memory_len)
+  e.avg_rate=a.avg_rate
   e.dw_l2=e.w_l2=0
-  e.w_model=w_model_init.copy()
-  e.history_len=history_len
-  e.recent_memory_len=recent_memory_len
+  e.w_model=a.w_model_init.copy()
+  e.history_len=a.history_len
   e.step=0
 
-  e.adam_V={k:0.*v for k,v in w_model_init.items()}
+  e.adam_V={k:0.*v for k,v in e.w_model.items()}
   e.adam_M=0.
 
   e.lr=float(lr)
   e.p=float(p) #"imbalance"
-  e.p_its=int(1/p) #if repeating minority class iterations
+  #e.p_its=int(1/p) #if repeating minority class iterations
   e.target_fp=target_fn*fpfn_ratio
   e.target_fn=target_fn
-  e.fp=e.target_fp
-  e.fn=target_fn#.25 #softer start if a priori assume doing well
+  e.recent_memory_len=int((1/a.avg_rate)*max(1,1/(e.bs*min(e.target_fp,e.target_fn))))
+
+  e.FPs=cyc(e.recent_memory_len,e.target_fp)
+  e.FNs=cyc(e.recent_memory_len,e.target_fn)
+  #e.fp_amnt=avg_rate*min(1,e.target_fp*e.bs)
+  #e.fn_amnt=avg_rate*min(1,e.target_fn*e.bs)
+  e.fp=(e.target_fp*.5)**.5
+  e.fn=(target_fn*.5)**.5#.25 #softer start if a priori assume doing well
 
   e.U=e.V=1
   e.thresh=thresh
@@ -266,12 +284,16 @@ def init_experiments(a,global_key):
   if a.mode=='mnist':
     from tensorflow.keras.datasets import mnist
     (a.x_train,a.y_train),(a.x_test,a.y_test)=mnist.load_data()
-    y_ones=a.y_train==1 #1 detector
+    y_ones_train=a.y_train==1 #1 detector
+    y_ones_test=a.y_test==1 #1 detector
     a.in_dim=784
-    a.x_train_pos=reshape(a.x_train[y_ones],(-1,a.in_dim))
-    a.x_train_neg=reshape(a.x_train[~y_ones],(-1,a.in_dim))
+    a.x_train_pos=reshape(a.x_train[y_ones_train],(-1,a.in_dim))
+    a.x_train_neg=reshape(a.x_train[~y_ones_train],(-1,a.in_dim))
 
-  if a.mode in ['single','all']:
+    a.x_test_pos=reshape(a.x_test[y_ones_test],(-1,a.in_dim))
+    a.x_test_neg=reshape(a.x_test[~y_ones_test],(-1,a.in_dim))
+
+  if a.mode=='all':
     a.target_shape=[2]+[16]*8+[1]
 
   if a.mode=='unsw':
@@ -285,7 +307,7 @@ def init_experiments(a,global_key):
     a.y_test=df_test['attack_cat']
     a.in_dim=len(a.x_train[0])
 
-  elif a.mode in ['single','all']:
+  elif a.mode=='all':
     a.target_sigma_w=.75
     a.target_sigma_b=2.
   
@@ -330,35 +352,20 @@ def init_experiments(a,global_key):
 
   if a.mode=='all':
     a.targets=list(zip(a.fpfn_ratios,a.target_fns))
-    experiments=[mk_experiment(a.w_model_init,p,a.thresholds[p],fpfn_ratio,target_fn,lr,
-                               a.recent_memory_len,a.history_len,a.avg_rate,
-                               a.target_tolerance)\
+    experiments=[mk_experiment(p,a.thresholds[p],fpfn_ratio,target_fn,a.lr,a)\
                  for p in a.imbalances for (fpfn_ratio,target_fn) in a.targets\
                  for lr in a.lrs]
-
-  elif a.mode=='single':
-    experiments=[mk_experiment(a.w_model_init,.1,a.thresholds[.1],1.,.01,
-                               a.lr,a.recent_memory_len,a.history_len,a.avg_rate,
-                               a.target_tolerance)]
   elif a.mode=='adaptive_lr':
-    experiments=[mk_experiment(a.w_model_init,.1,a.thresholds[.1],1.,.01,lr,
-                               a.recent_memory_len,a.history_len,a.avg_rate,
-                               a.target_tolerance) for\
+    experiments=[mk_experiment(.1,a.thresholds[.1],1.,.01,lr,a) for\
                  lr in a.lrs]
   elif a.mode in ['unsw','gmm','mnist']:
-    experiments=[mk_experiment(a.w_model_init,float(p),0.,fpfn_ratio,
-                               float(p*target_fn),a.lr,a.recent_memory_len,
-                               a.history_len,a.avg_rate,a.target_tolerance,)\
-                 for p in a.imbalances\
-                 for fpfn_ratio in a.fpfn_ratios\
+    experiments=[mk_experiment(float(p),0.,fpfn_ratio,float(p*target_fn),a.lr,a)\
+                 for p in a.imbalances for fpfn_ratio in a.fpfn_ratios\
                  for target_fn in a.target_fns]
   elif a.mode in ['imbalances']:
-    experiments=[mk_experiment(a.w_model_init,float(p),float(a.thresholds[float(p)]),
-                               fpfn_ratio,float(p*target_fn),a.lr,
-                               a.recent_memory_len,a.history_len,a.avg_rate,
-                               a.target_tolerance)\
-                 for p in a.imbalances\
-                 for fpfn_ratio in a.fpfn_ratios\
+    experiments=[mk_experiment(float(p),float(a.thresholds[float(p)]),fpfn_ratio,
+                               float(p*target_fn),a.lr,a)\
+                 for p in a.imbalances for fpfn_ratio in a.fpfn_ratios\
                  for target_fn in a.target_fns]
 
   if a.mode=='gmm':
@@ -367,7 +374,6 @@ def init_experiments(a,global_key):
       a.means=2*a.x_max*uniform(k5,(2*a.n_gaussians,a.in_dim))-a.x_max
       min_dist=min([nsm((A-B)**2) for b,A in enumerate(a.means) for B in a.means[b+1:]])
     a.variances=2*a.x_max*uniform(k6,2*a.n_gaussians)*a.gmm_spread #hmm
-
   return experiments
 
 activations={'tanh':tanh,'relu':relu,'softmax':softmax}
@@ -416,36 +422,32 @@ def get_xy(a,imbs,bs,k):
 
   return ret[ret_single] if ret_single else ret
 
-def evaluate_fp_fn(e,y_p,y_t,cost_multiplier):
-  e.FP=int(nsm(y_p&(~y_t))) #Stop jax weirdness after ADC
-  e.FN=int(nsm(y_t&(~y_p)))
-  e.fp_cost=(e.FP/(e.bs*e.target_fp))*cost_multiplier
-  e.fn_cost=(e.FN/(e.bs*e.target_fp))*cost_multiplier
+def evaluate_fp_fn(e,y_p,y_t):
+  e.FP=int(nsm(y_p&(~y_t)))/e.bs #Stop jax weirdness after ADC
+  e.FN=int(nsm(y_t&(~y_p)))/e.bs
+  e.cost=(e.FP/e.target_fp+e.FN/e.target_fn)
   e.FPs[e.step]=e.FP
   e.FNs[e.step]=e.FN
-  window_div=min(e.step,e.recent_memory_len)
-  e.fp_window=e.FPs.sum()/window_div
-  e.fn_window=e.FNs.sum()/window_div
-  e.cost_window=(e.fp_window/e.target_fp+e.fn_window/e.target_fn)/e.bs
+  e.trad_avg=False
+  if e.trad_avg:
+    e.fp=e.FPs.avg()
+    e.fn=e.FNs.avg()
+  else:
+    e.fp_amnt=e.avg_rate*min(1,e.bs*e.fp)
+    e.fn_amnt=e.avg_rate*min(1,e.bs*e.fn)
+    e.fp*=(1-e.fp_amnt)
+    e.fp+=e.fp_amnt*e.FP
+    e.fn*=(1-e.fn_amnt)
+    e.fn+=e.fn_amnt*e.FN
 
-  return e.fp_cost<1 and e.fn_cost<1
-
-def update_fp_fn(e):
-  e.fp_amnt=e.avg_rate*min(1,e.bs*e.fp)
-  e.fn_amnt=e.avg_rate*min(1,e.bs*e.fn)
-  #e.fp_amnt=1.
-  #e.fn_amnt=1.
-  e.fp*=(1-e.fp_amnt)
-  e.fp+=e.fp_amnt*e.FP/e.bs
-  e.fn*=(1-e.fn_amnt)
-  e.fn+=e.fn_amnt*e.FN/e.bs
+def update_history(e):
   if not e.step%e.history.resolution: #for plotting purposes
     e.history.FP.append(e.FP)
     e.history.FN.append(e.FN)
     e.history.lr.append(e.lr)
     e.history.w.append(e.w_l2)
     e.history.dw.append(e.dw_l2)
-    e.history.cost.append(e.cost_window)
+    e.history.cost.append(e.cost)
     e.history.l+=1
     if e.history.l>e.history_len:
       e.history.resolution*=2
@@ -461,7 +463,7 @@ def update_fp_fn(e):
        e.steps_to_target=e.step
     
 
-def compute_U_V(fp,fn,target_fp,target_fn,p):
+def compute_U_V(fp,fn,target_fp,target_fn,p,sm=False,p_scale=.5):
   #e.p_empirical*=(1-min(e.fp_amnt,e.fn_amnt))
   #e.p_empirical+=(1-min(e.fp_amnt,e.fn_amnt))*nsm(e.y_t)/e.bs
   #U,V=log(1+fp/target_fp),log(1+fn/target_fn)
@@ -469,8 +471,12 @@ def compute_U_V(fp,fn,target_fp,target_fn,p):
   #V=v/(u+v)
   #U,V=softmax(array([gamma1*fp/target_fp,gamma1*fn/target_fn]))
   #U,V=softmax(array([fp/target_fp,fn/target_fn]))
-  U,V=fp/target_fp,fn/target_fn
-  V/=p #scale dfn with the imbalance
+  #U,V=fp/target_fp,fn/target_fn
+  if sm:
+    U,V=softmax(array([fp/target_fp,fn/target_fn]))
+  else:
+    U,V=fp/target_fp,fn/target_fn
+  V/=p**p_scale #scale dfn with the imbalance
   nUV=U+V
   if nUV>0:
     U/=nUV
@@ -479,8 +485,8 @@ def compute_U_V(fp,fn,target_fp,target_fn,p):
 
 def update_lrs(a,experiments,k): 
   k1,k2,k3=split(k,3)
-  experiments=sorted(experiments,key=lambda x:x.cost_window)
-  goodnesses=array([1/(1e-8+e.cost_window) for e in experiments])
+  experiments=sorted(experiments,key=lambda x:x.cost)
+  goodnesses=array([1/(1e-8+e.cost) for e in experiments])
   e_lr=v_lr=0.
   for e,g in zip(experiments,goodnesses):
     print('lr,un-normalised goodnesses=',e.lr,g)
@@ -501,7 +507,7 @@ def update_lrs(a,experiments,k):
   else: rule=lambda x,y:w(x,y,exp(normal(k2)))
   parent.lr,e.lr=rule(parent.lr,e.lr)
 
-  if uniform(k3)<e.cost_window/(1e-8+parent.cost_window)-1:
+  if uniform(k3)<e.cost/(1e-8+parent.cost)-1:
     print('Weight copying')
     e.w_model=parent.w_model.copy()
     e.adam_M=parent.adam_M.copy()
@@ -744,6 +750,21 @@ def report_progress(a,experiments,line,act,k):
   if 'x' in line:
     print('Bye!')
     exit()
+  if 'e' in line and a.mode=='mnist':
+    for e in experiments:
+      #print('p,target_fp,target_fn:',f_to_str(e.p),f_to_str(e.target_fp),
+      #      f_to_str(e.target_fn))
+      #print('mavg_fp,mavg_fn:',f_to_str(e.fp),f_to_str(e.fn))
+      print()
+      print('mavg_fp_0,mavg_fn_0:',f_to_str((1-.1)*e.fp/(1-e.p)),f_to_str(.1*e.fn/e.p))
+      print('target_fp_0,target_fn_0:',
+            f_to_str((1-.1)*e.target_fp/(1-e.p)),f_to_str(.1*e.target_fn/e.p))
+      print('fp_train_0,fn_train_0:',
+            f_to_str(nsm(f(e.w_model,a.x_train_neg)>0)/len(a.x_train)),
+            f_to_str(nsm(f(e.w_model,a.x_train_pos)<=0)/len(a.x_train)))
+      print('fp_test_0,fn_test_0:',
+            f_to_str(nsm(f(e.w_model,a.x_test_neg)>0)/len(a.x_test)),
+            f_to_str(nsm(f(e.w_model,a.x_test_pos)<=0)/len(a.x_test)))
   if 'r' in line:
     line+='clist'
     a.report_dir=a.outf+'_report'
@@ -768,8 +789,8 @@ def report_progress(a,experiments,line,act,k):
     with open(a.out_dir+'/performance.csv','w') as fd_csv:
       w=writer(fd_csv)
       n_fps=len(a.fpfn_ratios)
-      row=['imbalance','target_fps']+['']*(n_fps-1)+['target_fn','fps']+\
-          ['']*(n_fps-1)+['fns']+['']*(n_fps-1)+['steps_to_target']
+      row=['imbalance','target_fps']+['']*(n_fps-1)+['target_fn','fp']+\
+          ['']*(n_fps-1)+['fn']+['']*(n_fps-1)+['steps_to_target']
       if a.mode=='unsw':
         row=['attack_cat']+row
       w.writerow(row)
@@ -782,17 +803,25 @@ def report_progress(a,experiments,line,act,k):
         print('\\hline',file=fd_tex)
       for p in a.imbalances:
         tgt_fps=[]
-        recent_fps=[]
-        recent_fns=[]
+        report_fps=[]
+        report_fns=[]
         steps_to_target=[]
         for e in [e for e in experiments if e.p==p]:
           tgt_fps.append(f_to_str(e.target_fp))
           fp_hist=e.history.FP[-int(10/e.p**2):]
           fn_hist=e.history.FN[-int(10/e.p**2):]
-          recent_fps.append(f_to_str(sum(fp_hist)/(e.bs*len(fp_hist))))
-          recent_fns.append(f_to_str(sum(fn_hist)/(e.bs*len(fn_hist))))
+          if a.mode=='mnist':
+            y_ones_test=a.y_test==1 #1 detector
+
+            report_fns.append(f_to_str(e.p*nsm(f(e.w_model,a.x_test_pos)<=0)/\
+                                       (.1*len(a.x_test))))
+            report_fps.append(f_to_str((1-e.p)*nsm(f(e.w_model,a.x_test_neg)>0)/\
+                                       ((1-.1)*len(a.x_test))))
+          else:
+            report_fps.append(f_to_str(sum(fp_hist)/(e.bs*len(fp_hist))))
+            report_fns.append(f_to_str(sum(fn_hist)/(e.bs*len(fn_hist))))
           steps_to_target.append(str(e.steps_to_target) if e.steps_to_target else '-')
-        row=[f_to_str(p)]+tgt_fps+[f_to_str(p/10)]+recent_fps+recent_fns+steps_to_target
+        row=[f_to_str(p)]+tgt_fps+[f_to_str(p/10)]+report_fps+report_fns+steps_to_target
         if a.mode=='unsw':
           row=[a.cats[p]]+row
         w.writerow(row)
@@ -829,7 +858,7 @@ def report_progress(a,experiments,line,act,k):
     else:
       model_desc+='\n- Glorot uniform initialisation'
     model_desc+='\n- batch size:'+str(a.bs)
-    if a.mode in ['single','gmm']:
+    if a.mode=='gmm':
       model_desc+='\n- learning rate:'+str(a.lr)
     if a.iterate_minority:
       model_desc+='Iterating minority class 1/p times'
@@ -855,3 +884,33 @@ def save_ensemble(a,experiments,global_key):
   with open(a.out_dir+'/ensemble.pkl','wb') as fd:
     a.global_key=global_key
     dump((a,experiments,global_key),fd)
+
+def dl_rbd24(data_dir=str(Path.home())+'/data',
+             data_url='https://zenodo.org/api/records/13787591/files-archive'):
+  rbd24_dir=data_dir+'/rbd24'
+  parquet_dir=rbd24_dir+'/parquet'
+  if not isdir(data_dir):
+    mkdir(data_dir)
+  if not isdir(rbd24_dir):
+    mkdir(data_dir)
+  if not isdir(parquet_dir):
+    mkdir(parquet_dir)
+    print('Downloading rbd24...')
+    zip_raw=urlopen(data_url).read()
+    with ZipFile(BytesIO(zip_raw),'r') as z:
+      print('Extracting zip...')
+      z.extractall(parquet_dir)
+    print('rbd24 extracted successfully')
+  else:
+    print('rbd already extracted')
+  return rbd24_dir
+
+def rbd24():
+  rbd24_dir=dl_rbd24()
+  categories=listdir(rbd24_dir+'/parquet')
+  dfs=[read_parquet(rbd24_dir+'/parquet/'+n) for n in categories]
+  for df,n in zip(dfs,categories):
+    df['category']=n.split('.')[0]
+
+  return concat(dfs)
+

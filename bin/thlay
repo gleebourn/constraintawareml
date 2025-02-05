@@ -12,7 +12,7 @@ from sys import path
 path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import init_ensemble,init_experiments,activations,f_to_str,save_ensemble,\
                       exp_to_str,fpfnp_lab,f,dlosses,get_xy,report_progress,update_lrs,\
-                      evaluate_fp_fn,update_fp_fn,compute_U_V,update_weights
+                      evaluate_fp_fn,update_history,compute_U_V,update_weights
 
 a=init_ensemble()
 
@@ -85,25 +85,22 @@ while True:
 
     e.lr=a.lr*exp(a.lr_amplitude*sin(a.lr_phase))
     e.bs=len(y_t)
-    e.fp_cost=e.fn_cost=2
-    batch_steps=0
     get_timestep('start_loop')
-    n_its=2**32 if a.force_batch_cost else (e.p_its if a.iterate_minority else 1) 
+    n_its=e.p_its if a.iterate_minority else 1
     for _ in range(n_its): #when force_batch_cost
       y_p_cts=f(e.w_model,x,act=act).flatten()
       y_p=y_p_cts>0
       get_timestep('threshold')
 
-      if evaluate_fp_fn(e,y_p,y_t,exp(-batch_steps*a.force_batch_cost)) and\
-         a.force_batch_cost:
-        break
+      evaluate_fp_fn(e,y_p,y_t)
       get_timestep('evaluate_fp_fn')
 
       if a.no_U_V:
         e.U=e.V=1
       else:
         e.U,e.V=compute_U_V(e.fp,e.fn,e.target_fp,e.target_fn,
-                            1 if a.iterate_minority else e.p)
+                            1 if a.iterate_minority else e.p,
+                            sm=a.softmax_U_V,p_scale=a.p_scale)
       get_timestep('U,V')
 
       upd=dlosses[a.loss](e.w_model,x,y_t,e.U,e.V,act=act,
@@ -113,8 +110,8 @@ while True:
       update_weights(a,e,upd)
       get_timestep('update_weights')
 
-    update_fp_fn(e)
-    get_timestep('update_fp_fn')
+    update_history(e)
+    get_timestep('update_history')
     
   if not a.step%a.lr_update_interval and a.mode=='adaptive_lr':
     experiments=update_lrs(a,[e for e in experiments if (not a.stop_on_target) and\
