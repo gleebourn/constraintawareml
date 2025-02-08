@@ -3,18 +3,21 @@ from pickle import load,dump
 from types import SimpleNamespace
 from csv import writer
 from itertools import cycle
-from os.path import isdir
-from os import mkdir
+from os.path import isdir,isfile
+from os import mkdir,listdir
 from io import BytesIO
 from urllib.request import urlopen
 from zipfile import ZipFile
 from pathlib import Path
-from jax.numpy import array,vectorize,zeros,log,flip,maximum,minimum,concat,exp,\
-                      ones,linspace,array_split,reshape,concatenate,\
-                      sum as nsm,max as nmx
+from numpy import inf,unique as npunique,array as nparr,min as nmn,\
+                  max as nmx,sum as nsm,log10 as npl10,round as rnd
+from numpy.random import default_rng #Only used for deterministic routines
+from jax.numpy import array,vectorize,zeros,log,log10,flip,maximum,minimum,concat,exp,\
+                      ones,linspace,array_split,reshape,concatenate,unique,\
+                      sum as jsm,max as jmx
 from jax.scipy.signal import convolve
 from jax.nn import tanh,softmax
-from jax import grad
+from jax import grad,jit
 from jax.random import uniform,normal,split,key,choice,binomial,permutation
 from sklearn.utils.extmath import cartesian
 from pandas import read_csv
@@ -22,7 +25,7 @@ from matplotlib.pyplot import imshow,legend,show,scatter,xlabel,ylabel,\
                               gca,plot,title,savefig,close
 from matplotlib.patches import Patch
 from matplotlib.cm import jet
-from pandas import read_pickle,read_parquet,concat
+from pandas import read_pickle,read_parquet,concat,get_dummies
 
 leg=lambda t=None,h=None,l='upper right':legend(fontsize='x-small',loc=l,
                                                 handles=h,title=t)
@@ -48,12 +51,13 @@ def init_ensemble():
                   choices=['all','adaptive_lr','imbalances',
                            'unsw','gmm','mnist','rbd24'])
   ap.add_argument('-no_U_V',action='store_true')
+  ap.add_argument('-epochs',action='store_true')
   ap.add_argument('-p_scale',default=.5,type=float)
   ap.add_argument('-softmax_U_V',action='store_true')
   ap.add_argument('-window_avg',action='store_true')
   ap.add_argument('-n_gaussians',default=4,type=int)
   ap.add_argument('-loss',default='loss',choices=list(dlosses))
-  ap.add_argument('-reporting_interval',default=10,type=int)
+  ap.add_argument('-reporting_interval',default=100,type=int)
   ap.add_argument('-gmm_spread',default=.05,type=float)
   ap.add_argument('-gmm_scatter_samples',default=10000,type=int)
   ap.add_argument('-no_gmm_compensate_variances',action='store_true')
@@ -75,7 +79,7 @@ def init_ensemble():
   ap.add_argument('-history_len',default=16384,type=int)
   ap.add_argument('-weight_normalisation',default=0.,type=float)
   ap.add_argument('-orthonormalise',action='store_true')
-  ap.add_argument('-saving_interval',default=100,type=int)
+  ap.add_argument('-saving_interval',default=1000,type=int)
   ap.add_argument('-lr_init_min',default=1e-4,type=float)
   ap.add_argument('-lr_init_max',default=1e-2,type=float)
   ap.add_argument('-lr_min',default=1e-5,type=float)
@@ -115,6 +119,7 @@ def init_ensemble():
   ap.add_argument('-x_max',default=10.,type=float)
   
   a=ap.parse_args()
+  a.report_dir=a.outf+'_report'
   a.n_imb=len(a.imbalances)
   a.glorot_uniform=(not a.no_glorot_uniform) and (not a.glorot_normal)
   a.stop_on_target=not a.no_stop_on_target
@@ -136,7 +141,7 @@ def init_ensemble():
   if not a.model_inner_dims:
     if a.mode=='gmm':
       a.model_inner_dims=[32,16]
-    elif a.mode=='mnist':
+    elif a.mode==['mnist','rbd24']:
       a.model_inner_dims=[64,32,16]
     else:
       a.model_inner_dims=[64,32]
@@ -154,23 +159,33 @@ even_indices=lambda arr:[v for i,v in enumerate(arr) if not i%2]
 
 def relu(x):return minimum(1,maximum(-1,x))
 
+@jit
 def f_unbatched(w,x,act=tanh):
-  i=0
-  while ('b',i) in w:
-    x=act(x.dot(w[('w',i)])+w[('b',i)])
-    i+=1
-  if act==softmax:
-    x-=.5
+  #i=0
+  #while ('w',i) in w:
+  for a,b in w:
+    x=act(x.dot(a)+b)
+    #x=act(x.dot(w[('w',i)])+w[('b',i)])
+    #i+=1
+  #if act==softmax:
+  #  x-=.5
   return x
 f=vectorize(f_unbatched,excluded=[0],signature='(m)->(n)')
+
+def resnet_unbatched(w,x,act=tanh):
+  i=0
+  while ('w',i) in w:
+    x+=act(x.dot(w[('w',i)])+w[('b',i)])
+  return x
+resnet=vectorize(resnet_unbatched,excluded=[0],signature='(m)->(m)')
 
 def l1_soft(w,x,y,U,V,softness=.1,act=tanh,normalisation=False):
   y_smooth=f(w,x,act=act)
   a_p,a_n=y_smooth[y],y_smooth[~y]
-  cts_fp=nsm(1.+a_n)
-  cts_fn=nsm(1.-a_p)
+  cts_fp=jsm(1.+a_n)
+  cts_fn=jsm(1.-a_p)
   #if normalisation:
-  #  l2=sum([nsm(w[('w',i)]**2)*nf for i,nf in enumerate(normalisation)])
+  #  l2=sum([jsm(w[('w',i)]**2)*nf for i,nf in enumerate(normalisation)])
   return U*cts_fp+V*cts_fn#+(l1 if normalisation else 0)
 
 def l1(w,x,y,U,V,act=tanh,normalisation=False):
@@ -179,15 +194,15 @@ def l1(w,x,y,U,V,act=tanh,normalisation=False):
 def cross_entropy(w,x,y,U,V,act=tanh,normalisation=False,eps=1e-8):
   y_smooth=f(w,x,act=act)
   a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
-  cts_fn=-nsm(log(eps+1.+a_p)) #y=1 => H(y,y')=-log(y'')=-log((1+y')/2)
-  cts_fp=-nsm(log(eps+1.-a_n)) #y=0 => H(y,y')=-log(1-y'')=-log((1-y')/2)
+  cts_fn=-jsm(log(eps+1.+a_p)) #y=1 => H(y,y')=-log(y'')=-log((1+y')/2)
+  cts_fp=-jsm(log(eps+1.-a_n)) #y=0 => H(y,y')=-log(1-y'')=-log((1-y')/2)
   return U*cts_fp+V*cts_fn
 
 def cross_entropy_soft(w,x,y,U,V,act=tanh,normalisation=False,softness=.1,eps=1e-8):
   y_smooth=f(w,x,act=act)
   a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
-  cts_fn=-(1-softness)*nsm(log(eps+1.+a_p))-softness*nsm(log(eps+1.-a_p))
-  cts_fp=-(1-softness)*nsm(log(eps+1.-a_n))-softness*nsm(log(eps+1.+a_n))
+  cts_fn=-(1-softness)*jsm(log(eps+1.+a_p))-softness*jsm(log(eps+1.-a_p))
+  cts_fp=-(1-softness)*jsm(log(eps+1.-a_n))-softness*jsm(log(eps+1.+a_n))
   return U*cts_fp+V*cts_fn
 
 dl1=grad(l1)
@@ -195,44 +210,58 @@ dcross_entropy=grad(cross_entropy)
 dcross_entropy_soft=grad(cross_entropy_soft)
 dl1_soft=grad(l1_soft)
 #dcross_entropy_soft=grad(cross_entropy_soft)
-dlosses={'loss':dcross_entropy,'l1':dl1,'cross_entropy':dcross_entropy,'l1_soft':dl1_soft,
-         'cross_entropy_soft':dcross_entropy_soft}
+dlosses={'loss':dcross_entropy,'l1':dl1,'cross_entropy':dcross_entropy,
+         'l1_soft':dl1_soft,'cross_entropy_soft':dcross_entropy_soft}
 
-def init_layers(k,sigma_w,sigma_b,layer_dimensions,no_sqrt_normalise=False,resid=False,
-                glorot_uniform=False,glorot_normal=False,orthonormalise=False):
+def init_layers(k,layer_dimensions,sigma_w=1.,sigma_b=1.,
+                no_sqrt_normalise=False,resid=False,glorot_uniform=False,
+                glorot_normal=False,orthonormalise=False):
   k1,k2=split(k)
   wb=[]
   n_steps=len(layer_dimensions)-1
   w_k=split(k1,n_steps)
   b_k=split(k2,n_steps)
-  ret=dict()
+  #ret=dict()
+  ret=[]
   for i,(k,l,d_i,d_o) in enumerate(zip(w_k,b_k,layer_dimensions,layer_dimensions[1:])):
     if glorot_uniform:
-      ret[('w',i)]=(2*(6/(d_i+d_o))**.5)*(uniform(shape=(d_i,d_o),key=k)-.5)
-      ret[('b',i)]=zeros(shape=d_o)
+      #ret[('w',i)]=(2*(6/(d_i+d_o))**.5)*(uniform(shape=(d_i,d_o),key=k)-.5)
+      #ret[('b',i)]=zeros(shape=d_o)
+      ret.append([(2*(6/(d_i+d_o))**.5)*(uniform(shape=(d_i,d_o),key=k)-.5),
+                  zeros(shape=d_o)])
     elif glorot_normal:
-      ret[('w',i)]=((2/(d_i+d_o))**.5)*(normal(shape=(d_i,d_o),key=k))
-      ret[('b',i)]=zeros(shape=d_o)
+      #ret[('w',i)]=((2/(d_i+d_o))**.5)*(normal(shape=(d_i,d_o),key=k))
+      #ret[('b',i)]=zeros(shape=d_o)
+      ret.append([((2/(d_i+d_o))**.5)*(normal(shape=(d_i,d_o),key=k)),
+                  zeros(shape=d_o)])
     else:
-      ret[('w',i)]=normal(shape=(d_i,d_o),key=k)
-      ret[('b',i)]=normal(shape=d_o,key=l)
-    if resid:
-      ret[('w',i)]+=eye(*ret[('w',i)].shape)
+      #ret[('w',i)]=normal(shape=(d_i,d_o),key=k)
+      #ret[('b',i)]=normal(shape=d_o,key=l)
+      ret.append([normal(shape=(d_i,d_o),key=k),normal(shape=d_o,key=l)])
+    #if resid:
+    #  ret[('w',i)]+=eye(*ret[('w',i)].shape)
   if glorot_uniform or glorot_normal:
     return ret
   if orthonormalise:
-    for i,(d_i,d_o) in enumerate(zip(layer_dimensions,layer_dimensions[1:])):
+    for r,d_i,d_o in zip(ret,layer_dimensions,layer_dimensions[1:]):
       if d_i>d_o:
-        ret[('w',i)]=svd(ret[('w',i)],full_matrices=False)[0]
+        #ret[('w',i)]=svd(ret[('w',i)],full_matrices=False)[0]
+        r[0]=svd(r[0],full_matrices=False)[0]
       else:
-        ret[('w',i)]=svd(ret[('w',i)],full_matrices=False)[2]
-  for i in range(len(layer_dimensions)-1):
-    ret[('w',i)]*=sigma_w
-    ret[('b',i)]*=sigma_b
+        #ret[('w',i)]=svd(ret[('w',i)],full_matrices=False)[2]
+        r[0]=svd(r[0],full_matrices=False)[2]
+  #for i in range(len(layer_dimensions)-1):
+  for r in ret:
+    r[i][0]*=sigma_w
+    ret[i][1]*=sigma_b
+    #ret[('b',i)]*=sigma_b
+    #ret[('w',i)]*=sigma_w
   if no_sqrt_normalise:
     return ret
-  for i,d_i in enumerate(layer_dimensions[1:]):
-    ret[('w',i)]/=d_i**.5
+  #for i,d_i in enumerate(layer_dimensions[1:]):
+  for r,d_i in zip(ret,layer_dimensions[1:]):
+    #ret[('w',i)]/=d_i**.5
+    ret[i][0]/=d_i**.5
   return ret
 
 def sample_x(bs,key):
@@ -255,7 +284,7 @@ def mk_experiment(p,thresh,fpfn_ratio,target_fn,lr,a):
   e.history_len=a.history_len
   e.step=0
 
-  e.adam_V={k:0.*v for k,v in e.w_model.items()}
+  e.adam_V= [[a*0.,b*0.] for a,b in e.w_model]
   e.adam_M=0.
 
   e.lr=float(lr)
@@ -281,6 +310,17 @@ def init_experiments(a,global_key):
   a.global_key=global_key
   k1,k2,k3,k4,k5,k6=split(global_key,6)
   a.time_avgs=dict()
+  if a.mode=='rbd24':
+    (a.x_train,a.y_train),(a.x_test,a.y_test),(_,a.x_columns)=rbd24()
+    a.p=sum(a.y_train)/len(a.y_train)
+    a.p_test=sum(a.y_test)/len(a.y_test)
+    a.imbalances=[a.p]
+    a.in_dim=len(a.x_train[0])
+    if a.epochs:
+      a.epoch_num=1
+      a.offset=0
+      a.x_train,a.y_train=shuffle_xy(k1,a.x_train,a.y_train)
+
   if a.mode=='mnist':
     from tensorflow.keras.datasets import mnist
     (a.x_train,a.y_train),(a.x_test,a.y_test)=mnist.load_data()
@@ -311,18 +351,18 @@ def init_experiments(a,global_key):
     a.target_sigma_w=.75
     a.target_sigma_b=2.
   
-    a.w_target=init_layers(k1,a.target_sigma_w,a.target_sigma_b,
-                           a.target_shape)
+    a.w_target=init_layers(k1,a.target_shape,a.target_sigma_w,a.target_sigma_b)
 
   a.model_shape=[a.in_dim]+a.model_inner_dims+[1]
 
-  a.w_model_init=init_layers(k2,a.model_sigma_w,a.model_sigma_b,a.model_shape,
-                             resid=a.model_resid,glorot_uniform=a.glorot_uniform,
+  a.w_model_init=init_layers(k2,a.model_shape,sigma_w=a.model_sigma_w,
+                             sigma_b=a.model_sigma_b,resid=a.model_resid,
+                             glorot_uniform=a.glorot_uniform,
                              no_sqrt_normalise=a.no_sqrt_normalise_w,
                              orthonormalise=a.orthonormalise)
-  a.normalisation_factors=[a.weight_normalisation/(nsm(a.w_model_init[('w',i)]**2)*\
-                                                   a.w_model_init[('w',i)].size) for\
-                           i in range(len(a.model_shape)-1)]
+  #a.normalisation_factors=[a.weight_normalisation/(nsm(a.w_model_init[('w',i)]**2)*\
+  #                                                 a.w_model_init[('w',i)].size) for\
+  #                         i in range(len(a.model_shape)-1)]
 
   if a.mode=='unsw':
     a.imbalances=(a.y_train.value_counts()+a.y_test.value_counts())/\
@@ -330,7 +370,7 @@ def init_experiments(a,global_key):
     a.cats={float(p):s for p,s in zip(a.imbalances,a.y_train.value_counts().index)}
     a.imbalances=a.imbalances[a.imbalances>a.unsw_cat_thresh]
   
-  if a.mode in ['unsw','gmm','mnist']:
+  if a.mode in ['unsw','gmm','mnist','rbd24']:
     a.thresholds={float(p):0. for p in a.imbalances}
   else:
     print('Finding thresholds...')
@@ -358,7 +398,7 @@ def init_experiments(a,global_key):
   elif a.mode=='adaptive_lr':
     experiments=[mk_experiment(.1,a.thresholds[.1],1.,.01,lr,a) for\
                  lr in a.lrs]
-  elif a.mode in ['unsw','gmm','mnist']:
+  elif a.mode in ['unsw','gmm','mnist','rbd24']:
     experiments=[mk_experiment(float(p),0.,fpfn_ratio,float(p*target_fn),a.lr,a)\
                  for p in a.imbalances for fpfn_ratio in a.fpfn_ratios\
                  for target_fn in a.target_fns]
@@ -372,9 +412,14 @@ def init_experiments(a,global_key):
     min_dist=0
     while min_dist<a.gmm_min_dist:
       a.means=2*a.x_max*uniform(k5,(2*a.n_gaussians,a.in_dim))-a.x_max
-      min_dist=min([nsm((A-B)**2) for b,A in enumerate(a.means) for B in a.means[b+1:]])
+      min_dist=min([jsm((A-B)**2) for b,A in enumerate(a.means) for B in a.means[b+1:]])
     a.variances=2*a.x_max*uniform(k6,2*a.n_gaussians)*a.gmm_spread #hmm
   return experiments
+
+def shuffle_xy(k,x,y):
+  shuff=nparr(permutation(k,len(y)))
+  x,y=nparr(x[shuff]),nparr(y[shuff])
+  return x,y
 
 activations={'tanh':tanh,'relu':relu,'softmax':softmax}
 
@@ -398,6 +443,20 @@ def get_xy(a,imbs,bs,k):
         z/=(-2*log(p))**.5
       x=z*a.variances[mix,None]+a.means[mix]
       ret[float(p)]=x,y
+  elif a.mode=='rbd24':
+    if a.epochs: #epochs: sample randomly shuffled dataset without replacement
+      next_offset=a.offset+a.bs
+      if next_offset>len(a.y_train):
+        a.epoch_num+=1
+        a.x_train,a.y_train=shuffle_xy(k1,a.x_train,a.y_train)
+        a.offset=0
+        a.next_offset=a.bs
+      ret={float(a.p):(a.x_train[a.offset:next_offset],a.y_train[a.offset:next_offset])}
+      a.offset=next_offset
+    else: #sample without replacement
+      batch_indices=choice(k1,len(a.y_train),shape=(a.bs,))
+      ret={float(a.p):(a.x_train[batch_indices],
+                      array(a.y_train[batch_indices]))}
 
   elif a.mode=='unsw':
     batch_indices=choice(k1,len(a.y_train),shape=(a.bs,))
@@ -465,7 +524,7 @@ def update_history(e):
 
 def compute_U_V(fp,fn,target_fp,target_fn,p,sm=False,p_scale=.5):
   #e.p_empirical*=(1-min(e.fp_amnt,e.fn_amnt))
-  #e.p_empirical+=(1-min(e.fp_amnt,e.fn_amnt))*nsm(e.y_t)/e.bs
+  #e.p_empirical+=(1-min(e.fp_amnt,e.fn_amnt))*jsm(e.y_t)/e.bs
   #U,V=log(1+fp/target_fp),log(1+fn/target_fn)
   #U=u/(u+v)
   #V=v/(u+v)
@@ -490,13 +549,13 @@ def update_lrs(a,experiments,k):
   e_lr=v_lr=0.
   for e,g in zip(experiments,goodnesses):
     print('lr,un-normalised goodnesses=',e.lr,g)
-    le_lr+=log(e.lr)/log(10)
-    lv_lr+=(log(e.lr)/log(10))**2
+    le_lr+=log10(e.lr)
+    lv_lr+=(log10(e.lr))**2
   le_lr/=len(experiments)
   lv_lr/=len(experiments)
   lv_lr-=le_le**2
   print('E(log(lr)),V(log(lr))=',le_lr,lv_lr)
-  goodnesses/=nsm(goodnesses)
+  goodnesses/=jsm(goodnesses)
   experiment_indices=array(range(len(experiments)))
   e=experiments[-1]
   parent=experiments[int(choice(k1,experiment_indices,p=goodnesses))]
@@ -521,23 +580,29 @@ def update_weights(a,e,upd):
   e.dw_l2=e.w_l2=0
   if a.adam:
     e.adam_M*=(1-a.gamma2)
-    for k in upd:#Should apply to all bits simultaneously?
-      e.adam_V[k]*=(1-a.gamma1)
-      e.adam_V[k]+=a.gamma1*upd[k]
-      e.adam_M+=a.gamma2*nsm(upd[k]**2)
-    for k in upd:
-      delta=e.lr*e.adam_V[k]/(e.adam_M**.5+1e-8)
-      e.w_model[k]-=delta
-      ch_l2=nsm(delta**2)
-      weight_l2=nsm(e.w_model[k]**2)
+    for i,(u,v) in enumerate(upd):#Should apply to all bits simultaneously?
+      e.adam_V[i][0]*=(1-a.gamma1)
+      e.adam_V[i][1]*=(1-a.gamma1)
+      e.adam_V[i][0]+=a.gamma1*u
+      e.adam_V[i][1]+=a.gamma1*v
+      e.adam_M+=a.gamma2*(nsm(u**2)+nsm(v**2))
+    #for k in upd:
+    for i,(u,v) in enumerate(upd):#Should apply to all bits simultaneously?
+      delta=[e.lr*e.adam_V[i][0]/(e.adam_M**.5+1e-8),
+             e.lr*e.adam_V[i][1]/(e.adam_M**.5+1e-8)]
+      e.w_model[i][0]-=delta[0]
+      e.w_model[i][1]-=delta[1]
+      ch_l2=nsm(delta[0]**2)+nsm(delta[1]**2)
+      weight_l2=nsm(e.w_model[i][0]**2)+nsm(e.w_model[i][0]**2)
       e.w_l2+=weight_l2
       e.dw_l2+=ch_l2
   else:
-    for k in upd:
-      delta=e.lr*upd[k]
-      e.dw_l2+=nsm(delta**2)
-      e.w_model[k]-=delta
-      e.w_l2+=nsm(e.w_model[k]**2)
+    for i in range(upd):
+      delta=[e.lr*upd[i][0],e.lr*upd[i][1]]
+      e.dw_l2+=nsm(delta[0]**2)+nsm(delta[1]**2)
+      e.w_model[i][0]-=delta[0]
+      e.w_model[i][1]-=delta[1]
+      e.w_l2+=nsm(e.w_model[i][0]**2)+nsm(e.w_model[i][0]**2)
 
 def plot_stopping_times(experiments,fd_tex,report_dir):
   for e in experiments: e.fpfn_ratio=float(e.fpfn_ratio)
@@ -545,8 +610,8 @@ def plot_stopping_times(experiments,fd_tex,report_dir):
   try:
     fpfn_ratios=list(set([e.fpfn_ratio for e in experiments]))
     for rat in fpfn_ratios:
-      x=[log(e.p)/log(10) for e in completed_experiments if e.fpfn_ratio==rat]
-      y=[log(e.steps_to_target)/log(10) for e in completed_experiments if\
+      x=[log10(e.p) for e in completed_experiments if e.fpfn_ratio==rat]
+      y=[log10(e.steps_to_target) for e in completed_experiments if\
          e.fpfn_ratio==rat]
       plot(x,y)
       title('Stopping times for target fp/fn='+f_to_str(rat))
@@ -575,10 +640,10 @@ def plot_2d(experiments,fd_tex,a,act,line,k):
       x_t,y_t=get_xy(a,e.p,a.gmm_scatter_samples,k)
       col_mat=[[1.,1,1],[0,0,0]]#fp,fn,tp,tn
       labs=['Predict +','Predict -']
-      x_0_max=nmx(x_t[:,0])
-      x_0_min=-nmx(-x_t[:,0])
-      x_1_max=nmx(x_t[:,1])
-      x_1_min=-nmx(-x_t[:,1])
+      x_0_max=jmx(x_t[:,0])
+      x_0_min=-jmx(-x_t[:,0])
+      x_1_max=jmx(x_t[:,1])
+      x_1_min=-jmx(-x_t[:,1])
     else:
       x_0_max=x_1_max=a.x_max
       x_0_min=x_1_min=-a.x_max
@@ -591,8 +656,8 @@ def plot_2d(experiments,fd_tex,a,act,line,k):
     cm=None
     if 'b' in line: #draw boundary
       cols=abs(convolve(y_p,array([[1,1,1],[1,-8,1],[1,1,1]]))).T
-      cols/=-(nmx(cols)+nmx(-cols))
-      cols+=nmx(-cols)
+      cols/=-(jmx(cols)+jmx(-cols))
+      cols+=jmx(-cols)
       cm='gray'
     else:
       if a.mode=='gmm':
@@ -645,7 +710,7 @@ def plot_2d(experiments,fd_tex,a,act,line,k):
 get_cost=lambda e:e.history.cost
 get_lr=lambda e:e.history.lr
 get_dw=lambda e:e.history.dw
-def plot_historical_statistics(experiments,fd_tex,a):
+def plot_historical_statistics(experiments,fd_tex,a,smoothing=100):
   if fd_tex:
     print('\\subsection{Historical statistics}',file=fd_tex)
   for get_var,yl,desc in zip([get_cost,get_lr,get_dw],
@@ -653,12 +718,15 @@ def plot_historical_statistics(experiments,fd_tex,a):
                               'log(dw)'],
                              ['Loss','Learning_rate','Change_in_weights']):
     for e in experiments:
-      arr=get_var(e)
+      arr=[log10(a) for a in get_var(e)]
+      if smoothing:
+        ker=ones(smoothing)/smoothing
+        arr=convolve(array(arr,dtype=float),ker,'same')
       if a.mode=='unsw':
         lab=a.cats[e.p]
       else:
         lab=fpfnp_lab(e)
-      plot([log(a)/log(10) for a in arr],label=lab)
+      plot([log10(a) for a in arr],label=lab)
     xlabel('Step number *'+str(e.history.resolution))
     ylabel(yl)
     title(desc.replace('_',' '))
@@ -677,7 +745,7 @@ def plot_historical_statistics(experiments,fd_tex,a):
     ker=ones(conv_len)/conv_len
     smoothed_fp=convolve(array(e.history.FP,dtype=float),ker,'valid')
     smoothed_fn=convolve(array(e.history.FN,dtype=float),ker,'valid')
-    plot(log(smoothed_fp)/log(10),log(smoothed_fn)/log(10),label=fpfnp_lab(e))
+    plot(log10(smoothed_fp),log10(smoothed_fn),label=fpfnp_lab(e))
     xlabel('log(fp)')
     ylabel('log(fn)')
     title('FP versus FN rate')
@@ -750,21 +818,38 @@ def report_progress(a,experiments,line,act,k):
   if 'x' in line:
     print('Bye!')
     exit()
-  if 'e' in line and a.mode=='mnist':
+  if 'e' in line and a.mode in ['mnist','rbd24']:
     for e in experiments:
-      #print('p,target_fp,target_fn:',f_to_str(e.p),f_to_str(e.target_fp),
-      #      f_to_str(e.target_fn))
-      #print('mavg_fp,mavg_fn:',f_to_str(e.fp),f_to_str(e.fn))
-      print()
-      print('mavg_fp_0,mavg_fn_0:',f_to_str((1-.1)*e.fp/(1-e.p)),f_to_str(.1*e.fn/e.p))
-      print('target_fp_0,target_fn_0:',
-            f_to_str((1-.1)*e.target_fp/(1-e.p)),f_to_str(.1*e.target_fn/e.p))
-      print('fp_train_0,fn_train_0:',
-            f_to_str(nsm(f(e.w_model,a.x_train_neg)>0)/len(a.x_train)),
-            f_to_str(nsm(f(e.w_model,a.x_train_pos)<=0)/len(a.x_train)))
-      print('fp_test_0,fn_test_0:',
-            f_to_str(nsm(f(e.w_model,a.x_test_neg)>0)/len(a.x_test)),
-            f_to_str(nsm(f(e.w_model,a.x_test_pos)<=0)/len(a.x_test)))
+      if a.mode=='rbd24':
+        x_train_pos=a.x_train[a.y_train]
+        x_train_neg=a.x_train[~a.y_train]
+        x_test_pos=a.x_test[a.y_test]
+        x_test_neg=a.x_test[~a.y_test]
+        print()
+        print('mavg_fp_0,mavg_fn_0:',f_to_str(e.fp),f_to_str(e.fn))
+        print('target_fp_0,target_fn_0:',
+              f_to_str(e.target_fp),f_to_str(e.target_fn))
+        print('fp_train_0,fn_train_0:',
+              f_to_str(nsm(f(e.w_model,x_train_neg)>0)/len(a.x_train)),
+              f_to_str(nsm(f(e.w_model,x_train_pos)<=0)/len(a.x_train)))
+        print('fp_test_0,fn_test_0:',
+              f_to_str(nsm(f(e.w_model,x_test_neg)>0)/len(a.x_test)),
+              f_to_str(nsm(f(e.w_model,x_test_pos)<=0)/len(a.x_test)))
+      else:
+        x_train_pos=a.x_train_pos
+        x_train_neg=a.x_train_neg
+        x_test_pos=a.x_test_pos
+        x_test_neg=a.x_test_neg
+        print()
+        print('mavg_fp_0,mavg_fn_0:',f_to_str((1-.1)*e.fp/(1-e.p)),f_to_str(.1*e.fn/e.p))
+        print('target_fp_0,target_fn_0:',
+              f_to_str((1-.1)*e.target_fp/(1-e.p)),f_to_str(.1*e.target_fn/e.p))
+        print('fp_train_0,fn_train_0:',
+              f_to_str(nsm(f(e.w_model,x_train_neg)>0)/len(a.x_train)),
+              f_to_str(nsm(f(e.w_model,x_train_pos)<=0)/len(a.x_train)))
+        print('fp_test_0,fn_test_0:',
+              f_to_str(nsm(f(e.w_model,x_test_neg)>0)/len(a.x_test)),
+              f_to_str(nsm(f(e.w_model,x_test_pos)<=0)/len(a.x_test)))
   if 'r' in line:
     line+='clist'
     a.report_dir=a.outf+'_report'
@@ -836,9 +921,9 @@ def report_progress(a,experiments,line,act,k):
 
   print('Timing:')
   for k,v in a.time_avgs.items():
-    print(k,log(v)/log(10))
+    print(k,log10(v))
     if fd_tex: print('\\texttt{'+k.replace('_','\\_')+'}&'+\
-                     f_to_str(log(v)/log(10))+'\\\\\n',file=fd_tex)
+                     f_to_str(log10(v))+'\\\\\n',file=fd_tex)
   if fd_tex: print('\\end{tabular}',file=fd_tex)
 
   if a.in_dim==2 and 'c' in line:
@@ -886,7 +971,8 @@ def save_ensemble(a,experiments,global_key):
     dump((a,experiments,global_key),fd)
 
 def dl_rbd24(data_dir=str(Path.home())+'/data',
-             data_url='https://zenodo.org/api/records/13787591/files-archive'):
+             data_url='https://zenodo.org/api/records/13787591/files-archive',
+             rm_redundant=True,large_rescale_factor=10):
   rbd24_dir=data_dir+'/rbd24'
   parquet_dir=rbd24_dir+'/parquet'
   if not isdir(data_dir):
@@ -905,12 +991,167 @@ def dl_rbd24(data_dir=str(Path.home())+'/data',
     print('rbd already extracted')
   return rbd24_dir
 
-def rbd24():
-  rbd24_dir=dl_rbd24()
-  categories=listdir(rbd24_dir+'/parquet')
-  dfs=[read_parquet(rbd24_dir+'/parquet/'+n) for n in categories]
-  for df,n in zip(dfs,categories):
-    df['category']=n.split('.')[0]
+def rbd24(preproc=True,split_test_train=True,
+          raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl'):
+  if isfile(raw_pickle_file):
+    print('Loading raw pickle...')
+    df=read_pickle(raw_pickle_file)
+  else:
+    rbd24_dir=dl_rbd24()
+    categories=listdir(rbd24_dir+'/parquet')
+    dfs=[read_parquet(rbd24_dir+'/parquet/'+n) for n in categories]
+    for df,n in zip(dfs,categories):
+      df['category']=n.split('.')[0]
+    df=concat(dfs)
+    print('Writing raw pickle...')
+    df.to_pickle(raw_pickle_file)
 
-  return concat(dfs)
+  if preproc:
+    df=preproc_rbd24(df)
+  if not split_test_train:
+    return df
+  x=get_dummies(df.drop(['label','user_id','timestamp'],axis=1))
+  x_cols=x.columns
+  x=nparr(x,dtype=float)
+  y=nparr(df.label,dtype=bool)
+  l=len(y)
+  split_point=int(l*.7)
+  x_train,x_test=x[:split_point],x[split_point:]
+  y_train,y_test=y[:split_point],y[split_point:]
+  return (x_train,y_train),(x_test,y_test),(df,x_cols)
 
+def preproc_rbd24(df,split_test_train=True,rm_redundant=True,plot_xvals=False,
+                  check_large=False,check_redundant=False,rescale_log=10):
+  n_cols=len(df.columns)
+  if rm_redundant: check_redundant=True
+  if rescale_log: check_large=True
+  if check_redundant or check_large:
+    if rm_redundant: redundant_cols=[]
+    if rescale_log:
+      large_cols=[]
+      maximums=[]
+      distinct=[]
+    for c in [c for c in df.columns if df.dtypes[c] in [int,float]]:
+      feat=nparr(df[c])
+      a=nmn(feat)
+      b=nmx(feat)
+      if rm_redundant and a==b:
+        redundant_cols.append(c)
+      elif rescale_log and b>1:
+        large_cols.append(c)
+        maximums.append(float(b))
+        distinct.append(len(npunique(feat)))
+    if check_redundant:
+      print('Redundant columns (all values==0):')
+      print(', '.join(redundant_cols))
+    if check_large:
+      print('Large columns (max>1):')
+      print('name,maximum,n_distinct')
+      for c,m,distinct in zip(large_cols,maximums,distinct):
+        print(c,',',m,',',distinct)
+  if rm_redundant:
+    df=df.drop(redundant_cols,axis=1)
+  if rescale_log:
+    if max([npl10(1+m) for m in maximums])>rescale_log:
+      print('Note that rescale factor will not map values to be <=1')
+    for c in large_cols:
+      df[c]=npl10(1+nparr(df[c]))/rescale_log
+  if plot_xvals:
+    plot_uniques(df)
+  return df.sort_values('timestamp')
+
+def plot_uniques(df):
+  for col in [c for c in df.columns if df.dtypes[c] in [float,int]]:
+    vals=unique(nparr(df[col]))
+    if len(vals)>2000:
+      vals=vals[::len(vals)//2000]
+    title('Unique values for '+col)
+    plot(linspace(0,1,len(vals)),vals)
+  show()
+
+gen=default_rng(1729) #only used for deterministic algorithm so not a problem for reprod
+def min_dist(X,Y=None):
+  if Y:
+    if len(Y)==1 and len(X)==1:
+      return nsm((X[0]-Y[0])**2)
+    #Assume X bigger
+    X=nparr(X)
+    Y=nparr(Y)
+    X_c=gen.choice(X,X.shape[0])
+    Y_c=gen.choice(Y,X.shape[0])
+    dists=nsm((X_c-Y_c)**2,axis=1)
+    ret=nmn(dists)
+    if not ret:
+      return ret
+    h={}
+    X_r=rnd(X/ret)
+    Y_r=rnd(Y/ret)
+    for x,x_r in zip(X,X_r):
+      x_r=tuple(x_r)
+      if x_r in h:
+        h[x_r][0].append(x)
+      else:
+        h[x_r]=[x],[]
+    for y,y_r in zip(Y,Y_r):
+      y_r=hash(y_r.data.tobytes())
+      if y_r in h:
+        h[y_r][1].append(y)
+      else:
+        h[x_r]=[x],[]
+    hi=[nparr(t) for t in h]
+    for i in range(X.shape[1]):
+      hi=sorted(hi,key=lambda x:x[i])
+    h_moore={k:[]+v for k,v in h.items()}
+    n_boxes=len(hi)
+    for i,k in enumerate(hi):#Have to go over everything in Moore nhood
+      k_tup=tuple(k)
+      for j in range(i+1,n_boxes):
+        j_arr=hi[j]
+        j_tup=tuple(j_arr)
+        if nmx(abs(k-j_arr))>1:
+          break
+        h_moore[k_tup][0]+=h[j_tup][0]
+        h_moore[k_tup][1]+=h[j_tup][1]
+    for k in hi:
+      ret=min(ret,min_dist(*h_moore[tuple(k)]))
+      if not ret:
+        return ret
+    return ret
+
+  else:
+    if len(X)==1:
+      return inf
+    X=nparr(X)
+    pair0=gen.choice(X.shape[0],X.shape[0])
+    pair1=(pair0+1+gen.choice(X.shape[0]-1,X.shape[0]))%X.shape[0]
+    dists=nsm((X[pair0]-X[pair1])**2,axis=1)
+    ret=nmn(dists)
+    if not ret: #uh oh!
+      return ret
+    h={}
+    X_r=rnd(X/ret).astype(int)
+    for x,x_r in zip(X,X_r):
+      x_r=tuple(x_r)
+      if x_r in h:
+        h[x_r].append(x)
+      else:
+        h[x_r]=[x]
+    hi=[nparr(t) for t in h]
+    for i in range(X.shape[1]):
+      hi=sorted(hi,key=lambda x:x[i])
+    h_moore={k:[]+v for k,v in h.items()}
+    n_boxes=len(hi)
+    for i,k in enumerate(hi):#Have to go over everything in Moore nhood
+      k_tup=tuple(k)
+      for j in range(i+1,n_boxes):
+        j_arr=hi[j]
+        j_tup=tuple(j_arr)
+        if nmx(abs(k-j_arr))>1:
+          break
+        h_moore[k_tup]+=h[j_tup]
+        h_moore[j_tup]+=h[k_tup]
+    for k in hi:
+      ret=min(ret,min_dist(h_moore[tuple(k)]))
+      if not ret:
+        return ret
+    return ret

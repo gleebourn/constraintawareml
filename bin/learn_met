@@ -1,0 +1,39 @@
+#!/usr/bin/env python
+from os.path import dirname,abspath
+from sys import path
+path.append(dirname(dirname(abspath(__file__))))
+from cal.thlay import f,init_layers,rbd24,min_dist
+
+from types import SimpleNamespace
+
+#from jax.nn import tanh
+#from jax.random import key,uniform,choice
+from numpy.random import default_rng
+from numpy import inf,unique,var,array as nparr,min as nmn,sum as nsm,round as rnd
+from matplotlib.pyplot import plot,show,title
+
+
+(x_train,y_train),(x_test,y_test),(df,x_cols)=rbd24()
+print('p_train,p_test:',sum(y_train)/len(y_train),sum(y_test)/len(y_test))
+
+bottleneck_rate=.9
+
+n_reduction_layers=4
+n_train_x=x_train.shape[0]
+in_dim=x_train.shape[1]
+
+
+reduction_layers=[int(in_dim*bottleneck_rate**i) for i in range(n_reduction_layers)]
+layers=reduction_layers[:n_reduction_layers]+list(reversed(reduction_layers))
+
+x_train_p_unique=nparr(x_train[y_train])
+x_train_n_unique=nparr(x_train[~y_train])
+md_p=min_dist(unique(x_train_p_unique,axis=0))
+md_n=min_dist(unique(x_train_n_unique,axis=0))
+print('min dist +,min dist -:',md_p,md_n)
+print('len(x_train)-len(unique(x_train)):',len(x_train)-len(unique(x_train)))
+[print('V(',c,'):',x) for c,x in zip(x_cols,var(x_train,axis=1))]
+x_train_avg_min_dist
+
+#for i,x in enumerate(x_train):
+#  min_feat_dist=min(min_feat_dist,nmn(nsm(((x_train[i:]-x.T)**2),axis=1)))

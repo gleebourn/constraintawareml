@@ -3,9 +3,13 @@ from pickle import load
 from time import perf_counter
 from jax.numpy import exp,sin
 from jax.random import key,split
+from jax.profiler import save_device_memory_profile
 from sys import path,stdin
-from os import mkdir
+from os import mkdir,environ
 from select import select
+#environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
+#environ["XLA_PYTHON_CLIENT_MEM_FRACTION"]=".99"
+#environ["XLA_PYTHON_CLIENT_ALLOCATOR"]="platform"
 
 from os.path import dirname,abspath
 from sys import path
@@ -88,8 +92,7 @@ while True:
     get_timestep('start_loop')
     n_its=e.p_its if a.iterate_minority else 1
     for _ in range(n_its): #when force_batch_cost
-      y_p_cts=f(e.w_model,x,act=act).flatten()
-      y_p=y_p_cts>0
+      y_p=f(e.w_model,x,act=act).flatten()>0
       get_timestep('threshold')
 
       evaluate_fp_fn(e,y_p,y_t)
@@ -102,9 +105,11 @@ while True:
                             1 if a.iterate_minority else e.p,
                             sm=a.softmax_U_V,p_scale=a.p_scale)
       get_timestep('U,V')
+      if not a.step%10:
+        save_device_memory_profile("memory.prof")
 
-      upd=dlosses[a.loss](e.w_model,x,y_t,e.U,e.V,act=act,
-                          normalisation=a.normalisation_factors)
+      upd=dlosses[a.loss](e.w_model,x,y_t,e.U,e.V,act=act)#,
+                          #normalisation=a.normalisation_factors)
       get_timestep('dloss')
 
       update_weights(a,e,upd)
