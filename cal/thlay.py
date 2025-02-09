@@ -96,8 +96,8 @@ def init_ensemble():
   ap.add_argument('-bs',default=0,type=int)
   ap.add_argument('-res',default=1000,type=int)
   ap.add_argument('-outf',default='thlay')
-  ap.add_argument('-model_sigma_w',default=1.,type=float)#.3
-  ap.add_argument('-model_sigma_b',default=1.,type=float)#0.
+  ap.add_argument('-model_sigma_w',default=1.,type=float)
+  ap.add_argument('-model_sigma_b',default=1.,type=float)
   ap.add_argument('-no_sqrt_normalise_w',action='store_true')
   ap.add_argument('-no_glorot_uniform',action='store_true')
   ap.add_argument('-glorot_normal',action='store_true')
@@ -161,37 +161,28 @@ def relu(x):return minimum(1,maximum(-1,x))
 
 @jit
 def f_unbatched(w,x,act=tanh):
-  #i=0
-  #while ('w',i) in w:
-  for a,b in w:
+  for a,b in zip(w[0],w[1]):
     x=act(x.dot(a)+b)
-    #x=act(x.dot(w[('w',i)])+w[('b',i)])
-    #i+=1
-  #if act==softmax:
-  #  x-=.5
   return x
 f=vectorize(f_unbatched,excluded=[0],signature='(m)->(n)')
 
 def resnet_unbatched(w,x,act=tanh):
-  i=0
-  while ('w',i) in w:
-    x+=act(x.dot(w[('w',i)])+w[('b',i)])
+  for a,b in zip(w[0],w[1]):
+    x+=act(x.dot(a)+b)
   return x
 resnet=vectorize(resnet_unbatched,excluded=[0],signature='(m)->(m)')
 
-def l1_soft(w,x,y,U,V,softness=.1,act=tanh,normalisation=False):
+def l1_soft(w,x,y,U,V,softness=.1,act=tanh):
   y_smooth=f(w,x,act=act)
   a_p,a_n=y_smooth[y],y_smooth[~y]
   cts_fp=jsm(1.+a_n)
   cts_fn=jsm(1.-a_p)
-  #if normalisation:
-  #  l2=sum([jsm(w[('w',i)]**2)*nf for i,nf in enumerate(normalisation)])
-  return U*cts_fp+V*cts_fn#+(l1 if normalisation else 0)
+  return U*cts_fp+V*cts_fn
 
-def l1(w,x,y,U,V,act=tanh,normalisation=False):
-  return l1_soft(w,x,y,U,V,0.,act,normalisation)
+def l1(w,x,y,U,V,act=tanh):
+  return l1_soft(w,x,y,U,V,0.,act)
 
-def cross_entropy(w,x,y,U,V,act=tanh,normalisation=False,eps=1e-8):
+def cross_entropy(w,x,y,U,V,act=tanh,eps=1e-8):
   y_smooth=f(w,x,act=act)
   a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
   cts_fn=-jsm(log(eps+1.+a_p)) #y=1 => H(y,y')=-log(y'')=-log((1+y')/2)
@@ -209,7 +200,7 @@ dl1=grad(l1)
 dcross_entropy=grad(cross_entropy)
 dcross_entropy_soft=grad(cross_entropy_soft)
 dl1_soft=grad(l1_soft)
-#dcross_entropy_soft=grad(cross_entropy_soft)
+dcross_entropy_soft=grad(cross_entropy_soft)
 dlosses={'loss':dcross_entropy,'l1':dl1,'cross_entropy':dcross_entropy,
          'l1_soft':dl1_soft,'cross_entropy_soft':dcross_entropy_soft}
 
@@ -221,48 +212,34 @@ def init_layers(k,layer_dimensions,sigma_w=1.,sigma_b=1.,
   n_steps=len(layer_dimensions)-1
   w_k=split(k1,n_steps)
   b_k=split(k2,n_steps)
-  #ret=dict()
-  ret=[]
+  a=[]
+  b=[]
   for i,(k,l,d_i,d_o) in enumerate(zip(w_k,b_k,layer_dimensions,layer_dimensions[1:])):
     if glorot_uniform:
-      #ret[('w',i)]=(2*(6/(d_i+d_o))**.5)*(uniform(shape=(d_i,d_o),key=k)-.5)
-      #ret[('b',i)]=zeros(shape=d_o)
-      ret.append([(2*(6/(d_i+d_o))**.5)*(uniform(shape=(d_i,d_o),key=k)-.5),
-                  zeros(shape=d_o)])
+      a.append((2*(6/(d_i+d_o))**.5)*(uniform(shape=(d_i,d_o),key=k)-.5))
+      b.append(zeros(shape=d_o))
     elif glorot_normal:
-      #ret[('w',i)]=((2/(d_i+d_o))**.5)*(normal(shape=(d_i,d_o),key=k))
-      #ret[('b',i)]=zeros(shape=d_o)
-      ret.append([((2/(d_i+d_o))**.5)*(normal(shape=(d_i,d_o),key=k)),
-                  zeros(shape=d_o)])
+      a.append(((2/(d_i+d_o))**.5)*(normal(shape=(d_i,d_o),key=k)))
+      b.append(zeros(shape=d_o))
     else:
-      #ret[('w',i)]=normal(shape=(d_i,d_o),key=k)
-      #ret[('b',i)]=normal(shape=d_o,key=l)
-      ret.append([normal(shape=(d_i,d_o),key=k),normal(shape=d_o,key=l)])
-    #if resid:
-    #  ret[('w',i)]+=eye(*ret[('w',i)].shape)
+      a.append(normal(shape=(d_i,d_o),key=k))
+      b.append(normal(shape=d_o,key=l))
   if glorot_uniform or glorot_normal:
-    return ret
-  if orthonormalise:
-    for r,d_i,d_o in zip(ret,layer_dimensions,layer_dimensions[1:]):
-      if d_i>d_o:
-        #ret[('w',i)]=svd(ret[('w',i)],full_matrices=False)[0]
-        r[0]=svd(r[0],full_matrices=False)[0]
-      else:
-        #ret[('w',i)]=svd(ret[('w',i)],full_matrices=False)[2]
-        r[0]=svd(r[0],full_matrices=False)[2]
-  #for i in range(len(layer_dimensions)-1):
-  for r in ret:
-    r[i][0]*=sigma_w
-    ret[i][1]*=sigma_b
-    #ret[('b',i)]*=sigma_b
-    #ret[('w',i)]*=sigma_w
-  if no_sqrt_normalise:
-    return ret
-  #for i,d_i in enumerate(layer_dimensions[1:]):
-  for r,d_i in zip(ret,layer_dimensions[1:]):
-    #ret[('w',i)]/=d_i**.5
-    ret[i][0]/=d_i**.5
-  return ret
+    return a,b
+  #if orthonormalise:
+  #  for r,d_i,d_o in zip(ret,layer_dimensions,layer_dimensions[1:]):
+  #    if d_i>d_o:
+  #      r[0]=svd(r[0],full_matrices=False)[0]
+  #    else:
+  #      r[0]=svd(r[0],full_matrices=False)[2]
+  #for r in ret:
+  #  r[i][0]*=sigma_w
+  #  ret[i][1]*=sigma_b
+  #if no_sqrt_normalise:
+  #  return ret
+  #for r,d_i in zip(ret,layer_dimensions[1:]):
+  #  ret[i][0]/=d_i**.5
+  return a,b
 
 def sample_x(bs,key):
   return 2*a.x_max*uniform(shape=(bs,2),key=key)-a.x_max
@@ -280,11 +257,11 @@ def mk_experiment(p,thresh,fpfn_ratio,target_fn,lr,a):
   e.steps_to_target=False
   e.avg_rate=a.avg_rate
   e.dw_l2=e.w_l2=0
-  e.w_model=a.w_model_init.copy()
+  e.w_model=[v.copy() for v in a.w_model_init[0]],[v.copy() for v in a.w_model_init[1]]
   e.history_len=a.history_len
   e.step=0
 
-  e.adam_V= [[a*0.,b*0.] for a,b in e.w_model]
+  e.adam_V=[u*0. for u in e.w_model[0]],[u*0. for u in e.w_model[1]]
   e.adam_M=0.
 
   e.lr=float(lr)
@@ -296,8 +273,6 @@ def mk_experiment(p,thresh,fpfn_ratio,target_fn,lr,a):
 
   e.FPs=cyc(e.recent_memory_len,e.target_fp)
   e.FNs=cyc(e.recent_memory_len,e.target_fn)
-  #e.fp_amnt=avg_rate*min(1,e.target_fp*e.bs)
-  #e.fn_amnt=avg_rate*min(1,e.target_fn*e.bs)
   e.fp=(e.target_fp*.5)**.5
   e.fn=(target_fn*.5)**.5#.25 #softer start if a priori assume doing well
 
@@ -360,9 +335,6 @@ def init_experiments(a,global_key):
                              glorot_uniform=a.glorot_uniform,
                              no_sqrt_normalise=a.no_sqrt_normalise_w,
                              orthonormalise=a.orthonormalise)
-  #a.normalisation_factors=[a.weight_normalisation/(nsm(a.w_model_init[('w',i)]**2)*\
-  #                                                 a.w_model_init[('w',i)].size) for\
-  #                         i in range(len(a.model_shape)-1)]
 
   if a.mode=='unsw':
     a.imbalances=(a.y_train.value_counts()+a.y_test.value_counts())/\
@@ -417,8 +389,8 @@ def init_experiments(a,global_key):
   return experiments
 
 def shuffle_xy(k,x,y):
-  shuff=nparr(permutation(k,len(y)))
-  x,y=nparr(x[shuff]),nparr(y[shuff])
+  shuff=permutation(k,len(y)).__array__()
+  x,y=x[shuff],y[shuff]
   return x,y
 
 activations={'tanh':tanh,'relu':relu,'softmax':softmax}
@@ -450,8 +422,9 @@ def get_xy(a,imbs,bs,k):
         a.epoch_num+=1
         a.x_train,a.y_train=shuffle_xy(k1,a.x_train,a.y_train)
         a.offset=0
-        a.next_offset=a.bs
-      ret={float(a.p):(a.x_train[a.offset:next_offset],a.y_train[a.offset:next_offset])}
+        next_offset=a.bs
+      ret={float(a.p):(a.x_train[a.offset:next_offset],
+                       a.y_train[a.offset:next_offset])}
       a.offset=next_offset
     else: #sample without replacement
       batch_indices=choice(k1,len(a.y_train),shape=(a.bs,))
@@ -568,7 +541,8 @@ def update_lrs(a,experiments,k):
 
   if uniform(k3)<e.cost/(1e-8+parent.cost)-1:
     print('Weight copying')
-    e.w_model=parent.w_model.copy()
+    e.w_model=([v.copy() for v in parent.w_model[0]],
+               [v.copy() for v in parent.w_model[1]])
     e.adam_M=parent.adam_M.copy()
     e.adam_V=parent.adam_V.copy()
     e.fp=float(parent.fp)
@@ -580,29 +554,30 @@ def update_weights(a,e,upd):
   e.dw_l2=e.w_l2=0
   if a.adam:
     e.adam_M*=(1-a.gamma2)
-    for i,(u,v) in enumerate(upd):#Should apply to all bits simultaneously?
-      e.adam_V[i][0]*=(1-a.gamma1)
-      e.adam_V[i][1]*=(1-a.gamma1)
-      e.adam_V[i][0]+=a.gamma1*u
-      e.adam_V[i][1]+=a.gamma1*v
+    for u,v,s,t in zip(upd[0],upd[1],e.adam_V[0],e.adam_V[1]):
+      s*=(1-a.gamma1)
+      t*=(1-a.gamma1)
+      s+=a.gamma1*u
+      t+=a.gamma1*v
       e.adam_M+=a.gamma2*(nsm(u**2)+nsm(v**2))
     #for k in upd:
-    for i,(u,v) in enumerate(upd):#Should apply to all bits simultaneously?
-      delta=[e.lr*e.adam_V[i][0]/(e.adam_M**.5+1e-8),
-             e.lr*e.adam_V[i][1]/(e.adam_M**.5+1e-8)]
-      e.w_model[i][0]-=delta[0]
-      e.w_model[i][1]-=delta[1]
-      ch_l2=nsm(delta[0]**2)+nsm(delta[1]**2)
-      weight_l2=nsm(e.w_model[i][0]**2)+nsm(e.w_model[i][0]**2)
+    for (u,v,s,t) in zip(e.w_model[0],e.w_model[1],e.adam_V[0],e.adam_V[1]):
+      delta_u=e.lr*s/(e.adam_M**.5+1e-8)
+      delta_v=e.lr*t/(e.adam_M**.5+1e-8)
+      u-=delta_u
+      v-=delta_v
+      ch_l2=nsm(delta_u**2)+nsm(delta_v**2)
+      weight_l2=nsm(u**2)+nsm(v**2)
       e.w_l2+=weight_l2
       e.dw_l2+=ch_l2
   else:
-    for i in range(upd):
-      delta=[e.lr*upd[i][0],e.lr*upd[i][1]]
-      e.dw_l2+=nsm(delta[0]**2)+nsm(delta[1]**2)
-      e.w_model[i][0]-=delta[0]
-      e.w_model[i][1]-=delta[1]
-      e.w_l2+=nsm(e.w_model[i][0]**2)+nsm(e.w_model[i][0]**2)
+    for i in u,v,s,t in zip(e.w_model[0],e.w_model[1],upd[0],upd[1]):
+      delta_u=e.lr*s
+      delta_v=e.lr*t
+      e.dw_l2+=nsm(delta_u**2)+nsm(delta_v**2)
+      u-=delta_u
+      v-=delta_v
+      e.w_l2+=nsm(u**2)+nsm(v**2)
 
 def plot_stopping_times(experiments,fd_tex,report_dir):
   for e in experiments: e.fpfn_ratio=float(e.fpfn_ratio)
@@ -830,11 +805,15 @@ def report_progress(a,experiments,line,act,k):
         print('target_fp_0,target_fn_0:',
               f_to_str(e.target_fp),f_to_str(e.target_fn))
         print('fp_train_0,fn_train_0:',
-              f_to_str(nsm(f(e.w_model,x_train_neg)>0)/len(a.x_train)),
-              f_to_str(nsm(f(e.w_model,x_train_pos)<=0)/len(a.x_train)))
+              f_to_str(sum([nsm(f(e.w_model,x_train_neg[i:i+a.bs])>0) for\
+                            i in range(0,len(x_train_neg),a.bs)])/len(a.x_train)),
+              f_to_str(sum([nsm(f(e.w_model,x_train_pos[i:i+a.bs])<=0) for\
+                            i in range(0,len(x_train_pos),a.bs)])/len(a.x_train)))
         print('fp_test_0,fn_test_0:',
-              f_to_str(nsm(f(e.w_model,x_test_neg)>0)/len(a.x_test)),
-              f_to_str(nsm(f(e.w_model,x_test_pos)<=0)/len(a.x_test)))
+              f_to_str(sum([nsm(f(e.w_model,x_test_neg[i:i+a.bs])>0) for\
+                            i in range(0,len(x_test_neg),a.bs)])/len(a.x_test)),
+              f_to_str(sum([nsm(f(e.w_model,x_test_pos[i:i+a.bs])<=0) for\
+                            i in range(0,len(x_test_pos),a.bs)])/len(a.x_test)))
       else:
         x_train_pos=a.x_train_pos
         x_train_neg=a.x_train_neg
@@ -1012,8 +991,8 @@ def rbd24(preproc=True,split_test_train=True,
     return df
   x=get_dummies(df.drop(['label','user_id','timestamp'],axis=1))
   x_cols=x.columns
-  x=nparr(x,dtype=float)
-  y=nparr(df.label,dtype=bool)
+  x=x.__array__().astype(float)
+  y=df.label.__array__().astype(bool)
   l=len(y)
   split_point=int(l*.7)
   x_train,x_test=x[:split_point],x[split_point:]
@@ -1032,7 +1011,7 @@ def preproc_rbd24(df,split_test_train=True,rm_redundant=True,plot_xvals=False,
       maximums=[]
       distinct=[]
     for c in [c for c in df.columns if df.dtypes[c] in [int,float]]:
-      feat=nparr(df[c])
+      feat=df[c].__array__().astype(float)
       a=nmn(feat)
       b=nmx(feat)
       if rm_redundant and a==b:
@@ -1055,14 +1034,14 @@ def preproc_rbd24(df,split_test_train=True,rm_redundant=True,plot_xvals=False,
     if max([npl10(1+m) for m in maximums])>rescale_log:
       print('Note that rescale factor will not map values to be <=1')
     for c in large_cols:
-      df[c]=npl10(1+nparr(df[c]))/rescale_log
+      df[c]=npl10(1+df[c].__array__())/rescale_log
   if plot_xvals:
     plot_uniques(df)
   return df.sort_values('timestamp')
 
 def plot_uniques(df):
   for col in [c for c in df.columns if df.dtypes[c] in [float,int]]:
-    vals=unique(nparr(df[col]))
+    vals=unique(df[col].__array__())
     if len(vals)>2000:
       vals=vals[::len(vals)//2000]
     title('Unique values for '+col)
@@ -1093,34 +1072,38 @@ def min_dist(X,Y=None):
       else:
         h[x_r]=[x],[]
     for y,y_r in zip(Y,Y_r):
-      y_r=hash(y_r.data.tobytes())
+      y_r=tuple(y_r)
       if y_r in h:
         h[y_r][1].append(y)
       else:
-        h[x_r]=[x],[]
-    hi=[nparr(t) for t in h]
+        h[x_r]=[],[y]
+    h_tups_arrs=[(t,nparr(t)) for t in h]
     for i in range(X.shape[1]):
-      hi=sorted(hi,key=lambda x:x[i])
-    h_moore={k:[]+v for k,v in h.items()}
-    n_boxes=len(hi)
-    for i,k in enumerate(hi):#Have to go over everything in Moore nhood
-      k_tup=tuple(k)
-      for j in range(i+1,n_boxes):
-        j_arr=hi[j]
-        j_tup=tuple(j_arr)
-        if nmx(abs(k-j_arr))>1:
+      h_tups_arrs.sort(key=lambda x:x[0][i])
+    h_moore={k:([v[0]]+[],[v[1]]+[]) for k,v in h.items()}
+    n_neighbs=len(hi)
+    for i,(i_tup,i_arr) in enumerate(h_tups_arrs):
+      for j in range(i+1,n_neighbs):
+        j_tup,j_arr=h_tups_arrs[j]
+        if nmx(abs(i_arr-j_arr))>1:
           break
-        h_moore[k_tup][0]+=h[j_tup][0]
-        h_moore[k_tup][1]+=h[j_tup][1]
-    for k in hi:
-      ret=min(ret,min_dist(*h_moore[tuple(k)]))
+        h_moore[i_tup][0].append(h[j_tup][0])
+        h_moore[i_tup][1].append(h[j_tup][1])
+        h_moore[j_tup][0].append(h[i_tup][0])
+        h_moore[j_tup][1].append(h[i_tup][1])
+    moore_neighbs=[(sum(s,[]),sum(t,[])) for s,t in h_moore.values()]
+    for v in moore_neighbs:
+      ret=min(ret,min_dist(*v))
       if not ret:
         return ret
     return ret
 
   else:
-    if len(X)==1:
+    n_pts=len(X)
+    if n_pts==1:
       return inf
+    elif n_pts==2:
+      return nsm((nparr(X[0])-nparr(X[1]))**2)
     X=nparr(X)
     pair0=gen.choice(X.shape[0],X.shape[0])
     pair1=(pair0+1+gen.choice(X.shape[0]-1,X.shape[0]))%X.shape[0]
@@ -1136,22 +1119,21 @@ def min_dist(X,Y=None):
         h[x_r].append(x)
       else:
         h[x_r]=[x]
-    hi=[nparr(t) for t in h]
+    h_tups_arrs=[(t,nparr(t)) for t in h]
     for i in range(X.shape[1]):
-      hi=sorted(hi,key=lambda x:x[i])
-    h_moore={k:[]+v for k,v in h.items()}
-    n_boxes=len(hi)
-    for i,k in enumerate(hi):#Have to go over everything in Moore nhood
-      k_tup=tuple(k)
-      for j in range(i+1,n_boxes):
-        j_arr=hi[j]
-        j_tup=tuple(j_arr)
-        if nmx(abs(k-j_arr))>1:
+      h_tups_arrs.sort(key=lambda x:x[0][i]) #stable sort so get nearby pts
+    h_moore={k:[v] for k,v in h.items()}
+    n_neighbs=len(h_tups_arrs)
+    for i,(i_tup,i_arr) in enumerate(h_tups_arrs):#Check Moore nhoods
+      for j in range(i+1,n_neighbs):
+        j_tup,j_arr=h_tups_arrs[j]
+        if nmx(abs(i_arr-j_arr))>1:
           break
-        h_moore[k_tup]+=h[j_tup]
-        h_moore[j_tup]+=h[k_tup]
-    for k in hi:
-      ret=min(ret,min_dist(h_moore[tuple(k)]))
+        h_moore[i_tup].append(h[j_tup])
+        h_moore[j_tup].append(h[i_tup])
+    moore_neighbs=[sum(s,[]) for s in h_moore.values()]
+    for v in moore_neighbs:
+      ret=min(ret,min_dist(v))
       if not ret:
         return ret
     return ret

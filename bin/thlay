@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 from pickle import load
 from time import perf_counter
+from numpy import sum as nsm
 from jax.numpy import exp,sin
 from jax.random import key,split
 from jax.profiler import save_device_memory_profile
@@ -105,8 +106,6 @@ while True:
                             1 if a.iterate_minority else e.p,
                             sm=a.softmax_U_V,p_scale=a.p_scale)
       get_timestep('U,V')
-      if not a.step%10:
-        save_device_memory_profile("memory.prof")
 
       upd=dlosses[a.loss](e.w_model,x,y_t,e.U,e.V,act=act)#,
                           #normalisation=a.normalisation_factors)
