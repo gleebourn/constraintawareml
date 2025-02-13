@@ -17,6 +17,7 @@ from jax.numpy import array,vectorize,zeros,log,log10,flip,maximum,minimum,\
                       concat,exp,ones,linspace,array_split,reshape,corrcoef,\
                       concatenate,unique,cov,expand_dims,identity,diag,average,\
                       sum as jsm,max as jmx
+from jax.numpy.linalg import svdvals
 from jax.scipy.signal import convolve
 from jax.nn import tanh,softmax
 from jax import grad,value_and_grad,jit
@@ -197,6 +198,27 @@ def resnet_unbatched(A,B,x,act=tanh):
     x+=act(a@x+b)
   return x # final layer: sum components, check + or -.
 resnet=vectorize(resnet_unbatched,excluded=[0,1],signature='(m)->(m)')
+
+#Default: force two directions of growth,values specified are logarithmic
+def svd_cost(A,B,x,act=tanh,top_growth=array([2,1]),imp=resnet,
+             eps=1e-8,dimension=4,vol_growth=0.):
+  if dimension is None: dimension=x.shape[1]
+  iden=identity(x_dim)
+  sqs=jsm(x**2,axis=1)
+  dists_init=sqs+expand_dims(sqs,-1)-2*x@x.T
+  x=imp(A,B,x)
+  sqs=jsm(x**2,axis=1)
+  dists_final=sqs+expand_dims(sqs,-1)-2*x@x.T
+  distortion=dists_final/(dists_init+iden)
+  growth=log(svdvals(distortion)[:dimension])
+  return (top_growth-growth[:len(top_growth)])**2+(jsm(growth)-vol_growth)**2
+
+def metric_cost(A,B,x,y,act=tanh,imp=resnet,target_dists=None):
+  if target_dists==None:
+    target_dists=y^expand_dims(y,-1).T
+  x=imp(A,B,x)
+  sqs=jsm(x**2,axis=1)
+  return jsm(((sqs+expand_dims(sqs,-1)-2*x@x.T)-target_dists)**2)
 
 def coalescence_cost(A,B,x,y,U,V,act=tanh,tol=1e-4):
   bs=len(y)
@@ -381,6 +403,8 @@ def nn_pca_loss(w_c,b_c,w_e,b_e,x,x_targ,eps=1e-8):
   l+=jsm((x_p-x_targ)**2)
   return l#log(jsm(w_c[-1]@w_c[-1].T)))
 
+dmetric_cost=value_and_grad(metric_cost,argnums=[0,1])
+dsvd_cost=value_and_grad(svd_cost,argnums=[0,1])
 dl1=value_and_grad(l1,argnums=[0,1])
 dresnet_cost=value_and_grad(resnet_cost,argnums=[0,1])
 dresnet_cost_layer=value_and_grad(resnet_cost_layer,argnums=[3,4])
