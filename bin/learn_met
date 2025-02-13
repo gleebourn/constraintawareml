@@ -13,10 +13,10 @@ from scipy.spatial import KDTree
 
 from matplotlib.pyplot import hist,plot,title,legend,show
 
-from jax.numpy import zeros
+from jax.numpy import zeros,expand_dims
 from jax.nn import tanh,softmax
-from jax.random import key,split,permutation#,uniform
-from numpy import unique,var,arange,array as nparr,concatenate,array_split,exp,\
+from jax.random import key,split,permutation,choice#,uniform
+from numpy import unique,var,arange,array as nparr,array_split,exp,log10,\
                   min as nmn,sum as nsm,round as rnd
 
 
@@ -35,6 +35,8 @@ print('p_train,p_test:',p_train,',',p_test)
 
 x_train_p=nparr(x_train[y_train])
 x_train_n=nparr(x_train[~y_train])
+x_test_p=nparr(x_test[y_test])
+x_test_n=nparr(x_test[~y_test])
 #x_train_p_unique=unique(x_train_p)
 #x_train_n_unique=unique(x_train_n)
 
@@ -68,8 +70,8 @@ x_train_n=nparr(x_train[~y_train])
 #  for i in range(n_steps):
 
 e=SimpleNamespace(w_model=([],[]),w_l2=0.,dw_l2=0.,adam_V=([],[]),target_dist_prop=.1,
-                  adam_M=0.,lr=1e-2,min_dist_tolerance=1e-8,target_dist=.1)
-a=SimpleNamespace(adam=True,gamma1=.1,gamma2=.001,step=0,lr=1e-2,target_n_layers=10,
+                  adam_M=0.,lr=1e-2,min_dist_tol=1e-8,target_dist=.1)
+a=SimpleNamespace(adam=True,gamma1=.1,gamma2=.001,step=0,lr=1e-2,target_n_layers=50,
                   bs=128,subpoch_num=0,memlen=100,target_separation=10)
 n_pos=len(x_train_p)
 width=x_train_p.shape[1]
@@ -85,7 +87,7 @@ n_train_p_subpoch=n_train_p//subpoch_fraction #no change in training class imbal
 subpoch_offset_p_next=n_train
 subpoch_offset_n_next=n_train
 while True:
-  k0,k1=split(k0)
+  k0,k1,k2,k3=split(k0,4)
   print('Adding a new layer...')
   e.w_model[0].append(zeros((width,width)))
   e.w_model[1].append(zeros((width,)))
@@ -102,6 +104,7 @@ while True:
   x_train_p_selected=x_train_p[subpoch_offset_p:subpoch_offset_p_next]
   x_train_n_selected=x_train_n[subpoch_offset_n:subpoch_offset_n_next]
 
+  cont_score=exp_score=1
   for starting_layer in reversed(range(len(e.w_model[0]))):
     target_exp=a.target_separation
     target_exp**=((len(e.w_model[0])-starting_layer)/(2*a.target_n_layers))
@@ -117,19 +120,25 @@ while True:
     print('...complete')
 
     while True:
+      e.target_dist/=1.1
       print('Finding distances under',e.target_dist,'between opposite classes...')
       ijv=e.kdtp.sparse_distance_matrix(e.kdtn,e.target_dist,output_type='ndarray')
       lijv=len(ijv)
       print('Found',lijv,'pairs...')
-      if(lijv>=n_train//2):
-        print('Taking at most n_train of them.')
+      print('Unique points: +:',len(unique(ijv['i'])),'-:',len(unique(ijv['j'])))
+      if lijv<n_train//2:
+        e.target_dist*=1.2
+        print('Too few pairs found, want more than half the target (',
+              n_train,')!  Trying again')
+      elif lijv>2*n_train:
+        e.target_dist/=1.1
+        print('Too many pairs found, want less than twice the target (',
+              n_train,')!  Trying again')
+      else:
+        print('Taking at most n_train=',n_train,' of them.')
         ijv=ijv[ijv['v'].argsort()][:n_train]
         n_rows_subpoch=len(ijv)
-        print('Next time: target distance',e.target_dist)
         break
-      e.target_dist*=min(2,max(.75,n_train/(1+lijv)))
-      print('Too few pairs found, less than half the target (',n_train,
-            ')!  Trying again with target distance',e.target_dist)
     n_train_subpoch=len(ijv)
     p_subpoch=z_train_p[ijv['i']]
     n_subpoch=z_train_n[ijv['j']]
@@ -140,9 +149,9 @@ while True:
     p_nn=z_train_p[i_p_nn].reshape(p_subpoch.shape)
     n_nn=z_train_n[i_n_nn].reshape(p_subpoch.shape)
     if read_input_if_ready():
-      hist(dists_subpoch,bins=50,label='minimal distances between classes')
-      hist(d_p_nn,bins=50,label='minimal distances within + class')
-      hist(d_n_nn,bins=50,label='minimal distances within - class')
+      hist(dists_subpoch,bins=50,label='minimal distances between classes',alpha=.4)
+      hist(d_p_nn,bins=50,label='minimal distances within + class',alpha=.4)
+      hist(d_n_nn,bins=50,label='minimal distances within - class',alpha=.4)
       legend()
       title('Distributions of nearest neighbours within '+str(e.target_dist)+\
             ' of the other class after '+str(starting_layer)+' layers')
@@ -152,17 +161,17 @@ while True:
     #Iterate the algorithm for positive and negative classes
     offset=0
     next_offset=a.bs
-    subpoch_step=0
     for a_subpoch,b_subpoch,nn in [(p_subpoch,n_subpoch,p_nn),
                                    (n_subpoch,p_subpoch,n_nn)]:
       #Want to expand away from other class and contract within the class.
+      subpoch_step=0
       costs_exp=cyc(a.memlen)
       costs_cont=cyc(a.memlen)
       while next_offset<n_rows_subpoch:
         a_batch=a_subpoch[offset:next_offset]
-        if dists_subpoch[offset]<e.min_dist_tolerance:
+        if dists_subpoch[offset]<e.min_dist_tol:
           print('Skipping very small distance (',dists_subpoch[offset],
-                '<',e.min_dist_tolerance,')...')
+                '<',e.min_dist_tol,')...')
           continue
         c_exp,upd_exp=dnn_cost_expansion(e.w_model[0][starting_layer:],
                                      e.w_model[1][starting_layer:],
@@ -176,9 +185,12 @@ while True:
         costs_cont[subpoch_step]=c_cont
         avg_cont=costs_cont.avg()/a.bs
         avg_exp=costs_exp.avg()/a.bs
-        cont_score=exp(avg_cont/target_cont-1)
-        exp_score=exp(1-target_exp/avg_exp)
-        if cont_score<1 and exp_score<1:
+        cont_score=(avg_cont/target_cont-1)/(1/target_cont-1)
+        exp_score=(1-avg_exp/target_exp)/(1-1/target_exp)
+        if cont_score<0 and exp_score<0 and subpoch_step>200:
+          print('Met contraction and expansion targets after',subpoch_step,'steps:')
+          print('Average expansion:',avg_exp)
+          print('Average contraction:',avg_cont)
           break
         s,t=softmax(nparr([cont_score,exp_score]))
         upd=([s*ac+t*ae for ac,ae in zip(upd_cont[0],upd_exp[0])],
@@ -195,10 +207,49 @@ while True:
                      zip(e.w_model[0],e.w_model[1])]))
           if not a.step%1000:
             with open('metlearn.pkl','wb') as fd: dump((e,a),fd)
+          l=read_input_if_ready()
+          if 'v' in l:
+            n_pos_vis=int(1000*p_test)
+            n_neg_vis=1000-n_pos_vis
+            x_p_vis=choice(k2,x_test_p,(n_pos_vis,))
+            x_n_vis=choice(k2,x_test_n,(n_neg_vis,))
+            x_p_sq=nsm(x_p_vis**2,axis=1)
+            x_n_sq=nsm(x_n_vis**2,axis=1)
+            d_pp_init=x_p_sq+expand_dims(x_p_sq,-1)-2*x_p_vis@x_p_vis.T
+            d_nn_init=x_n_sq+expand_dims(x_n_sq,-1)-2*x_n_vis@x_n_vis.T
+            d_pn_init=nsm((expand_dims(x_p_vis,0)-expand_dims(x_n_vis,1))**2,axis=2)
+            z_p=resnet(*e.w_model,x_p_vis)
+            z_n=resnet(*e.w_model,x_n_vis)
+            z_p_sq=nsm(z_p**2,axis=1)
+            z_n_sq=nsm(z_n**2,axis=1)
+            d_pp_fin=z_p_sq+expand_dims(z_p_sq,-1)-2*z_p@z_p.T
+            d_nn_fin=z_n_sq+expand_dims(z_n_sq,-1)-2*z_n@z_n.T
+            d_pn_fin=nsm((expand_dims(z_p,0)-expand_dims(z_n,1))**2,axis=2)
+            delta_pp=log10(e.min_dist_tol+d_pp_fin)-log10(e.min_dist_tol+d_pp_init)
+            delta_pn=log10(e.min_dist_tol+d_pn_fin)-log10(e.min_dist_tol+d_pn_init)
+            delta_nn=log10(e.min_dist_tol+d_nn_fin)-log10(e.min_dist_tol+d_nn_init)
+            hist(delta_pp.flatten(),bins=50,label='log change in distances within +')
+            hist(delta_nn.flatten(),bins=50,label='log change in distances within -')
+            hist(delta_pn.flatten(),bins=50,
+                 label='log change in distances between + and -')
+            legend()
+            show()
         a.step+=1
         subpoch_step+=1
         offset=next_offset
         next_offset+=a.bs
+
+    cont_score_not_met='' if cont_score<0 else 'contraction '
+    exp_score_not_met='' if exp_score<0 else ' expansion'
+    if cont_score_not_met or exp_score_not_met:
+      a.target_n_layers+=1
+      print('Missed scores:',
+            (cont_score_not_met+exp_score_not_met).replace('  ',',').replace(' ',''))
+      print('Incremented # target layers to',a.target_layers,'...')
+    elif subpoch_step<n_train/(4*a.bs):
+      a.target_n_layers-=1
+      print('Attained target after only',subpoch_step,
+            'steps, decrementing # target layers to',a.target_n_layers)
 
   
   subpoch_offset_p=subpoch_offset_p_next
