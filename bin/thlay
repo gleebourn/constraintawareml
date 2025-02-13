@@ -2,12 +2,11 @@
 from pickle import load
 from time import perf_counter
 from numpy import sum as nsm
-from jax.numpy import exp,sin
-from jax.random import key,split
+from jax.numpy import exp,sin,inf
+from jax.random import key,split,choice
 from jax.profiler import save_device_memory_profile
 from sys import path,stdin
 from os import mkdir,environ
-from select import select
 #environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
 #environ["XLA_PYTHON_CLIENT_MEM_FRACTION"]=".99"
 #environ["XLA_PYTHON_CLIENT_ALLOCATOR"]="platform"
@@ -17,7 +16,8 @@ from sys import path
 path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import init_ensemble,init_experiments,activations,f_to_str,save_ensemble,\
                       exp_to_str,fpfnp_lab,f,dlosses,get_xy,report_progress,update_lrs,\
-                      evaluate_fp_fn,update_history,compute_U_V,update_weights
+                      evaluate_fp_fn,update_history,compute_U_V,update_weights,resnet,\
+                      read_input_if_ready
 
 a=init_ensemble()
 
@@ -93,7 +93,10 @@ while True:
     get_timestep('start_loop')
     n_its=e.p_its if a.iterate_minority else 1
     for _ in range(n_its): #when force_batch_cost
-      y_p=f(e.w_model,x,act=act).flatten()>0
+      if a.resnet:
+        y_p=resnet(e.w_model[0],e.w_model[1],x,act=act).flatten()>0
+      else:
+        y_p=f(e.w_model[0],e.w_model[1],x,act=act).flatten()>0
       get_timestep('threshold')
 
       evaluate_fp_fn(e,y_p,y_t)
@@ -104,12 +107,32 @@ while True:
       else:
         e.U,e.V=compute_U_V(e.fp,e.fn,e.target_fp,e.target_fn,
                             1 if a.iterate_minority else e.p,
-                            sm=a.softmax_U_V,p_scale=a.p_scale)
+                            sm=a.softmax_U_V,p_scale=a.p_scale,
+                            scale_before_sm=a.scale_before_sm)
       get_timestep('U,V')
 
-      upd=dlosses[a.loss](e.w_model,x,y_t,e.U,e.V,act=act)#,
-                          #normalisation=a.normalisation_factors)
+      if a.single_layer_upd:
+        ind=int(choice(emit_key(),a.resnet-1))
+        e.loss_val,(a_upd,b_upd)=dlosses[a.loss](e.w_model[0],e.w_model[1],ind,a.zersq,
+                                                 a.zerarr,x,y_t,e.U,e.V,act=act)
+        start_zeros=[0.]*(ind)
+        end_zeros=[0.]*(a.resnet-ind-2)
+        e.loss_val,upd=(start_zeros+[a_upd]+end_zeros,start_zeros+[b_upd]+end_zeros)
+      elif a.loss=='distribution_flow_cost':
+        e.loss_val,upd=dlosses['distribution_flow_cost'](e.w_model[0],e.w_model[1],
+                                                         x,y_t,e.U,e.V,e.w_init,act=act)
+      else:
+        e.loss_val,upd=dlosses[a.loss](e.w_model[0],e.w_model[1],x,y_t,e.U,e.V,act=act)#,
+      e.loss_vals[e.step-1]=float(e.loss_val)
+
       get_timestep('dloss')
+      if a.loss=='distribution_flow_cost':
+        avg_loss=e.loss_vals.avg()
+        if avg_loss<e.loss_target:
+          print('Updating start and end params for loss')
+          e.w_init-=e.w_init*e.lr
+          e.loss_target=(1-e.lr)*avg_loss
+          print('w_init,loss_target:',e.w_init,e.loss_target)
 
       update_weights(a,e,upd)
       get_timestep('update_weights')
@@ -122,7 +145,7 @@ while True:
                                                         (not e.steps_to_target)],
                            emit_key())
 
-  line=stdin.readline().lower() if stdin in select([stdin],[],[],0)[0] else ''
+  line=read_input_if_ready()
 
   if not a.step%a.saving_interval:
     save_ensemble(a,experiments,global_key)

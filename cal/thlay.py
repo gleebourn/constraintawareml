@@ -2,22 +2,24 @@ from argparse import ArgumentParser
 from pickle import load,dump
 from types import SimpleNamespace
 from csv import writer
-from itertools import cycle
 from os.path import isdir,isfile
 from os import mkdir,listdir
 from io import BytesIO
 from urllib.request import urlopen
 from zipfile import ZipFile
 from pathlib import Path
+from select import select
+from sys import stdin
 from numpy import inf,unique as npunique,array as nparr,min as nmn,\
                   max as nmx,sum as nsm,log10 as npl10,round as rnd
 from numpy.random import default_rng #Only used for deterministic routines
-from jax.numpy import array,vectorize,zeros,log,log10,flip,maximum,minimum,concat,exp,\
-                      ones,linspace,array_split,reshape,concatenate,unique,\
+from jax.numpy import array,vectorize,zeros,log,log10,flip,maximum,minimum,\
+                      concat,exp,ones,linspace,array_split,reshape,corrcoef,\
+                      concatenate,unique,cov,expand_dims,identity,diag,average,\
                       sum as jsm,max as jmx
 from jax.scipy.signal import convolve
 from jax.nn import tanh,softmax
-from jax import grad,jit
+from jax import grad,value_and_grad,jit
 from jax.random import uniform,normal,split,key,choice,binomial,permutation
 from sklearn.utils.extmath import cartesian
 from pandas import read_csv
@@ -27,12 +29,16 @@ from matplotlib.patches import Patch
 from matplotlib.cm import jet
 from pandas import read_pickle,read_parquet,concat,get_dummies
 
+def read_input_if_ready():
+  return stdin.readline().lower() if stdin in select([stdin],[],[],0)[0] else ''
+
 leg=lambda t=None,h=None,l='upper right':legend(fontsize='x-small',loc=l,
                                                 handles=h,title=t)
 class cyc:
   def __init__(self,n,x0=1):
     self.list=[x0]*n
     self.n=n
+    self.max_accessed=1
 
   def __getitem__(self,k):
     if isinstance(k,slice):
@@ -41,9 +47,10 @@ class cyc:
 
   def __setitem__(self,k,v):
     self.list[k%self.n]=v
+    self.max_accessed=min(k+1,self.n)
 
   def avg(self):
-    return sum(self.list)/self.n
+    return sum(self.list[:self.max_accessed])/self.max_accessed
 
 def init_ensemble():
   ap=ArgumentParser()
@@ -52,7 +59,11 @@ def init_ensemble():
                            'unsw','gmm','mnist','rbd24'])
   ap.add_argument('-no_U_V',action='store_true')
   ap.add_argument('-epochs',action='store_true')
+  ap.add_argument('-resnet',default=0,type=int)
+  ap.add_argument('-nnpca',action='store_true')
+  ap.add_argument('-single_layer_upd',action='store_true')
   ap.add_argument('-p_scale',default=.5,type=float)
+  ap.add_argument('-scale_before_sm',action='store_true')
   ap.add_argument('-softmax_U_V',action='store_true')
   ap.add_argument('-window_avg',action='store_true')
   ap.add_argument('-n_gaussians',default=4,type=int)
@@ -121,6 +132,18 @@ def init_ensemble():
   a=ap.parse_args()
   a.report_dir=a.outf+'_report'
   a.n_imb=len(a.imbalances)
+  if a.resnet and a.loss not in ['resnet_cost','resnet_cost_layer',
+                                 'coalescence_res_cost']:
+    if a.single_layer_upd:
+      a.loss='resnet_cost_layer'
+    else:
+      a.loss='resnet_cost'
+  elif a.nnpca:
+    a.loss='nn_pca_loss'
+  elif a.loss=='distribution_flow_cost':
+    a.w_init=1.
+    a.target_increment=.9
+
   a.glorot_uniform=(not a.no_glorot_uniform) and (not a.glorot_normal)
   a.stop_on_target=not a.no_stop_on_target
   a.gmm_compensate_variances=not a.no_gmm_compensate_variances
@@ -160,52 +183,221 @@ even_indices=lambda arr:[v for i,v in enumerate(arr) if not i%2]
 def relu(x):return minimum(1,maximum(-1,x))
 
 @jit
-def f_unbatched(w,x,act=tanh):
-  for a,b in zip(w[0],w[1]):
-    x=act(x.dot(a)+b)
+def f_unbatched(A,B,x,act=tanh):
+  for a,b in zip(A,B):
+    x=act(x@a+b)
   return x
-f=vectorize(f_unbatched,excluded=[0],signature='(m)->(n)')
+f=vectorize(f_unbatched,excluded=[0,1],signature='(m)->(n)')
 
-def resnet_unbatched(w,x,act=tanh):
-  for a,b in zip(w[0],w[1]):
-    x+=act(x.dot(a)+b)
-  return x
-resnet=vectorize(resnet_unbatched,excluded=[0],signature='(m)->(m)')
+def resnet_unbatched(A,B,x,act=tanh):
+  for a,b in zip(A,B):
+    x+=act(a@x+b)
+  return x # final layer: sum components, check + or -.
+resnet=vectorize(resnet_unbatched,excluded=[0,1],signature='(m)->(m)')
 
-def l1_soft(w,x,y,U,V,softness=.1,act=tanh):
-  y_smooth=f(w,x,act=act)
+def coalescence_cost(A,B,x,y,U,V,act=tanh,tol=1e-4):
+  bs=len(y)
+  iden=identity(bs)
+  n_pos=jsm(y)
+  n_neg=bs-n_pos
+  target_expansion=0
+  yT=expand_dims(y,-1)
+  ny=~y
+  if n_pos and n_neg:
+    target_expansion=(U*n_neg/n_pos+V*n_pos/n_neg)*(y^yT)
+  target_growth=target_expansion-U*(~(y|yT))-V*(y&yT)+diag(ny*U+y*V)
+  sqs=jsm(x**2,axis=1)
+  old_ldists=log(iden+tol+sqs+expand_dims(sqs,-1)-2*x@x.T)
+  ret=0.
+  for a,b in zip(A,B):
+    x=act(x@a+b)
+    iden=identity(bs)
+    sqs=jsm(x**2,axis=1)
+    dists=iden+tol+sqs+expand_dims(sqs,-1)-2*x@x.T
+    ldists=log(dists)
+    ret+=jsm((old_ldists-ldists)*target_growth/dists) #Don't worry so much about far pts
+    old_ldists=ldists
+  return (ret+y@log(tol+1-x)+ny@log(tol+1+x))[0]
+
+def nn_cost_expansion(A,B,xp,xn,contraction=False,act=tanh,tol=1e-2,imp=f):
+  ret=0.
+  dists_init=jsm((xp-xn)**2,axis=1)
+  xp,xn=imp(A,B,xp,act=act),imp(A,B,xn,act=act)
+  dists_final=jsm((xp-xn)**2,axis=1)
+  expansion=jsm((tol+dists_final)/(tol+dists_init))
+  return expansion if contraction else -expansion
+
+'''
+def nn_cost_contraction(A,B,x,act=tanh,tol=1e-8,imp=f):
+  ret=0.
+  dists_init=jsm((expand_dims(x,axis=0)-expand_dims(x,axis=1))**2,axis=2)
+  x=imp(A,B,xp,act=act)
+  dists_final=jsm((expand_dims(x,axis=0)-expand_dims(x,axis=1))**2,axis=2)
+  return jsm(dists_final/dists_init)/len(x)
+'''
+
+def coalescence_res_cost(A,B,x,y,U,V,act=tanh,tol=1e-2):
+  bs=len(y)
+  #l=1/len(A)
+  iden=identity(bs)
+  n_pos=jsm(y)
+  n_neg=bs-n_pos
+  target_expansion=0
+  yT=expand_dims(y,-1)
+  ny=~y
+  #if n_pos and n_neg:
+  r=1.#U*n_neg/(1+n_pos)+V*n_pos/(1+n_neg)
+  norm=(n_pos*(n_pos-1)*V**2+n_neg*(n_neg-1)*U**2+2*n_pos*n_neg*r)**.5
+  u=U/norm
+  v=V/norm
+  r/=norm
+  #target_growth=#((y^yT)-U*(~(y|yT))-V*(y&yT)+diag(ny*U+y*V))/\
+  #target_growth=r*(y^yT)-u*(~(y|yT))-v*(y&yT)+diag(ny*u+y*v)
+  target_lyap=-r*(y^yT)+u*(~(y|yT))+v*(y&yT)+diag(ny*u+y*v)
+  #target_growth=(1.*(y^yT)-1.*(y==yT)+iden)/(bs*(bs-1))**.5
+  ret=0.
+  sqs=jsm(x**2,axis=1)
+  old_ldists=log(tol+sqs+expand_dims(sqs,-1)-2*x@x.T)
+  for a,b in zip(A,B):
+    dx=act(x@a+b)
+    x+=dx
+    sqs=jsm(x**2,axis=1)
+    dists=sqs+expand_dims(sqs,-1)-2*x@x.T
+    similarities=exp(-dists)#+iden)#tol
+    ldists=log(tol+dists)
+    #ret+=jsm((dx@dx.T-target_growth)**2) #same class->similar directions
+    #xdx=x@dx.T # 
+    #ret+=jsm((((1-iden)*(-xdx-xdx.T)-target_growth)**2)/dists)
+    #delx=(-xdx-xdx.T)/dists
+    #delx=-xdx/dists #>0 when dist growing, roughly
+    #ret+=log(tol+(jsm(delx**2)-jsm(delx*target_growth)**2))
+    #grow_dirs=xdx*target_direction
+    #grow_dirs/=tol+jsm(xdx**2)**.5
+    ret+=jsm(target_lyap*(ldists-old_ldists)/similarities)
+    old_ldists=ldists
+  #x=act(jsm(x,axis=1))
+  return ret+jsm(V*y@(tol+1-x)+U*ny@(tol+1+x))
+  #return log(1+ret)+jsm(V*y*(1-x)+U*ny*(1+x))
+
+def distribution_flow_cost(A,B,x,y,U,V,w_init,act=tanh,tol=1e-8):
+  ret=0.
+  n=len(A)
+  bs=len(y)
+  n_pos=jsm(y)
+  n_neg=bs-n_pos
+  end_dim=len(B[-1])
+  end_dists=log(2)*(y!=expand_dims(y,-1))
+  end_l2=(n_pos**2+n_neg**2)*log(2)**2
+
+  sqs=jsm(x**2,axis=1)
+  init_dists=log(1+sqs+expand_dims(sqs,-1)-2*x@x.T)
+  #init_l2=jsm(init_dists)**.5
+  init_l2=jsm(init_dists**2)
+  #init_dists**=.5
+  UV_mask=U*(~y)+V*y
+  UV_mask=UV_mask*expand_dims(UV_mask,-1)
+  for i,(a,b) in enumerate(zip(A,B)):
+    x=act(x@a+b)
+    sqs=jsm(x**2,axis=1)
+    dists=log(1+sqs+expand_dims(sqs,-1)-2*x@x.T)
+    dists_l2=jsm(dists**2)
+    dec=tol**(i/n)
+    #ret+=w_init*dec*log(1+init_l2*dists_l2-jsm(dists*init_dists)**2)
+    ret+=w_init*dec*jsm((dists-init_dists)**2)
+    #dists*=UV_mask
+    #dists_l2=jsm(dists**2)
+    #ret+=(1-w_init)*(tol/dec)*log(1+end_l2*dists_l2-jsm(dists*end_dists)**2)
+    ret+=(1-w_init)*(tol/dec)*jsm(UV_mask*(dists-end_dists)**2)
+  return ret/n+(1-w_init)*jsm(U*(~y)*(1+x)+V*y*(1-x))
+
+def resnet_cost(A,B,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
+  c=0
+  n=len(A)
+  UmV=y*(U+V)-U #weight positives and negatives by importance
+  for a,b in zip(A,B):
+    dx=act(x@a.T+b)
+    #sg_dx=dx.T*UmV
+    sg_dx=dx.T*(2*y-1)
+    #c-=log(eps+jsm(sg_dx.T@sg_dx)) #force + and - difference direction correlations
+    #c-=log(eps+jsm(sg_dx.T@sg_dx))
+    #c-=jsm(log(1+eps+sg_dx.T@sg_dx))
+    #c-=jsm(sg_dx.T@sg_dx)
+    x+=dx
+  return c-jsm(UmV*x.T) # final layer: sum components, check + or -.
+
+def resnet_cost_layer(A,B,i,c,d,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
+  ret=0.
+  UmV=y*(U+V)-U
+  for j,(a,b) in enumerate(zip(A,B)):
+    if i==j:
+      dx=act(x@(a.T+c.T)+b+d)
+    else:
+      dx=act(x@a.T+b)
+    sg_dx=dx.T*(2*y-1)#UmV
+    #sg_dx=dx.T*(2*y-1)
+    #c-=log(eps+jsm(sg_dx.T@sg_dx))
+    #c-=log(eps+jsm(sg_dx.T@sg_dx))
+    #c-=jsm(log(1+eps+sg_dx.T@sg_dx))
+    #ret-=jsm(sg_dx.T@sg_dx)#/jsm(dx.T@dx)
+    ret-=jsm(log(1+eps+sg_dx.T@sg_dx))
+    x+=dx
+  return ret-jsm(UmV*x.T)
+
+def l1_soft(A,B,x,y,U,V,softness=.1,act=tanh):
+  y_smooth=f(A,B,x,act=act)
   a_p,a_n=y_smooth[y],y_smooth[~y]
   cts_fp=jsm(1.+a_n)
   cts_fn=jsm(1.-a_p)
   return U*cts_fp+V*cts_fn
 
-def l1(w,x,y,U,V,act=tanh):
-  return l1_soft(w,x,y,U,V,0.,act)
+def l1(A,B,x,y,U,V,act=tanh):
+  return l1_soft(A,B,x,y,U,V,0.,act)
 
-def cross_entropy(w,x,y,U,V,act=tanh,eps=1e-8):
-  y_smooth=f(w,x,act=act)
+def cross_entropy(A,B,x,y,U,V,act=tanh,eps=1e-8):
+  y_smooth=f(A,B,x,act=act)
   a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
   cts_fn=-jsm(log(eps+1.+a_p)) #y=1 => H(y,y')=-log(y'')=-log((1+y')/2)
   cts_fp=-jsm(log(eps+1.-a_n)) #y=0 => H(y,y')=-log(1-y'')=-log((1-y')/2)
   return U*cts_fp+V*cts_fn
 
-def cross_entropy_soft(w,x,y,U,V,act=tanh,normalisation=False,softness=.1,eps=1e-8):
-  y_smooth=f(w,x,act=act)
+def cross_entropy_soft(A,B,x,y,U,V,act=tanh,normalisation=False,softness=.1,eps=1e-8):
+  y_smooth=f(A,B,x,act=act)
   a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
   cts_fn=-(1-softness)*jsm(log(eps+1.+a_p))-softness*jsm(log(eps+1.-a_p))
   cts_fp=-(1-softness)*jsm(log(eps+1.-a_n))-softness*jsm(log(eps+1.+a_n))
   return U*cts_fp+V*cts_fn
 
-dl1=grad(l1)
-dcross_entropy=grad(cross_entropy)
-dcross_entropy_soft=grad(cross_entropy_soft)
-dl1_soft=grad(l1_soft)
-dcross_entropy_soft=grad(cross_entropy_soft)
+def nn_pca_loss(w_c,b_c,w_e,b_e,x,x_targ,eps=1e-8):
+  x_c=f(w_c,b_c,x)
+  l=cov(x_c)
+  x_c_vars=var(x_c,axis=0)
+  #x_c_vars/=jsm(x_c_vars)
+  l+=jsm(x_c_vars[1:]/(eps+x_c_vars[:-1]))
+
+  x_p=f(w_e,b_e,x_c)
+  l+=jsm((x_p-x_targ)**2)
+  return l#log(jsm(w_c[-1]@w_c[-1].T)))
+
+dl1=value_and_grad(l1,argnums=[0,1])
+dresnet_cost=value_and_grad(resnet_cost,argnums=[0,1])
+dresnet_cost_layer=value_and_grad(resnet_cost_layer,argnums=[3,4])
+dcross_entropy=value_and_grad(cross_entropy,argnums=[0,1])
+dcross_entropy_soft=value_and_grad(cross_entropy_soft,argnums=[0,1])
+dl1_soft=value_and_grad(l1_soft,argnums=[0,1])
+ddistribution_flow_cost=value_and_grad(distribution_flow_cost,argnums=[0,1])
+dcoalescence_cost=value_and_grad(coalescence_cost,argnums=[0,1])
+dcoalescence_res_cost=value_and_grad(coalescence_res_cost,argnums=[0,1])
+#dnn_cost_contraction=value_and_grad(nn_cost_contraction,argnums=[0,1])
+dnn_cost_expansion=value_and_grad(nn_cost_expansion,argnums=[0,1])
 dlosses={'loss':dcross_entropy,'l1':dl1,'cross_entropy':dcross_entropy,
-         'l1_soft':dl1_soft,'cross_entropy_soft':dcross_entropy_soft}
+         'l1_soft':dl1_soft,'cross_entropy_soft':dcross_entropy_soft,
+         'resnet_cost':dresnet_cost,'resnet_cost_layer':dresnet_cost_layer,
+         'nn_pca_loss':nn_pca_loss,'distribution_flow_cost':ddistribution_flow_cost,
+         'coalescence_cost':dcoalescence_cost,
+         'coalescence_res_cost':dcoalescence_res_cost}
 
 def init_layers(k,layer_dimensions,sigma_w=1.,sigma_b=1.,
-                no_sqrt_normalise=False,resid=False,glorot_uniform=False,
+                no_sqrt_normalise=False,resnet=False,glorot_uniform=False,
                 glorot_normal=False,orthonormalise=False):
   k1,k2=split(k)
   wb=[]
@@ -215,7 +407,10 @@ def init_layers(k,layer_dimensions,sigma_w=1.,sigma_b=1.,
   a=[]
   b=[]
   for i,(k,l,d_i,d_o) in enumerate(zip(w_k,b_k,layer_dimensions,layer_dimensions[1:])):
-    if glorot_uniform:
+    if resnet:
+      a.append(zeros(shape=(d_i,d_o)))
+      b.append(zeros(shape=d_o))
+    elif glorot_uniform:
       a.append((2*(6/(d_i+d_o))**.5)*(uniform(shape=(d_i,d_o),key=k)-.5))
       b.append(zeros(shape=d_o))
     elif glorot_normal:
@@ -224,8 +419,6 @@ def init_layers(k,layer_dimensions,sigma_w=1.,sigma_b=1.,
     else:
       a.append(normal(shape=(d_i,d_o),key=k))
       b.append(normal(shape=d_o,key=l))
-  if glorot_uniform or glorot_normal:
-    return a,b
   #if orthonormalise:
   #  for r,d_i,d_o in zip(ret,layer_dimensions,layer_dimensions[1:]):
   #    if d_i>d_o:
@@ -273,12 +466,18 @@ def mk_experiment(p,thresh,fpfn_ratio,target_fn,lr,a):
 
   e.FPs=cyc(e.recent_memory_len,e.target_fp)
   e.FNs=cyc(e.recent_memory_len,e.target_fn)
+  e.loss_vals=cyc(e.recent_memory_len,1)#a.bs)
+  if a.loss=='distribution_flow_cost':
+    e.w_init=1.
+    e.loss_target=inf
+    e.loss_val=a.bs**2*a.model_inner_dims[-1]
   e.fp=(e.target_fp*.5)**.5
   e.fn=(target_fn*.5)**.5#.25 #softer start if a priori assume doing well
 
   e.U=e.V=1
   e.thresh=thresh
-  e.history=SimpleNamespace(FP=[],FN=[],lr=[],cost=[],w=[],dw=[],resolution=1,l=0)
+  e.history=SimpleNamespace(FP=[],FN=[],lr=[],cost=[],w=[],dw=[],loss_vals=[],
+                            resolution=1,l=0)
   return e
 
 def init_experiments(a,global_key):
@@ -328,10 +527,15 @@ def init_experiments(a,global_key):
   
     a.w_target=init_layers(k1,a.target_shape,a.target_sigma_w,a.target_sigma_b)
 
-  a.model_shape=[a.in_dim]+a.model_inner_dims+[1]
+  if a.resnet:
+    a.model_shape=[a.in_dim]*a.resnet
+    a.zersq=zeros((a.in_dim,a.in_dim))
+    a.zerarr=zeros(a.in_dim)
+  else:
+    a.model_shape=[a.in_dim]+a.model_inner_dims+[1]
 
   a.w_model_init=init_layers(k2,a.model_shape,sigma_w=a.model_sigma_w,
-                             sigma_b=a.model_sigma_b,resid=a.model_resid,
+                             sigma_b=a.model_sigma_b,resnet=a.resnet,
                              glorot_uniform=a.glorot_uniform,
                              no_sqrt_normalise=a.no_sqrt_normalise_w,
                              orthonormalise=a.orthonormalise)
@@ -351,7 +555,7 @@ def init_experiments(a,global_key):
                                     a.imbalance_min))
     x_thresholding=sample_x(thresholding_sample_size,k3)
     
-    y_t_cts=f(a.w_target,x_thresholding).flatten()
+    y_t_cts=f(a.w_target[0],a.w_target[1],x_thresholding).flatten()
     y_t_cts_sorted=y_t_cts.sort()
     a.thresholds={float(p):y_t_cts_sorted[-int(p*len(y_t_cts_sorted))]\
                   for p in a.imbalances}
@@ -450,7 +654,7 @@ def get_xy(a,imbs,bs,k):
     ret=dict()
     for p in imbs:
       x=sample_x(a.bs,k1)
-      ret[float(p)]=x,f(a.w_target,x).flatten()
+      ret[float(p)]=x,f(a.w_target[0],a.w_target[1],x).flatten()
 
   return ret[ret_single] if ret_single else ret
 
@@ -480,6 +684,7 @@ def update_history(e):
     e.history.w.append(e.w_l2)
     e.history.dw.append(e.dw_l2)
     e.history.cost.append(e.cost)
+    e.history.loss_vals.append(e.loss_val)
     e.history.l+=1
     if e.history.l>e.history_len:
       e.history.resolution*=2
@@ -488,6 +693,7 @@ def update_history(e):
       e.history.lr=even_indices(e.history.lr)
       e.history.cost=even_indices(e.history.cost)
       e.history.dw=even_indices(e.history.dw)
+      e.history.loss_vals=even_indices(e.history.loss_vals)
       e.history.l//=2
   if e.fp<e.target_tolerance*e.target_fp and\
      e.fn<e.target_tolerance*e.target_fn and\
@@ -495,7 +701,7 @@ def update_history(e):
        e.steps_to_target=e.step
     
 
-def compute_U_V(fp,fn,target_fp,target_fn,p,sm=False,p_scale=.5):
+def compute_U_V(fp,fn,target_fp,target_fn,p,sm=False,p_scale=.5,scale_before_sm=True):
   #e.p_empirical*=(1-min(e.fp_amnt,e.fn_amnt))
   #e.p_empirical+=(1-min(e.fp_amnt,e.fn_amnt))*jsm(e.y_t)/e.bs
   #U,V=log(1+fp/target_fp),log(1+fn/target_fn)
@@ -505,10 +711,14 @@ def compute_U_V(fp,fn,target_fp,target_fn,p,sm=False,p_scale=.5):
   #U,V=softmax(array([fp/target_fp,fn/target_fn]))
   #U,V=fp/target_fp,fn/target_fn
   if sm:
-    U,V=softmax(array([fp/target_fp,fn/target_fn]))
+    if scale_before_sm:
+      U,V=softmax(array([fp/target_fp,fn/(target_fn*p**p_scale)]))
+    else:
+      U,V=softmax(array([fp/target_fp,fn/target_fn]))
   else:
     U,V=fp/target_fp,fn/target_fn
-  V/=p**p_scale #scale dfn with the imbalance
+  if not scale_before_sm:
+    V/=p**p_scale #scale dfn with the imbalance
   nUV=U+V
   if nUV>0:
     U/=nUV
@@ -550,33 +760,37 @@ def update_lrs(a,experiments,k):
   a.lrs=array([e.lr for e in experiments])
   return experiments
 
-def update_weights(a,e,upd):
+def update_weights(a,e,upd,start=None,end=None):
+  offset=0 if start is None else start
   e.dw_l2=e.w_l2=0
+  adva=e.adam_V[0][start:end]
+  advb=e.adam_V[1][start:end]
+  #wmoda=e.w_model[0][start:end]
+  #wmodb=e.w_model[1][start:end]
   if a.adam:
     e.adam_M*=(1-a.gamma2)
-    for u,v,s,t in zip(upd[0],upd[1],e.adam_V[0],e.adam_V[1]):
-      s*=(1-a.gamma1)
-      t*=(1-a.gamma1)
-      s+=a.gamma1*u
-      t+=a.gamma1*v
+    for i,(u,v) in enumerate(zip(*upd)):
+      adva[i]*=(1-a.gamma1)
+      advb[i]*=(1-a.gamma1)
+      adva[i]+=a.gamma1*u
+      advb[i]+=a.gamma1*v
       e.adam_M+=a.gamma2*(nsm(u**2)+nsm(v**2))
     #for k in upd:
-    for (u,v,s,t) in zip(e.w_model[0],e.w_model[1],e.adam_V[0],e.adam_V[1]):
+    for i,(s,t) in enumerate(zip(adva,advb)):
       delta_u=e.lr*s/(e.adam_M**.5+1e-8)
       delta_v=e.lr*t/(e.adam_M**.5+1e-8)
-      u-=delta_u
-      v-=delta_v
-      ch_l2=nsm(delta_u**2)+nsm(delta_v**2)
-      weight_l2=nsm(u**2)+nsm(v**2)
-      e.w_l2+=weight_l2
-      e.dw_l2+=ch_l2
+      e.w_model[0][i+offset]-=delta_u
+      e.w_model[1][i+offset]-=delta_v
+      e.w_l2+=nsm(e.w_model[0][i+offset]**2)+\
+              nsm(e.w_model[0][i+offset]**2)
+      e.dw_l2+=nsm(delta_u**2)+nsm(delta_v**2)
   else:
-    for i in u,v,s,t in zip(e.w_model[0],e.w_model[1],upd[0],upd[1]):
+    for i,(s,t) in enumerate(zip(upd[0],upd[1])):
       delta_u=e.lr*s
       delta_v=e.lr*t
       e.dw_l2+=nsm(delta_u**2)+nsm(delta_v**2)
-      u-=delta_u
-      v-=delta_v
+      e.w_model[0][i+offset]-=delta_u
+      e.w_model[1][i+offset]-=delta_v
       e.w_l2+=nsm(u**2)+nsm(v**2)
 
 def plot_stopping_times(experiments,fd_tex,report_dir):
@@ -625,7 +839,8 @@ def plot_2d(experiments,fd_tex,a,act,line,k):
     x=cartesian([linspace(x_0_min,x_0_max,num=a.res),
                  linspace(x_1_min,x_1_max,num=a.res)])
     x_split=array_split(x,a.n_splits_img)
-    y_p=concat([(f(e.w_model,_x,act=act)>0).flatten() for _x in x_split])
+    y_p=concat([(f(e.w_model[0],e.w_model[1],
+                   _x,act=act)>0).flatten() for _x in x_split])
     y_p=flip(y_p.reshape(a.res,a.res),axis=1) #?!?!?!
 
     cm=None
@@ -638,7 +853,7 @@ def plot_2d(experiments,fd_tex,a,act,line,k):
       if a.mode=='gmm':
         regions=array([y_p,~y_p]).T
       else:
-        y_t=concat([f(a.w_target,_x)>e.thresh for _x in x_split])\
+        y_t=concat([f(a.w_target[0],a.w_target[1],_x)>e.thresh for _x in x_split])\
             .reshape(a.res,a.res)
         fp_img=(y_p&~y_t)
         fn_img=(~y_p&y_t)
@@ -652,7 +867,7 @@ def plot_2d(experiments,fd_tex,a,act,line,k):
     handles=[Patch(color=c,label=s) for c,s in zip(col_mat,labs)]
     if a.mode=='gmm':
       x_0,x_1=tuple(x_t.T)
-      y_p_s=f(e.w_model,x_t,act=act).flatten()>0
+      y_p_s=f(e.w_model[0],e.w_model[1],x_t,act=act).flatten()>0
       scatter(x_0[y_t&y_p_s],x_1[y_t&y_p_s],c='darkgreen',s=1,label='TP')
       scatter(x_0[y_t&~y_p_s],x_1[y_t&~y_p_s],c='palegreen',s=1,label='FP')
       scatter(x_0[~y_t&~y_p_s],x_1[~y_t&~y_p_s],c='cyan',s=1,label='TN')
@@ -765,6 +980,7 @@ def report_progress(a,experiments,line,act,k):
     print('Recent batches: FPs:',
           e.FPs[e.step-5:e.step],'FNs:',
           e.FNs[e.step-5:e.step])
+    print('Losses:',e.loss_vals[e.step-5:e.step])
 
   if ':' in line:
     l=line.split(':')
@@ -805,14 +1021,18 @@ def report_progress(a,experiments,line,act,k):
         print('target_fp_0,target_fn_0:',
               f_to_str(e.target_fp),f_to_str(e.target_fn))
         print('fp_train_0,fn_train_0:',
-              f_to_str(sum([nsm(f(e.w_model,x_train_neg[i:i+a.bs])>0) for\
+              f_to_str(sum([nsm(f(e.w_model[0],e.w_model[1],
+                                  x_train_neg[i:i+a.bs])>0) for\
                             i in range(0,len(x_train_neg),a.bs)])/len(a.x_train)),
-              f_to_str(sum([nsm(f(e.w_model,x_train_pos[i:i+a.bs])<=0) for\
+              f_to_str(sum([nsm(f(e.w_model[0],e.w_model[1],
+                                  x_train_pos[i:i+a.bs])<=0) for\
                             i in range(0,len(x_train_pos),a.bs)])/len(a.x_train)))
         print('fp_test_0,fn_test_0:',
-              f_to_str(sum([nsm(f(e.w_model,x_test_neg[i:i+a.bs])>0) for\
+              f_to_str(sum([nsm(f(e.w_model[0],e.w_model[1],
+                                  x_test_neg[i:i+a.bs])>0) for\
                             i in range(0,len(x_test_neg),a.bs)])/len(a.x_test)),
-              f_to_str(sum([nsm(f(e.w_model,x_test_pos[i:i+a.bs])<=0) for\
+              f_to_str(sum([nsm(f(e.w_model[0],e.w_model[1],
+                                  x_test_pos[i:i+a.bs])<=0) for\
                             i in range(0,len(x_test_pos),a.bs)])/len(a.x_test)))
       else:
         x_train_pos=a.x_train_pos
@@ -824,11 +1044,15 @@ def report_progress(a,experiments,line,act,k):
         print('target_fp_0,target_fn_0:',
               f_to_str((1-.1)*e.target_fp/(1-e.p)),f_to_str(.1*e.target_fn/e.p))
         print('fp_train_0,fn_train_0:',
-              f_to_str(nsm(f(e.w_model,x_train_neg)>0)/len(a.x_train)),
-              f_to_str(nsm(f(e.w_model,x_train_pos)<=0)/len(a.x_train)))
+              f_to_str(nsm(f(e.w_model[0],e.w_model[1],
+                             x_train_neg)>0)/len(a.x_train)),
+              f_to_str(nsm(f(e.w_model[0],e.w_model[1],
+                             x_train_pos)<=0)/len(a.x_train)))
         print('fp_test_0,fn_test_0:',
-              f_to_str(nsm(f(e.w_model,x_test_neg)>0)/len(a.x_test)),
-              f_to_str(nsm(f(e.w_model,x_test_pos)<=0)/len(a.x_test)))
+              f_to_str(nsm(f(e.w_model[0],e.w_model[1],
+                             x_test_neg)>0)/len(a.x_test)),
+              f_to_str(nsm(f(e.w_model[0],e.w_model[1],
+                             x_test_pos)<=0)/len(a.x_test)))
   if 'r' in line:
     line+='clist'
     a.report_dir=a.outf+'_report'
@@ -877,9 +1101,11 @@ def report_progress(a,experiments,line,act,k):
           if a.mode=='mnist':
             y_ones_test=a.y_test==1 #1 detector
 
-            report_fns.append(f_to_str(e.p*nsm(f(e.w_model,a.x_test_pos)<=0)/\
+            report_fns.append(f_to_str(e.p*nsm(f(e.w_model[0],e.w_model[1],
+                                                 a.x_test_pos)<=0)/\
                                        (.1*len(a.x_test))))
-            report_fps.append(f_to_str((1-e.p)*nsm(f(e.w_model,a.x_test_neg)>0)/\
+            report_fps.append(f_to_str((1-e.p)*nsm(f(e.w_model[0],e.w_model[1],
+                                                     a.x_test_neg)>0)/\
                                        ((1-.1)*len(a.x_test))))
           else:
             report_fps.append(f_to_str(sum(fp_hist)/(e.bs*len(fp_hist))))
@@ -971,7 +1197,12 @@ def dl_rbd24(data_dir=str(Path.home())+'/data',
   return rbd24_dir
 
 def rbd24(preproc=True,split_test_train=True,
-          raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl'):
+          raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl',
+          processed_pickle_file=str(Path.home())+'/data/rbd24/rbd24_proc.pkl'):
+  if split_test_train and preproc and isfile(processed_pickle_file):
+    print('Loading procesed pickle...')
+    with open(processed_pickle_file,'rb') as fd:
+      return load(fd)
   if isfile(raw_pickle_file):
     print('Loading raw pickle...')
     df=read_pickle(raw_pickle_file)
@@ -997,6 +1228,10 @@ def rbd24(preproc=True,split_test_train=True,
   split_point=int(l*.7)
   x_train,x_test=x[:split_point],x[split_point:]
   y_train,y_test=y[:split_point],y[split_point:]
+  if split_test_train and preproc:
+    print('Saving processed pickle...')
+    with open(processed_pickle_file,'wb') as fd:
+      dump(((x_train,y_train),(x_test,y_test),(df,x_cols)),fd)
   return (x_train,y_train),(x_test,y_test),(df,x_cols)
 
 def preproc_rbd24(df,split_test_train=True,rm_redundant=True,plot_xvals=False,
@@ -1050,21 +1285,39 @@ def plot_uniques(df):
 
 gen=default_rng(1729) #only used for deterministic algorithm so not a problem for reprod
 def min_dist(X,Y=None):
-  if Y:
-    if len(Y)==1 and len(X)==1:
-      return nsm((X[0]-Y[0])**2)
-    #Assume X bigger
+  if not Y is None:
+    ret_x_y=True
+    if len(Y)>len(X):
+      X,Y=Y,X
+      ret_x_y=False
+    if not len(Y):
+      return inf,None,None
+
     X=nparr(X)
     Y=nparr(Y)
+    if len(Y)==1:
+      m=inf
+      y=Y[0]
+      for x_cand in X:
+        m_cand=nsm((x_cand-y)**2)
+        if m_cand<m:
+          m,x=m_cand,x_cand
+          if not m:
+            return (m,x,y) if ret_x_y else (m,y,x)
+      return (m,x,y) if ret_x_y else (m,y,x)
+
     X_c=gen.choice(X,X.shape[0])
     Y_c=gen.choice(Y,X.shape[0])
     dists=nsm((X_c-Y_c)**2,axis=1)
-    ret=nmn(dists)
-    if not ret:
-      return ret
+    m=inf
+    for m_cand,x_cand,y_cand in zip(dists,X_c,Y_c):
+      if m_cand<m:
+        m,x,y=m_cand,x_cand,y_cand
+        if not m:
+          return (m,x,y) if ret_x_y else (m,y,x)
     h={}
-    X_r=rnd(X/ret)
-    Y_r=rnd(Y/ret)
+    X_r=rnd(X/m)
+    Y_r=rnd(Y/m)
     for x,x_r in zip(X,X_r):
       x_r=tuple(x_r)
       if x_r in h:
@@ -1078,41 +1331,50 @@ def min_dist(X,Y=None):
       else:
         h[x_r]=[],[y]
     h_tups_arrs=[(t,nparr(t)) for t in h]
+    n_neighbs=len(h_tups_arrs)
     for i in range(X.shape[1]):
       h_tups_arrs.sort(key=lambda x:x[0][i])
-    h_moore={k:([v[0]]+[],[v[1]]+[]) for k,v in h.items()}
-    n_neighbs=len(hi)
+    moore_neighbs={k:(list(v[0]),list(v[1])) for k,v in h.items()}
     for i,(i_tup,i_arr) in enumerate(h_tups_arrs):
       for j in range(i+1,n_neighbs):
         j_tup,j_arr=h_tups_arrs[j]
         if nmx(abs(i_arr-j_arr))>1:
           break
-        h_moore[i_tup][0].append(h[j_tup][0])
-        h_moore[i_tup][1].append(h[j_tup][1])
-        h_moore[j_tup][0].append(h[i_tup][0])
-        h_moore[j_tup][1].append(h[i_tup][1])
-    moore_neighbs=[(sum(s,[]),sum(t,[])) for s,t in h_moore.values()]
-    for v in moore_neighbs:
-      ret=min(ret,min_dist(*v))
-      if not ret:
-        return ret
-    return ret
+        moore_neighbs[i_tup][0].extend(h[j_tup][0])
+        moore_neighbs[i_tup][1].extend(h[j_tup][1])
+        moore_neighbs[j_tup][0].extend(h[i_tup][0])
+        moore_neighbs[j_tup][1].extend(h[i_tup][1])
+
+    m=inf
+    for v in moore_neighbs.values():
+      m_cand,x_cand,y_cand=min_dist(*v)
+      if m_cand<m:
+        x,y,m=x_cand,y_cand,m_cand
+      if not m:
+        return (m,x,y) if ret_x_y else (m,y,x)
+    return (m,x,y) if ret_x_y else (m,y,x)
 
   else:
     n_pts=len(X)
     if n_pts==1:
-      return inf
+      return inf,None,None
     elif n_pts==2:
-      return nsm((nparr(X[0])-nparr(X[1]))**2)
+      return nsm((nparr(X[0])-nparr(X[1]))**2),X[0],X[1]
     X=nparr(X)
     pair0=gen.choice(X.shape[0],X.shape[0])
     pair1=(pair0+1+gen.choice(X.shape[0]-1,X.shape[0]))%X.shape[0]
-    dists=nsm((X[pair0]-X[pair1])**2,axis=1)
-    ret=nmn(dists)
-    if not ret: #uh oh!
-      return ret
+    X_c0=X[pair0]
+    X_c1=X[pair1]
+    dists=nsm((X_c0-X_c1)**2,axis=1)
+    m=inf
+    for m_cand,x_cand,y_cand in zip(dists,X_c0,X_c1):
+      if m_cand<m:
+        m,x,y=m_cand,x_cand,y_cand
+        if not m: #uh oh!
+          return m,x,y
+
     h={}
-    X_r=rnd(X/ret).astype(int)
+    X_r=rnd(X/m).astype(int)
     for x,x_r in zip(X,X_r):
       x_r=tuple(x_r)
       if x_r in h:
@@ -1122,18 +1384,19 @@ def min_dist(X,Y=None):
     h_tups_arrs=[(t,nparr(t)) for t in h]
     for i in range(X.shape[1]):
       h_tups_arrs.sort(key=lambda x:x[0][i]) #stable sort so get nearby pts
-    h_moore={k:[v] for k,v in h.items()}
+    moore_neighbs={k:list(v) for k,v in h.items()}
     n_neighbs=len(h_tups_arrs)
     for i,(i_tup,i_arr) in enumerate(h_tups_arrs):#Check Moore nhoods
       for j in range(i+1,n_neighbs):
         j_tup,j_arr=h_tups_arrs[j]
         if nmx(abs(i_arr-j_arr))>1:
           break
-        h_moore[i_tup].append(h[j_tup])
-        h_moore[j_tup].append(h[i_tup])
-    moore_neighbs=[sum(s,[]) for s in h_moore.values()]
-    for v in moore_neighbs:
-      ret=min(ret,min_dist(v))
-      if not ret:
-        return ret
-    return ret
+        moore_neighbs[i_tup].extend(h[j_tup])
+        moore_neighbs[j_tup].extend(h[i_tup])
+    for v in moore_neighbs.values():
+      m_cand,x_cand,y_cand=min_dist(v)
+      if m_cand<m:
+        m,x,y=m_cand,x_cand,y_cand
+        if not m:
+          return m,x,y
+    return m,x,y
