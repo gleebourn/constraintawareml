@@ -130,6 +130,9 @@ def init_ensemble():
   ap.add_argument('-x_max',default=10.,type=float)
   
   a=ap.parse_args()
+  if not isdir('reports'):
+    mkdir('reports')
+  a.outf='reports/'++a.outf
   a.report_dir=a.outf+'_report'
   a.n_imb=len(a.imbalances)
   if a.resnet and a.loss not in ['resnet_cost','resnet_cost_layer',
@@ -1183,7 +1186,7 @@ def dl_rbd24(data_dir=str(Path.home())+'/data',
   if not isdir(data_dir):
     mkdir(data_dir)
   if not isdir(rbd24_dir):
-    mkdir(data_dir)
+    mkdir(rbd24_dir)
   if not isdir(parquet_dir):
     mkdir(parquet_dir)
     print('Downloading rbd24...')
@@ -1196,7 +1199,7 @@ def dl_rbd24(data_dir=str(Path.home())+'/data',
     print('rbd already extracted')
   return rbd24_dir
 
-def rbd24(preproc=True,split_test_train=True,
+def rbd24(preproc=True,split_test_train=True,rescale_log=True,
           raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl',
           processed_pickle_file=str(Path.home())+'/data/rbd24/rbd24_proc.pkl'):
   if split_test_train and preproc and isfile(processed_pickle_file):
@@ -1217,7 +1220,7 @@ def rbd24(preproc=True,split_test_train=True,
     df.to_pickle(raw_pickle_file)
 
   if preproc:
-    df=preproc_rbd24(df)
+    df=preproc_rbd24(df,rescale_log=rescale_log)
   if not split_test_train:
     return df
   x=get_dummies(df.drop(['label','user_id','timestamp'],axis=1))
