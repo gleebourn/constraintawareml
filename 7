@@ -68,9 +68,8 @@ def init_ensemble():
   ap.add_argument('-softmax_U_V',action='store_true')
   ap.add_argument('-window_avg',action='store_true')
   ap.add_argument('-n_gaussians',default=4,type=int)
-  ap.add_argument('-loss',default='loss',choices=list(losses))
-  ap.add_argument('-reporting_interval',default=1000,type=int)
-  ap.add_argument('-print_step_interval',default=100,type=int)
+  ap.add_argument('-loss',default='loss',choices=list(dlosses))
+  ap.add_argument('-reporting_interval',default=100,type=int)
   ap.add_argument('-gmm_spread',default=.05,type=float)
   ap.add_argument('-gmm_scatter_samples',default=10000,type=int)
   ap.add_argument('-no_gmm_compensate_variances',action='store_true')
@@ -138,7 +137,7 @@ def init_ensemble():
   a.report_dir=a.outf+'_report'
   a.n_imb=len(a.imbalances)
   if a.resnet and a.loss not in ['resnet_cost','resnet_cost_layer',
-                                 'cross_entropy_rn','coalescence_res_cost']:
+                                 'coalescence_res_cost']:
     if a.single_layer_upd:
       a.loss='resnet_cost_layer'
     else:
@@ -148,10 +147,6 @@ def init_ensemble():
   elif a.loss=='distribution_flow_cost':
     a.w_init=1.
     a.target_increment=.9
-
-  if a.act=='relu':
-    a.glorot_normal=True
-    a.no_glorot_uniform=True
 
   a.glorot_uniform=(not a.no_glorot_uniform) and (not a.glorot_normal)
   a.stop_on_target=not a.no_stop_on_target
@@ -189,7 +184,6 @@ fpfnp_lab=lambda e:'FP_t,FN_t,p='+f_to_str(e.target_fp,p=False)+','+\
 
 even_indices=lambda arr:[v for i,v in enumerate(arr) if not i%2]
 
-@jit
 def relu(x):return minimum(1,maximum(-1,x))
 
 @jit
@@ -202,19 +196,17 @@ f=vectorize(f_unbatched,excluded=[0,1],signature='(m)->(n)')
 def pad_or_trunc(x,n):
   return x[:n] if len(x)>=n else pad(x,n-len(x))
 
-@jit
-def resnet_unbatched(A,B,x,act=tanh,first_layer_no_skip=True):
-  if first_layer_no_skip:
-    x=act(x@A[0]+B[0])
-    A=A[1:]
-    B=B[1:]
-  for a,b in zip(A,B):
-    x=pad_or_trunc(x,len(b))+act(x@a+b)
+def resnet_unbatched(A,B,x,act=tanh,pot=False):
+  if pot:
+    for a,b in zip(A,B):
+      x=pad_or_trunc(x,len(b))+act(a@x+b)
+  else:
+    for a,b in zip(A,B):
+      x+=act(a@x+b)
   return x # final layer: sum components, check + or -.
-resnet=vectorize(resnet_unbatched,excluded=[0,1],signature='(m)->(n)')
+resnet=vectorize(resnet_unbatched,excluded=[0,1],signature='(m)->(m)')
 
 #Default: force two directions of growth,values specified are logarithmic
-@jit
 def svd_cost(A,B,x,act=tanh,top_growth=array([2,1]),imp=resnet,
              eps=1e-8,dimension=4,vol_growth=0.):
   if dimension is None: dimension=x.shape[1]
@@ -228,13 +220,11 @@ def svd_cost(A,B,x,act=tanh,top_growth=array([2,1]),imp=resnet,
   growth=log(svdvals(distortion)[:dimension])
   return (top_growth-growth[:len(top_growth)])**2+(jsm(growth)-vol_growth)**2
 
-@jit
 def dot_penalty(z,y):
   target_directions=1-2*y^expand_dims(y,-1)
   sqs=jsm(z**2,axis=1)
   return jsm((sqs+expand_dims(sqs,-1)-2*z@z.T)*target_directions)
 
-@jit
 def dist_penalty(z,y):
   n_pos=int(jsm(y))
   n_neg=len(y)-n_pos
@@ -247,12 +237,10 @@ def dist_penalty(z,y):
   dists=sqs+expand_dims(sqs,-1)-2*z@z.T
   return (U*jsm(dists[pp])+V*jsm(dists[nn]))/(1e-8+jsm(dists[pn]))
 
-@jit
 def metric_cost(A,B,x,y,act=tanh,imp=resnet):
   z=imp(A,B,x)
   return dist_penalty(z,y)
 
-@jit
 def coalescence_cost(A,B,x,y,U,V,act=tanh,tol=1e-4):
   bs=len(y)
   iden=identity(bs)
@@ -277,7 +265,6 @@ def coalescence_cost(A,B,x,y,U,V,act=tanh,tol=1e-4):
     old_ldists=ldists
   return (ret+y@log(tol+1-x)+ny@log(tol+1+x))[0]
 
-@jit
 def nn_cost_expansion(A,B,xp,xn,contraction=False,act=tanh,tol=1e-2,imp=f):
   ret=0.
   dists_init=jsm((xp-xn)**2,axis=1)
@@ -295,7 +282,6 @@ def nn_cost_contraction(A,B,x,act=tanh,tol=1e-8,imp=f):
   return jsm(dists_final/dists_init)/len(x)
 '''
 
-@jit
 def coalescence_res_cost(A,B,x,y,U,V,act=tanh,tol=1e-2):
   bs=len(y)
   #l=1/len(A)
@@ -339,7 +325,6 @@ def coalescence_res_cost(A,B,x,y,U,V,act=tanh,tol=1e-2):
   return ret+jsm(V*y@(tol+1-x)+U*ny@(tol+1+x))
   #return log(1+ret)+jsm(V*y*(1-x)+U*ny*(1+x))
 
-@jit
 def distribution_flow_cost(A,B,x,y,U,V,w_init,act=tanh,tol=1e-8):
   ret=0.
   n=len(A)
@@ -371,7 +356,6 @@ def distribution_flow_cost(A,B,x,y,U,V,w_init,act=tanh,tol=1e-8):
     ret+=(1-w_init)*(tol/dec)*jsm(UV_mask*(dists-end_dists)**2)
   return ret/n+(1-w_init)*jsm(U*(~y)*(1+x)+V*y*(1-x))
 
-@jit
 def resnet_cost(A,B,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
   c=0
   n=len(A)
@@ -387,7 +371,6 @@ def resnet_cost(A,B,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
     x+=dx
   return c-jsm(UmV*x.T) # final layer: sum components, check + or -.
 
-@jit
 def resnet_cost_layer(A,B,i,c,d,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
   ret=0.
   UmV=y*(U+V)-U
@@ -406,39 +389,30 @@ def resnet_cost_layer(A,B,i,c,d,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
     x+=dx
   return ret-jsm(UmV*x.T)
 
-def mk_l1(act=tanh):
-  @jit
-  def l1(A,B,x,y,U,V,eps=.1)
-    y_smooth=f(A,B,x,act=act)
-    a_p,a_n=y_smooth[y],y_smooth[~y]
-    cts_fp=jsm(1.+a_n)
-    cts_fn=jsm(1.-a_p)
-    return U*cts_fp+V*cts_fn
-  return l1_soft
+def l1_soft(A,B,x,y,U,V,softness=.1,act=tanh):
+  y_smooth=f(A,B,x,act=act)
+  a_p,a_n=y_smooth[y],y_smooth[~y]
+  cts_fp=jsm(1.+a_n)
+  cts_fn=jsm(1.-a_p)
+  return U*cts_fp+V*cts_fn
 
-@jit
 def l1(A,B,x,y,U,V,act=tanh):
   return l1_soft(A,B,x,y,U,V,0.,act)
 
-def mk_cross_entropy(act=tanh):
-  @jit
-  def cross_entropy(A,B,x,y,U,V,eps=1e-8):
-    y_smooth=f(A,B,x,act=act)
-    a_p,a_n=y_smooth*y,y_smooth*(~y) # 0<y''=(1+y')/2<1
-    cts_fn=-jsm(log(eps+1.+a_p)) #y=1 => H(y,y')=-log(y'')=-log((1+y')/2)
-    cts_fp=-jsm(log(eps+1.-a_n)) #y=0 => H(y,y')=-log(1-y'')=-log((1-y')/2)
-    return U*cts_fp+V*cts_fn
-  return cross_entropy
-
-@jit
-def cross_entropy_rn(A,B,x,y,U,V,act=tanh,eps=1e-8):
-  y_smooth=tanh(resnet(A,B,x,act=act))
+def cross_entropy(A,B,x,y,U,V,act=tanh,eps=1e-8):
+  y_smooth=f(A,B,x,act=act)
   a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
   cts_fn=-jsm(log(eps+1.+a_p)) #y=1 => H(y,y')=-log(y'')=-log((1+y')/2)
   cts_fp=-jsm(log(eps+1.-a_n)) #y=0 => H(y,y')=-log(1-y'')=-log((1-y')/2)
   return U*cts_fp+V*cts_fn
 
-@jit
+def cross_entropy_rn(A,B,x,y,U,V,act=tanh,eps=1e-8):
+  y_smooth=jsm(resnet(A,B,x,act=act),axis=1)
+  a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
+  cts_fn=-jsm(log(eps+1.+a_p)) #y=1 => H(y,y')=-log(y'')=-log((1+y')/2)
+  cts_fp=-jsm(log(eps+1.-a_n)) #y=0 => H(y,y')=-log(1-y'')=-log((1-y')/2)
+  return U*cts_fp+V*cts_fn
+
 def cross_entropy_soft(A,B,x,y,U,V,act=tanh,normalisation=False,softness=.1,eps=1e-8):
   y_smooth=f(A,B,x,act=act)
   a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
@@ -446,7 +420,6 @@ def cross_entropy_soft(A,B,x,y,U,V,act=tanh,normalisation=False,softness=.1,eps=
   cts_fp=-(1-softness)*jsm(log(eps+1.-a_n))-softness*jsm(log(eps+1.+a_n))
   return U*cts_fp+V*cts_fn
 
-@jit
 def nn_pca_loss(w_c,b_c,w_e,b_e,x,x_targ,eps=1e-8):
   x_c=f(w_c,b_c,x)
   l=cov(x_c)
@@ -463,6 +436,7 @@ dsvd_cost=value_and_grad(svd_cost,argnums=[0,1])
 dl1=value_and_grad(l1,argnums=[0,1])
 dresnet_cost=value_and_grad(resnet_cost,argnums=[0,1])
 dresnet_cost_layer=value_and_grad(resnet_cost_layer,argnums=[3,4])
+dcross_entropy=value_and_grad(cross_entropy,argnums=[0,1])
 dcross_entropy_rn=value_and_grad(cross_entropy_rn,argnums=[0,1])
 dcross_entropy_soft=value_and_grad(cross_entropy_soft,argnums=[0,1])
 dl1_soft=value_and_grad(l1_soft,argnums=[0,1])
@@ -471,17 +445,12 @@ dcoalescence_cost=value_and_grad(coalescence_cost,argnums=[0,1])
 dcoalescence_res_cost=value_and_grad(coalescence_res_cost,argnums=[0,1])
 #dnn_cost_contraction=value_and_grad(nn_cost_contraction,argnums=[0,1])
 dnn_cost_expansion=value_and_grad(nn_cost_expansion,argnums=[0,1])
-losses={'loss':mk_cross_entropy,'l1':mk_l1,'cross_entropy':mk_cross_entropy}#,
-        #'l1_soft':dl1_soft,'cross_entropy_soft':dcross_entropy_soft,
-        #'resnet_cost':dresnet_cost,'resnet_cost_layer':dresnet_cost_layer,
-        #'nn_pca_loss':nn_pca_loss,'distribution_flow_cost':ddistribution_flow_cost,
-        #'coalescence_cost':dcoalescence_cost,'cross_entropy_rn':dcross_entropy_rn,
-        #'coalescence_res_cost':dcoalescence_res_cost}
-
-def mk_loss(loss,act):
-  loss=losses[loss](act)
-  dloss=value_and_grad(loss,argnums=[0,1])
-  return loss,dloss
+dlosses={'loss':dcross_entropy,'l1':dl1,'cross_entropy':dcross_entropy,
+         'l1_soft':dl1_soft,'cross_entropy_soft':dcross_entropy_soft,
+         'resnet_cost':dresnet_cost,'resnet_cost_layer':dresnet_cost_layer,
+         'nn_pca_loss':nn_pca_loss,'distribution_flow_cost':ddistribution_flow_cost,
+         'coalescence_cost':dcoalescence_cost,'cross_entropy_rn':dcross_entropy_rn,
+         'coalescence_res_cost':dcoalescence_res_cost}
 
 def init_layers(k,layer_dimensions,sigma_w=1.,sigma_b=1.,
                 no_sqrt_normalise=False,resnet=False,glorot_uniform=False,
@@ -529,9 +498,8 @@ def colour_rescale(fpfn):
   l/=log(a.fpfn_max)-log(a.fpfn_min)
   return jet(l)
 
-def mk_experiment(p,thresh,fpfn_ratio,target_fn,lr,a,eps=1e-8):
+def mk_experiment(p,thresh,fpfn_ratio,target_fn,lr,a):
   e=SimpleNamespace()
-  e.eps=eps
   e.bs=a.bs
   e.fpfn_ratio=float(fpfn_ratio)
   e.target_tolerance=a.target_tolerance
@@ -616,8 +584,7 @@ def init_experiments(a,global_key):
     a.w_target=init_layers(k1,a.target_shape,a.target_sigma_w,a.target_sigma_b)
 
   if a.resnet:
-    a.model_shape=[a.in_dim]+a.model_inner_dims+\
-                  [a.model_inner_dims[-1]]*(a.resnet-len(a.model_inner_dims))+[1]
+    a.model_shape=[a.in_dim]*a.resnet
     a.zersq=zeros((a.in_dim,a.in_dim))
     a.zerarr=zeros(a.in_dim)
   else:
@@ -747,13 +714,14 @@ def get_xy(a,imbs,bs,k):
 
   return ret[ret_single] if ret_single else ret
 
-def evaluate_fp_fn(e,y_p,y_t,trad_avg=False):
-  e.FP=int(jsm(y_p&(~y_t)))/e.bs #Stop jax weirdness after ADC
-  e.FN=int(jsm(y_t&(~y_p)))/e.bs
+def evaluate_fp_fn(e,y_p,y_t):
+  e.FP=int(nsm(y_p&(~y_t)))/e.bs #Stop jax weirdness after ADC
+  e.FN=int(nsm(y_t&(~y_p)))/e.bs
   e.cost=(e.FP/e.target_fp+e.FN/e.target_fn)
   e.FPs[e.step]=e.FP
   e.FNs[e.step]=e.FN
-  if trad_avg:
+  e.trad_avg=False
+  if e.trad_avg:
     e.fp=e.FPs.avg()
     e.fn=e.FNs.avg()
   else:
@@ -780,7 +748,6 @@ def update_history(e):
       e.history.FN=even_indices(e.history.FN)
       e.history.lr=even_indices(e.history.lr)
       e.history.cost=even_indices(e.history.cost)
-      e.history.w=even_indices(e.history.dw)
       e.history.dw=even_indices(e.history.dw)
       e.history.loss_vals=even_indices(e.history.loss_vals)
       e.history.l//=2
@@ -849,44 +816,38 @@ def update_lrs(a,experiments,k):
   a.lrs=array([e.lr for e in experiments])
   return experiments
 
-@jit
-def upd_adam(w,adam_V,adam_M,upd,beta1,beta2,lr,eps=1e-8):
-  adva,advb=adam_V
-  wa,wb=w
-  adam_M*=beta2
-  for i,(u,v) in enumerate(zip(*upd)):
-    adva[i]*=beta1
-    advb[i]*=beta1
-    adva[i]+=(1-beta1)*u
-    advb[i]+=(1-beta1)*v
-    adam_M+=(1-beta2)*(nsm(u**2)+nsm(v**2))
-  w_l2=0
-  dw_l2=0
-  for i,(s,t) in enumerate(zip(adva,advb)):
-    delta_u=lr*s/(adam_M**.5+eps)
-    delta_v=lr*t/(adam_M**.5+eps)
-    wa[i]-=delta_u
-    wb[i]-=delta_v
-    w_l2+=nsm(wa[i]**2)+nsm(wb[i]**2)
-    dw_l2+=nsm(delta_u**2)+nsm(delta_v**2)
-  return (wa,wb),(adva,advb),adam_M,w_l2,dw_l2
-
-@jit
-def upd_grad(w,upd,lr):
-  return [a-lr*da for a,da in zip(w[0],upd[0])],[b-lr*db for b,db in zip(w[1],upd[1])]
-
-#@jit
-def update_weights(a,e,upd):#,start=None,end=None):
-  #offset=0 if start is None else start
-  #adva=e.adam_V[0][start:end]
-  #advb=e.adam_V[1][start:end]
+def update_weights(a,e,upd,start=None,end=None):
+  offset=0 if start is None else start
+  e.dw_l2=e.w_l2=0
+  adva=e.adam_V[0][start:end]
+  advb=e.adam_V[1][start:end]
   #wmoda=e.w_model[0][start:end]
   #wmodb=e.w_model[1][start:end]
   if a.adam:
-    e.w_model,e.adam_V,e.adam_M,e.w_l2,e.dw_l2=upd_adam(e.w_model,e.adam_V,e.adam_M,upd,
-                                                        1-a.gamma1,1-a.gamma2,e.lr)
+    e.adam_M*=(1-a.gamma2)
+    for i,(u,v) in enumerate(zip(*upd)):
+      adva[i]*=(1-a.gamma1)
+      advb[i]*=(1-a.gamma1)
+      adva[i]+=a.gamma1*u
+      advb[i]+=a.gamma1*v
+      e.adam_M+=a.gamma2*(nsm(u**2)+nsm(v**2))
+    #for k in upd:
+    for i,(s,t) in enumerate(zip(adva,advb)):
+      delta_u=e.lr*s/(e.adam_M**.5+1e-8)
+      delta_v=e.lr*t/(e.adam_M**.5+1e-8)
+      e.w_model[0][i+offset]-=delta_u
+      e.w_model[1][i+offset]-=delta_v
+      e.w_l2+=nsm(e.w_model[0][i+offset]**2)+\
+              nsm(e.w_model[0][i+offset]**2)
+      e.dw_l2+=nsm(delta_u**2)+nsm(delta_v**2)
   else:
-    e.w_model=upd_grad(e.w_model,upd,e.lr)
+    for i,(s,t) in enumerate(zip(upd[0],upd[1])):
+      delta_u=e.lr*s
+      delta_v=e.lr*t
+      e.dw_l2+=nsm(delta_u**2)+nsm(delta_v**2)
+      e.w_model[0][i+offset]-=delta_u
+      e.w_model[1][i+offset]-=delta_v
+      e.w_l2+=nsm(u**2)+nsm(v**2)
 
 def plot_stopping_times(experiments,fd_tex,report_dir):
   for e in experiments: e.fpfn_ratio=float(e.fpfn_ratio)
@@ -998,11 +959,10 @@ get_dw=lambda e:e.history.dw
 def plot_historical_statistics(experiments,fd_tex,a,smoothing=100):
   if fd_tex:
     print('\\subsection{Historical statistics}',file=fd_tex)
-  stats=[(get_cost,'log(1e-8+fp/target_fp+fn/target_fn)','Loss'),
-                          (get_dw,'log(dw)','Change_in_weights')]
-  if a.mode=='adaptive_lr':
-    stats.append((get_lr,'log(lr)','Learning_rate'))
-  for get_var,yl,desc in stats:
+  for get_var,yl,desc in zip([get_cost,get_lr,get_dw],
+                             ['log(1e-8+fp/target_fp+fn/target_fn)','log(lr)',
+                              'log(dw)'],
+                             ['Loss','Learning_rate','Change_in_weights']):
     for e in experiments:
       arr=[log10(a) for a in get_var(e)]
       if smoothing:
@@ -1233,11 +1193,7 @@ def report_progress(a,experiments,line,act,k):
   if 'i' in line:
     model_desc='Model shape:\n'+('->'.join([str(l) for l in a.model_shape]))+'\n'
   
-    if a.glorot_uniform:
-      model_desc+='\n- Glorot uniform initialisation'
-    elif a.glorot_normal:
-      model_desc+='\n- Glorot normal initialisation'
-    else:
+    if a.no_glorot_uniform:
       model_desc+='\n'.join(['- matrix weight variance:'+\
                              f_to_str(a.model_sigma_w,p=False),
                              '- bias variance:'+f_to_str(a.model_sigma_b,p=False),
@@ -1245,6 +1201,8 @@ def report_progress(a,experiments,line,act,k):
                              f_to_str(a.model_resid,p=False),
                              'sqrt variance correction:'+\
                              str(not a.no_sqrt_normalise_w)])
+    else:
+      model_desc+='\n- Glorot uniform initialisation'
     model_desc+='\n- batch size:'+str(a.bs)
     if a.mode=='gmm':
       model_desc+='\n- learning rate:'+str(a.lr)

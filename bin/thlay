@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 from pickle import load
 from time import perf_counter
-from numpy import sum as nsm
+from numpy import sum as nsm,min as nmn,max as nmx
 from jax.numpy import exp,sin,inf
 from jax.random import key,split,choice
 from jax.profiler import save_device_memory_profile
@@ -15,7 +15,7 @@ from os.path import dirname,abspath
 from sys import path
 path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import init_ensemble,init_experiments,activations,f_to_str,save_ensemble,\
-                      exp_to_str,fpfnp_lab,f,dlosses,get_xy,report_progress,update_lrs,\
+                      exp_to_str,fpfnp_lab,f,get_xy,report_progress,update_lrs,mk_loss,\
                       evaluate_fp_fn,update_history,compute_U_V,update_weights,resnet,\
                       read_input_if_ready
 
@@ -66,6 +66,7 @@ else:
   experiments=init_experiments(a,global_key)
 
 act=activations[a.act] #Would like to pickle but unable to do so to lambdas
+loss,dloss=mk_loss(a.loss,act)
 
 def get_timestep(label):
   global tl
@@ -77,7 +78,7 @@ def get_timestep(label):
 
 while True:
   a.step+=1
-  if not a.step%10:print(a.step)
+  if not a.step%a.print_step_interval:print('Step',a.step)
   xy=get_xy(a,a.imbalances,a.bs,emit_key())
 
   a.lr_phase+=a.lr_momentum
@@ -87,68 +88,51 @@ while True:
     tl=perf_counter()
     e.step+=1
     x,y_t=xy[float(e.p)]
-
     e.lr=a.lr*exp(a.lr_amplitude*sin(a.lr_phase))
     e.bs=len(y_t)
     get_timestep('start_loop')
-    n_its=e.p_its if a.iterate_minority else 1
-    for _ in range(n_its): #when force_batch_cost
-      if a.resnet:
-        y_p=resnet(e.w_model[0],e.w_model[1],x,act=act).flatten()>0
-      else:
-        y_p=f(e.w_model[0],e.w_model[1],x,act=act).flatten()>0
-      get_timestep('threshold')
+    if a.resnet:
+      y_p=jsm(resnet(e.w_model[0],e.w_model[1],x,act=act),axis=1).flatten()>0
+    else:
+      y_p=f(e.w_model[0],e.w_model[1],x,act=act).flatten()>0
 
-      evaluate_fp_fn(e,y_p,y_t)
-      get_timestep('evaluate_fp_fn')
+    get_timestep('threshold')
+    evaluate_fp_fn(e,y_p,y_t)
+    get_timestep('evaluate_fp_fn')
 
-      if a.no_U_V:
-        e.U=e.V=1
-      else:
-        e.U,e.V=compute_U_V(e.fp,e.fn,e.target_fp,e.target_fn,
-                            1 if a.iterate_minority else e.p,
-                            sm=a.softmax_U_V,p_scale=a.p_scale,
-                            scale_before_sm=a.scale_before_sm)
-      get_timestep('U,V')
+    if a.no_U_V:
+      e.U=e.V=1
+    else:
+      e.U,e.V=compute_U_V(e.fp,e.fn,e.target_fp,e.target_fn,
+                          1 if a.iterate_minority else e.p,
+                          sm=a.softmax_U_V,p_scale=a.p_scale,
+                          scale_before_sm=a.scale_before_sm)
+    get_timestep('U,V')
+    e.loss_val,upd=dloss(e.w_model[0],e.w_model[1],x,y_t,e.U,e.V,eps=e.eps)#,act=act,
+    get_timestep('dloss')
+    if e.loss_val==inf:
+      print('nan encountered, increasing loss epsilon for experiment')
+      e.eps*=2
+      upd=[(0.,0.) for u in upd]
 
-      if a.single_layer_upd:
-        ind=int(choice(emit_key(),a.resnet-1))
-        e.loss_val,(a_upd,b_upd)=dlosses[a.loss](e.w_model[0],e.w_model[1],ind,a.zersq,
-                                                 a.zerarr,x,y_t,e.U,e.V,act=act)
-        start_zeros=[0.]*(ind)
-        end_zeros=[0.]*(a.resnet-ind-2)
-        e.loss_val,upd=(start_zeros+[a_upd]+end_zeros,start_zeros+[b_upd]+end_zeros)
-      elif a.loss=='distribution_flow_cost':
-        e.loss_val,upd=dlosses['distribution_flow_cost'](e.w_model[0],e.w_model[1],
-                                                         x,y_t,e.U,e.V,e.w_init,act=act)
-      else:
-        e.loss_val,upd=dlosses[a.loss](e.w_model[0],e.w_model[1],x,y_t,e.U,e.V,act=act)#,
-      e.loss_vals[e.step-1]=float(e.loss_val)
-
-      get_timestep('dloss')
-      if a.loss=='distribution_flow_cost':
-        avg_loss=e.loss_vals.avg()
-        if avg_loss<e.loss_target:
-          print('Updating start and end params for loss')
-          e.w_init-=e.w_init*e.lr
-          e.loss_target=(1-e.lr)*avg_loss
-          print('w_init,loss_target:',e.w_init,e.loss_target)
-
-      update_weights(a,e,upd)
-      get_timestep('update_weights')
+    e.loss_vals[e.step-1]=float(e.loss_val)
+    update_weights(a,e,upd)
+    get_timestep('update_weights')
 
     update_history(e)
     get_timestep('update_history')
     
+  '''
   if not a.step%a.lr_update_interval and a.mode=='adaptive_lr':
     experiments=update_lrs(a,[e for e in experiments if (not a.stop_on_target) and\
                                                         (not e.steps_to_target)],
                            emit_key())
+  '''
 
-  line=read_input_if_ready()
 
   if not a.step%a.saving_interval:
     save_ensemble(a,experiments,global_key)
 
-  if line or not a.step%a.reporting_interval:
+  if not a.step%a.reporting_interval:
+    line=read_input_if_ready()
     report_progress(a,experiments,line,act,emit_key(report=True))

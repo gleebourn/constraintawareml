@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-from os.path import dirname,abspath
-from sys import path
+from os.path import dirname,abspath,isfile
+from sys import path,argv
 path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import f,init_layers,rbd24,min_dist,f_to_str,resnet,\
                       nn_cost_expansion,dnn_cost_expansion,update_weights,\
-                      read_input_if_ready,cyc,dmetric_cost
+                      read_input_if_ready,cyc,dmetric_cost,dist_penalty
 
-from pickle import dump
+from pickle import load,dump
 
 from types import SimpleNamespace
 
@@ -20,6 +20,10 @@ from jax.random import key,split,permutation,choice#,uniform
 from numpy import unique,var,arange,array as nparr,array_split,exp,log10,\
                   min as nmn,sum as nsm,round as rnd
 
+if len(argv)>1:
+  pkl_name=argv[1]
+else:
+  pkl_name=''
 
 (x_train,y_train),(x_test,y_test),(df,x_cols)=rbd24()
 n_train=len(y_train)
@@ -34,84 +38,100 @@ print('Number of training rows:',n_train)
 print('Number of testing rows:',n_test)
 print('p_train,p_test:',p_train,',',p_test)
 
-e=SimpleNamespace(w_model=([],[]),w_l2=0.,dw_l2=0.,adam_V=([],[]),target_dist_prop=.1,
-                  adam_M=0.,lr=1e-2,min_dist_tol=1e-8,target_dist=.1)
-a=SimpleNamespace(adam=True,gamma1=.1,gamma2=.001,step=0,lr=1e-2,target_n_layers=50,
-                  bs=128,subpoch_num=0,memlen=100,target_separation=10)
+if isfile(pkl_name):
+  with open(pkl_name,'rb') as fd: e,a,k0=load(fd)
+else:
+  e=SimpleNamespace(w_model=([],[]),w_l2=0.,dw_l2=0.,adam_V=([],[]),target_dist_prop=.1,
+                    adam_M=0.,lr=1e-1,min_dist_tol=1e-8,target_dist=.1)
+  a=SimpleNamespace(adam=True,gamma1=.1,gamma2=.001,step=0,lr=1e-1,target_n_layers=50,
+                    bs=128,subpoch_num=0,memlen=100,target_separation=10)
+  k0=key(1729)
 
 width=x_train.shape[1]
 
 prediction_block_size=10000
 n_splits=n_test//prediction_block_size
-k0=key(1729)
-n_layers=100
-e.w_model=([zeros((width,width)) for i in range(n_layers)],
-           [zeros((width,)) for i in range(n_layers)])
-e.adam_V=([zeros((width,width)) for i in range(n_layers)],
-          [zeros((width,)) for i in range(n_layers)])
+n_layers_enc=100
+e.w_model=([zeros((width,width)) for i in range(n_layers_enc*2)],
+           [zeros((width,)) for i in range(n_layers_enc*2)])
+e.adam_V=([zeros((width,width)) for i in range(n_layers_enc*2)],
+          [zeros((width,)) for i in range(n_layers_enc*2)])
 imp=resnet
 a.step=0
 a.epoch_num=0
-a.avg_weight=.2
+a.change_thresh=0.
 while True:
   a.epoch_num+=1 #Note this is a crazy long "epoch"!
-  k0,k1,k2,k3=split(k0,4)
-  perm=permutation(k0,len(y_test))
-  x_train,y_train=x_train[perm],y_train[perm]
-  cum_change=2
-  print('Complete!')
-  for i in perm:
-    if cum_change>1:
-      print('Weights have changed by >1! Recalculating distances')
-      cum_change=0.
-      z_train=concatenate([imp(*e.w_model,spl) for\
-                              spl in array_split(x_train,n_splits)])
+  k0,k_perm,k_vis_p,k_vis_n=split(k0,4)
+  perm=permutation(k_perm,len(y_test))
+  e.x_train,e.y_train=x_train[perm],y_train[perm]
+  recalc_dists=True
+  for a.i,(x,y) in enumerate(zip(e.x_train,e.y_train)):
+    if recalc_dists:
+      a.change_thresh=1.
+      print('Recalculating distances')
+      e.z_train=concatenate([imp(*e.w_model,spl) for\
+                              spl in array_split(e.x_train,n_splits)])
       print('Generating new kdtree...')
-      kdt=KDTree(z_train)
-    x,z=x_train[i],z_train[i]
+      kdt=KDTree(e.z_train)
+      print('...complete!')
+      recalc_dists=False
+    z=e.z_train[a.i]
     a.step+=1
-    print('Finding batch by query...')
     dists,inds=kdt.query(z,k=range(1,1+a.bs))
-    print('...done!')
-    x_b,z_b,y_b=x_train[inds],z_train[inds],y_train[inds]
+    x_b,z_b,y_b=e.x_train[inds],e.z_train[inds],e.y_train[inds]
     num_pos=nsm(y_b)
-    if num_pos==0 or num_pos==a.bs:
-      print('Skipping point far from other class')
-      continue
-    zsqs=nsm(z_b**2,axis=1)
-    dists_pred=(zsqs+expand_dims(zsqs,-1)-2*zsqs@zsqs.T)**.5
-    dist_ideal=y_b^expand_dims(y_b,-1)
-    dist_target=a.avg_weight*dist_ideal+(1-a.avg_weight)*dists_pred
-    c,upd=dmetric_cost(*e.w_model,x_b,None,imp=resnet,target_dists=dist_target)
+    #if num_pos==a.bs:
+    #  print('All + ball!')
+    #elif num_pos==0:
+    #  print('All - ball: skipping')
+    #  continue
+    #zsqs=nsm(z_b**2,axis=1)
+    #dists_pred=(zsqs+expand_dims(zsqs,-1)-2*zsqs@zsqs.T)**.5
+    #dist_ideal=y_b^expand_dims(y_b,-1)
+    #dist_target=a.avg_weight*dist_ideal+(1-a.avg_weight)*dists_pred
+    c_last_recalc=dist_penalty(z_b,y_b)
+    c,upd=dmetric_cost(*e.w_model,x_b,y_b,imp=resnet)#,target_dists=dist_target)
     update_weights(a,e,upd)
-    cum_change+=e.dw_l2
+    improvement=c_last_recalc-c
+    c_change=abs(improvement/(1+c_last_recalc))
+    a.change_thresh*=(1-a.lr)
+    recalc_dists=c_change>a.change_thresh
     if not a.step%10:
-      print(a.step)
+      print('Step',a.step,'Changes since last distance recalculation:')
+      print('Last improvement',improvement)
+      print('Absolute relative change',c_change)
+      print('Change threshold',a.change_thresh)
       if not a.step%1000:
-        with open('metlearnnrs.pkl','wb') as fd: dump((e,a),fd)
+        with open(pkl_name,'wb') as fd: dump((e,a,k0),fd)
       if read_input_if_ready():
-        c_vis=choice(k1,n_test,(10000,))
-        x_vis,y_vis=x_test[c_vis],y_test[c_vis]
-        x_vis_p,x_vis_n=x_vis[y_vis],x_vis[~y_vis]
-        z_vis_p,z_vis_n=imp(*e.w_model,x_vis_p),imp(*e.w_model,x_vis_n)
-        x_sqs_p=jsm(x_vis_p**2,axis=1)
-        x_sqs_n=jsm(x_vis_n**2,axis=1)
-        z_sqs_p=jsm(x_vis_p**2,axis=1)
-        z_sqs_n=jsm(x_vis_n**2,axis=1)
-        x_dists_pp=x_sqs_p+expand_dims(x_sqs_p,-1)-2*x_vis_p@x_vis_p.T
-        x_dists_nn=x_sqs_n+expand_dims(x_sqs_n,-1)-2*x_vis_n@x_vis_n.T
-        z_dists_pp=z_sqs_p+expand_dims(z_sqs_p,-1)-2*z_vis_p@z_vis_p.T
-        z_dists_nn=z_sqs_n+expand_dims(z_sqs_n,-1)-2*z_vis_n@z_vis_n.T
-        x_dists_pn=jsm((expand_dims(x_vis_p,0)-expand_dims(x_vis_n,1))**2,axis=-1)
-        z_dists_pn=jsm((expand_dims(z_vis_p,0)-expand_dims(z_vis_n,1))**2,axis=-1)
-        dil_pp=log(z_dists_pp/(1e-8+x_dists_pp))
-        dil_pn=log(z_dists_pn/(1e-8+x_dists_pn))
-        dil_nn=log(z_dists_nn/(1e-8+x_dists_nn))
-        hist(dil_pn,bins=50,label='dist changes between classes',alpha=.4)
-        hist(dil_pp,bins=50,label='dist changes within + class',alpha=.4)
-        hist(dil_nn,bins=50,label='dist changes within - class',alpha=.4)
-        legend()
-        title('Distributions of nearest neighbours within '+str(e.target_dist)+\
-              ' of the other class after '+str(starting_layer)+' layers')
+        xp_vis=choice(k_vis_p,x_test[y_test],(100,))
+        xn_vis=choice(k_vis_n,x_test[~y_test],(100,))
+        zp_vis,zn_vis=imp(*e.w_model,xp_vis),imp(*e.w_model,xn_vis)
+        ar=arange(100)
+        ut=ar>expand_dims(ar,-1)
+        x_dists_pp=nsm((expand_dims(xp_vis,0)-expand_dims(xp_vis,1))**2,axis=-1)[ut]
+        z_dists_pp=nsm((expand_dims(zp_vis,0)-expand_dims(zp_vis,1))**2,axis=-1)[ut]
+        x_dists_nn=nsm((expand_dims(xn_vis,0)-expand_dims(xn_vis,1))**2,axis=-1)[ut]
+        z_dists_nn=nsm((expand_dims(zn_vis,0)-expand_dims(zn_vis,1))**2,axis=-1)[ut]
+        x_dists_pn=nsm((expand_dims(xp_vis,0)-expand_dims(xn_vis,1))**2,axis=-1)[ut]
+        z_dists_pn=nsm((expand_dims(zp_vis,0)-expand_dims(zn_vis,1))**2,axis=-1)[ut]
+        dil_pp=(log10(1e-8+z_dists_pp)-log10(1e-8+x_dists_pp)).flatten()
+        dil_pn=(log10(1e-8+z_dists_pn)-log10(1e-8+x_dists_pn)).flatten()
+        dil_nn=(log10(1e-8+z_dists_nn)-log10(1e-8+x_dists_nn)).flatten()
+        print('Fraction of distances within + reduced:',nsm(dil_pp<0)/len(dil_pp))
+        print('Fraction of distances within - reduced:',nsm(dil_nn<0)/len(dil_pp))
+        print('Fraction of distances between + and - reduced:',nsm(dil_pn<0)/len(dil_pn))
+        print('Average distance reduction within +:',nsm(dil_pp)/len(dil_pp))
+        print('Average distance reduction within -:',nsm(dil_nn)/len(dil_pp))
+        print('Average distance reduction between + and -:',nsm(dil_pn)/len(dil_pn))
+        hist(dil_pn,bins=50)
+        title('dist changes between classes')
+        show()
+        hist(dil_pp,bins=50)
+        title('dist changes within + class')
+        show()
+        hist(dil_nn,bins=50)
+        title('dist changes within - class')
         show()
 
