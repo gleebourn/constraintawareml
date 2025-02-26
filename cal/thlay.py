@@ -36,10 +36,10 @@ def read_input_if_ready():
 leg=lambda t=None,h=None,l='upper right':legend(fontsize='x-small',loc=l,
                                                 handles=h,title=t)
 class cyc:
-  def __init__(self,n,x0=1):
-    self.list=[x0]*n
+  def __init__(self,n):
+    self.list=[None]*n
     self.n=n
-    self.max_accessed=1
+    self.virt_len=0
 
   def __getitem__(self,k):
     if isinstance(k,slice):
@@ -48,10 +48,10 @@ class cyc:
 
   def __setitem__(self,k,v):
     self.list[k%self.n]=v
-    self.max_accessed=min(k+1,self.n)
+    self.virt_len=min(k+1,self.n)
 
   def avg(self):
-    return sum(self.list[:self.max_accessed])/self.max_accessed
+    return sum(self.list[:self.virt_len])/self.virt_len if self.virt_len else 0
 
 def init_ensemble():
   ap=ArgumentParser()
@@ -192,12 +192,11 @@ even_indices=lambda arr:[v for i,v in enumerate(arr) if not i%2]
 @jit
 def relu(x):return minimum(1,maximum(-1,x))
 
-@jit
 def f_unbatched(A,B,x,act=tanh):
   for a,b in zip(A,B):
     x=act(x@a+b)
-  return x
-f=vectorize(f_unbatched,excluded=[0,1],signature='(m)->(n)')
+  return x[0]
+f=vectorize(f_unbatched,excluded=[0,1],signature='(m)->()')
 
 def pad_or_trunc(x,n):
   return x[:n] if len(x)>=n else pad(x,n-len(x))
@@ -406,29 +405,42 @@ def resnet_cost_layer(A,B,i,c,d,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
     x+=dx
   return ret-jsm(UmV*x.T)
 
-def mk_l1(act=tanh):
-  @jit
-  def l1(A,B,x,y,U,V,eps=.1)
-    y_smooth=f(A,B,x,act=act)
-    a_p,a_n=y_smooth[y],y_smooth[~y]
-    cts_fp=jsm(1.+a_n)
-    cts_fn=jsm(1.-a_p)
-    return U*cts_fp+V*cts_fn
-  return l1_soft
+def mk_l1(act=tanh,imp=f):
+  def l1(A,B,x,y,U,V,eps=.1):
+    y_smooth=imp(A,B,x,act=act)
+    y_diffs=1-y_smooth*(2*y-1)
+    #a_p,a_n=y_smooth[y],y_smooth[~y]
+    #cts_fp=jsm(1.+a_n)
+    #cts_fn=jsm(1.-a_p)
+    return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
+  return jit(l1)
+
+def mk_lp(p=2.):
+  def mk_l(act=tanh,imp=f):
+    def lp(A,B,x,y,U,V,eps=.1):
+      y_smooth=imp(A,B,x,act=act)
+      y_diffs=((2*y-1)-y_smooth)**p
+      #a_p,a_n=y_smooth[y],y_smooth[~y]
+      #cts_fp=jsm(1.+a_n)
+      #cts_fn=jsm(1.-a_p)
+      return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
+    return lp
+  return mk_l
+
+mk_l2=mk_lp()
 
 @jit
 def l1(A,B,x,y,U,V,act=tanh):
   return l1_soft(A,B,x,y,U,V,0.,act)
 
-def mk_cross_entropy(act=tanh):
-  @jit
+def mk_cross_entropy(act=tanh,imp=f):
   def cross_entropy(A,B,x,y,U,V,eps=1e-8):
-    y_smooth=f(A,B,x,act=act)
-    a_p,a_n=y_smooth*y,y_smooth*(~y) # 0<y''=(1+y')/2<1
-    cts_fn=-jsm(log(eps+1.+a_p)) #y=1 => H(y,y')=-log(y'')=-log((1+y')/2)
-    cts_fp=-jsm(log(eps+1.-a_n)) #y=0 => H(y,y')=-log(1-y'')=-log((1-y')/2)
-    return U*cts_fp+V*cts_fn
-  return cross_entropy
+    y_smooth=imp(A,B,x,act=act)
+    y_winnings=y_smooth*(2*y-1) #+ if same sign, - if different sign
+    #return -jsm(((V-U)*y+U)*log(1+eps+y_preloss))
+    return -jsm(((V-U)*y+U)*log(1+eps+y_winnings))
+    #return jsm(((V-U)*y+U)*log(1+eps-y_preloss))
+  return jit(cross_entropy)
 
 @jit
 def cross_entropy_rn(A,B,x,y,U,V,act=tanh,eps=1e-8):
@@ -465,23 +477,29 @@ dresnet_cost=value_and_grad(resnet_cost,argnums=[0,1])
 dresnet_cost_layer=value_and_grad(resnet_cost_layer,argnums=[3,4])
 dcross_entropy_rn=value_and_grad(cross_entropy_rn,argnums=[0,1])
 dcross_entropy_soft=value_and_grad(cross_entropy_soft,argnums=[0,1])
-dl1_soft=value_and_grad(l1_soft,argnums=[0,1])
 ddistribution_flow_cost=value_and_grad(distribution_flow_cost,argnums=[0,1])
 dcoalescence_cost=value_and_grad(coalescence_cost,argnums=[0,1])
 dcoalescence_res_cost=value_and_grad(coalescence_res_cost,argnums=[0,1])
 #dnn_cost_contraction=value_and_grad(nn_cost_contraction,argnums=[0,1])
 dnn_cost_expansion=value_and_grad(nn_cost_expansion,argnums=[0,1])
-losses={'loss':mk_cross_entropy,'l1':mk_l1,'cross_entropy':mk_cross_entropy}#,
+losses={'loss':mk_cross_entropy,'l1':mk_l1,'cross_entropy':mk_cross_entropy,
+        'l2':mk_l2}#,
         #'l1_soft':dl1_soft,'cross_entropy_soft':dcross_entropy_soft,
         #'resnet_cost':dresnet_cost,'resnet_cost_layer':dresnet_cost_layer,
         #'nn_pca_loss':nn_pca_loss,'distribution_flow_cost':ddistribution_flow_cost,
         #'coalescence_cost':dcoalescence_cost,'cross_entropy_rn':dcross_entropy_rn,
         #'coalescence_res_cost':dcoalescence_res_cost}
 
-def mk_loss(loss,act):
-  loss=losses[loss](act)
-  dloss=value_and_grad(loss,argnums=[0,1])
-  return loss,dloss
+def mk_loss(loss,act,imp=f):
+  @jit
+  def _imp(A,B,x):
+    return imp(A,B,x,act=act)
+  loss=losses[loss](act=act,imp=imp)
+  @jit
+  def _loss(A,B,x,y,U,V,eps=1e-8):
+    return loss(A,B,x,y,U,V,eps=eps)
+  dloss=value_and_grad(_loss,argnums=[0,1])
+  return _loss,dloss,_imp
 
 def init_layers(k,layer_dimensions,sigma_w=1.,sigma_b=1.,
                 no_sqrt_normalise=False,resnet=False,glorot_uniform=False,
@@ -552,9 +570,9 @@ def mk_experiment(p,thresh,fpfn_ratio,target_fn,lr,a,eps=1e-8):
   e.target_fn=target_fn
   e.recent_memory_len=int((1/a.avg_rate)*max(1,1/(e.bs*min(e.target_fp,e.target_fn))))
 
-  e.FPs=cyc(e.recent_memory_len,e.target_fp)
-  e.FNs=cyc(e.recent_memory_len,e.target_fn)
-  e.loss_vals=cyc(e.recent_memory_len,1)#a.bs)
+  e.FPs=cyc(e.recent_memory_len)
+  e.FNs=cyc(e.recent_memory_len)
+  e.loss_vals=cyc(e.recent_memory_len)#a.bs)
   if a.loss=='distribution_flow_cost':
     e.w_init=1.
     e.loss_target=inf
@@ -579,9 +597,9 @@ def init_experiments(a,global_key):
     a.imbalances=[a.p]
     a.in_dim=len(a.x_train[0])
     if a.epochs:
-      a.epoch_num=1
-      a.offset=0
-      a.x_train,a.y_train=shuffle_xy(k1,a.x_train,a.y_train)
+      a.epoch_num=0
+      a.offset=inf
+      #a.x_train,a.y_train=shuffle_xy(k1,a.x_train,a.y_train)
 
   if a.mode=='mnist':
     from tensorflow.keras.datasets import mnist
@@ -992,19 +1010,19 @@ def plot_2d(experiments,fd_tex,a,act,line,k):
       show()
   if fd_tex and plot_num%9: print('\\end{figure}',file=fd_tex)
 
-get_cost=lambda e:e.history.cost
+get_cost=lambda e:log10(1e-8+array(e.history.cost))
 get_lr=lambda e:e.history.lr
-get_dw=lambda e:e.history.dw
+get_dw=lambda e:log10(1e-8+array(e.history.dw))
 def plot_historical_statistics(experiments,fd_tex,a,smoothing=100):
   if fd_tex:
     print('\\subsection{Historical statistics}',file=fd_tex)
   stats=[(get_cost,'log(1e-8+fp/target_fp+fn/target_fn)','Loss'),
-                          (get_dw,'log(dw)','Change_in_weights')]
+         (get_dw,'log(e1-8+dw)','Change_in_weights')]
   if a.mode=='adaptive_lr':
     stats.append((get_lr,'log(lr)','Learning_rate'))
   for get_var,yl,desc in stats:
     for e in experiments:
-      arr=[log10(a) for a in get_var(e)]
+      arr=get_var(e)
       if smoothing:
         ker=ones(smoothing)/smoothing
         arr=convolve(array(arr,dtype=float),ker,'same')
@@ -1012,7 +1030,7 @@ def plot_historical_statistics(experiments,fd_tex,a,smoothing=100):
         lab=a.cats[e.p]
       else:
         lab=fpfnp_lab(e)
-      plot([log10(a) for a in arr],label=lab)
+      plot(arr,label=lab)
     xlabel('Step number *'+str(e.history.resolution))
     ylabel(yl)
     title(desc.replace('_',' '))
@@ -1231,7 +1249,8 @@ def report_progress(a,experiments,line,act,k):
     plot_2d(experiments,fd_tex,a,act,line,k1)
 
   if 'i' in line:
-    model_desc='Model shape:\n'+('->'.join([str(l) for l in a.model_shape]))+'\n'
+    model_desc='- Model shape:\n'+('->'.join([str(l) for l in a.model_shape]))+'\n'+\
+               '- Activation: '+a.act
   
     if a.glorot_uniform:
       model_desc+='\n- Glorot uniform initialisation'

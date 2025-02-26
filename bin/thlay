@@ -66,7 +66,7 @@ else:
   experiments=init_experiments(a,global_key)
 
 act=activations[a.act] #Would like to pickle but unable to do so to lambdas
-loss,dloss=mk_loss(a.loss,act)
+loss,dloss,imp=mk_loss(a.loss,act)
 
 def get_timestep(label):
   global tl
@@ -77,8 +77,6 @@ def get_timestep(label):
   tl=t
 
 while True:
-  a.step+=1
-  if not a.step%a.print_step_interval:print('Step',a.step)
   xy=get_xy(a,a.imbalances,a.bs,emit_key())
 
   a.lr_phase+=a.lr_momentum
@@ -86,15 +84,14 @@ while True:
     if a.stop_on_target and e.steps_to_target:
       continue
     tl=perf_counter()
-    e.step+=1
     x,y_t=xy[float(e.p)]
     e.lr=a.lr*exp(a.lr_amplitude*sin(a.lr_phase))
     e.bs=len(y_t)
     get_timestep('start_loop')
     if a.resnet:
-      y_p=jsm(resnet(e.w_model[0],e.w_model[1],x,act=act),axis=1).flatten()>0
+      y_p=jsm(imp(e.w_model[0],e.w_model[1],x),axis=1).flatten()>0
     else:
-      y_p=f(e.w_model[0],e.w_model[1],x,act=act).flatten()>0
+      y_p=imp(e.w_model[0],e.w_model[1],x).flatten()>0
 
     get_timestep('threshold')
     evaluate_fp_fn(e,y_p,y_t)
@@ -115,12 +112,13 @@ while True:
       e.eps*=2
       upd=[(0.,0.) for u in upd]
 
-    e.loss_vals[e.step-1]=float(e.loss_val)
+    e.loss_vals[e.step]=float(e.loss_val)
     update_weights(a,e,upd)
     get_timestep('update_weights')
 
     update_history(e)
     get_timestep('update_history')
+    e.step+=1
     
   '''
   if not a.step%a.lr_update_interval and a.mode=='adaptive_lr':
@@ -130,9 +128,16 @@ while True:
   '''
 
 
+  line=read_input_if_ready()
+  if not a.step%a.print_step_interval:
+    print('Step',a.step)
+
   if not a.step%a.saving_interval:
     save_ensemble(a,experiments,global_key)
 
-  if not a.step%a.reporting_interval:
-    line=read_input_if_ready()
+  if line or not a.step%a.reporting_interval:
+    if not line:
+      line=read_input_if_ready()
     report_progress(a,experiments,line,act,emit_key(report=True))
+
+  a.step+=1
