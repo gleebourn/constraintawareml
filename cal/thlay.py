@@ -14,8 +14,9 @@ from numpy import inf,unique as npunique,array as nparr,min as nmn,\
                   max as nmx,sum as nsm,log10 as npl10,round as rnd
 from numpy.random import default_rng #Only used for deterministic routines
 from jax.numpy import array,vectorize,zeros,log,log10,flip,maximum,minimum,pad,\
-                      concat,exp,ones,linspace,array_split,reshape,corrcoef,\
-                      concatenate,unique,cov,expand_dims,identity,diag,average,\
+                      concat,exp,ones,linspace,array_split,reshape,corrcoef,eye,\
+                      concatenate,unique,cov,expand_dims,identity,\
+                      diag,average,triu_indices,\
                       sum as jsm,max as jmx
 from jax.numpy.linalg import svdvals
 from jax.scipy.signal import convolve
@@ -53,6 +54,10 @@ class cyc:
   def avg(self):
     return sum(self.list[:self.virt_len])/self.virt_len if self.virt_len else 0
 
+activations={'tanh':tanh,'softmax':softmax,
+             'relu':jit(lambda x:minimum(1,maximum(-1,x))),
+             'linear':jit(lambda x:x)}
+
 def init_ensemble():
   ap=ArgumentParser()
   ap.add_argument('mode',default='all',
@@ -60,7 +65,11 @@ def init_ensemble():
                            'unsw','gmm','mnist','rbd24'])
   ap.add_argument('-no_U_V',action='store_true')
   ap.add_argument('-epochs',action='store_true')
+  ap.add_argument('-rbd24_no_rescale_log',action='store_true')
+  ap.add_argument('-rbd24_no_shuffle',action='store_true')
+  ap.add_argument('-trad_avg',action='store_true')
   ap.add_argument('-resnet',default=0,type=int)
+  ap.add_argument('-fm',default=0,type=int)
   ap.add_argument('-nnpca',action='store_true')
   ap.add_argument('-single_layer_upd',action='store_true')
   ap.add_argument('-p_scale',default=.5,type=float)
@@ -78,9 +87,12 @@ def init_ensemble():
   ap.add_argument('-force_batch_cost',default=0.,type=float)
   ap.add_argument('-no_adam',action='store_true')
   ap.add_argument('-adaptive_threshold',action='store_true')
-  ap.add_argument('-act',choices=['relu','tanh','softmax'],default='tanh')
+  ap.add_argument('-act',choices=list(activations),default='tanh')
   ap.add_argument('--seed',default=20255202,type=int)
   ap.add_argument('-n_splits_img',default=100,type=int)
+  ap.add_argument('-rbd24_single_dataset',default='',type=str)
+  ap.add_argument('-rbd24_no_categorical',action='store_true')
+  ap.add_argument('-rbd24_no_preproc',action='store_true')
   ap.add_argument('-imbalances',type=float,
                   default=[0.1,0.06812921,0.04641589,0.03162278,0.02154435,
                            0.01467799,0.01,0.00681292,0.00464159,0.00316228,
@@ -91,6 +103,7 @@ def init_ensemble():
   ap.add_argument('-all_resolution',default=5,type=int)
   ap.add_argument('-history_len',default=16384,type=int)
   ap.add_argument('-weight_normalisation',default=0.,type=float)
+  ap.add_argument('-no_bias',action='store_true')
   ap.add_argument('-orthonormalise',action='store_true')
   ap.add_argument('-saving_interval',default=1000,type=int)
   ap.add_argument('-lr_init_min',default=1e-4,type=float)
@@ -114,6 +127,8 @@ def init_ensemble():
   ap.add_argument('-no_sqrt_normalise_w',action='store_true')
   ap.add_argument('-no_glorot_uniform',action='store_true')
   ap.add_argument('-glorot_normal',action='store_true')
+  ap.add_argument('-init_zeros',action='store_true')
+  ap.add_argument('-init_ones',action='store_true')
   ap.add_argument('-model_resid',default=False,type=bool)
   ap.add_argument('-p',default=.1,type=float)
   ap.add_argument('-target_fp',default=.01,type=float)
@@ -137,13 +152,7 @@ def init_ensemble():
   a.outf='reports/'+a.outf
   a.report_dir=a.outf+'_report'
   a.n_imb=len(a.imbalances)
-  if a.resnet and a.loss not in ['resnet_cost','resnet_cost_layer',
-                                 'cross_entropy_rn','coalescence_res_cost']:
-    if a.single_layer_upd:
-      a.loss='resnet_cost_layer'
-    else:
-      a.loss='resnet_cost'
-  elif a.nnpca:
+  if a.nnpca:
     a.loss='nn_pca_loss'
   elif a.loss=='distribution_flow_cost':
     a.w_init=1.
@@ -170,10 +179,10 @@ def init_ensemble():
       a.bs=128
     else:
       a.bs=1
-  if not a.model_inner_dims:
+  if not a.model_inner_dims and not a.fm:
     if a.mode=='gmm':
       a.model_inner_dims=[32,16]
-    elif a.mode==['mnist','rbd24']:
+    elif a.mode==['mnist','rbd24'] and a.act not in ['linear','relu']:
       a.model_inner_dims=[64,32,16]
     else:
       a.model_inner_dims=[64,32]
@@ -189,14 +198,18 @@ fpfnp_lab=lambda e:'FP_t,FN_t,p='+f_to_str(e.target_fp,p=False)+','+\
 
 even_indices=lambda arr:[v for i,v in enumerate(arr) if not i%2]
 
-@jit
-def relu(x):return minimum(1,maximum(-1,x))
 
-def f_unbatched(A,B,x,act=tanh):
+def fm_unbatched(A,B,x,act=tanh):
+  for a,b in zip(A,B):
+    x=act(x*(x@a)+b)
+  return tanh(jsm(x))
+fm=vectorize(fm_unbatched,excluded=[0,1],signature='(m)->()')
+
+def f(A,B,x,act=tanh):
   for a,b in zip(A,B):
     x=act(x@a+b)
-  return x[0]
-f=vectorize(f_unbatched,excluded=[0,1],signature='(m)->()')
+  return x.flatten() #assume last layer width 1
+#f=vectorize(f_unbatched,excluded=[0,1],signature='(m)->()')
 
 def pad_or_trunc(x,n):
   return x[:n] if len(x)>=n else pad(x,n-len(x))
@@ -209,8 +222,8 @@ def resnet_unbatched(A,B,x,act=tanh,first_layer_no_skip=True):
     B=B[1:]
   for a,b in zip(A,B):
     x=pad_or_trunc(x,len(b))+act(x@a+b)
-  return x # final layer: sum components, check + or -.
-resnet=vectorize(resnet_unbatched,excluded=[0,1],signature='(m)->(n)')
+  return jsm(x) # final layer: sum components, check + or -.
+resnet=vectorize(resnet_unbatched,excluded=[0,1],signature='(m)->()')
 
 #Default: force two directions of growth,values specified are logarithmic
 @jit
@@ -405,13 +418,61 @@ def resnet_cost_layer(A,B,i,c,d,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
     x+=dx
   return ret-jsm(UmV*x.T)
 
+def mk_l1_fm(act=tanh,imp=f):
+  def l1(A,B,x,y,U,V,eps=.1):
+    y_smooth=imp(A,B,x,act=act)
+    y_diffs=1-y_smooth*(2*y-1)
+    l=(x*(x@A[0]))**2
+    sparsity=jsm(l)-jmx(l) #Foce layer 1 to be typically dominated by 1 term
+
+    #a_p,a_n=y_smooth[y],y_smooth[~y]
+    #cts_fp=jsm(1.+a_n)
+    #cts_fn=jsm(1.-a_p)
+    return jsm(((V-U)*y+U)*y_diffs)+sparsity #U*cts_fp+V*cts_fn
+  return jit(l1)
+
+def mk_l1_orth(act=tanh,imp=f):
+  def l1(A,B,x,y,U,V,eps=.1):
+    y_smooth=imp(A,B,x,act=act)
+    y_diffs=1-y_smooth*(2*y-1)
+    #non_orthog=sum([jsm(((a.T@a)**2)[triu_indices(a.shape[1],k=1)]) for a in A])
+    non_orthog=[jsm(((a.T@a)**2)[triu_indices(a.shape[1],k=1)]) for a in A]
+    noth=0
+    for a in non_orthog:
+      noth+=a
+
+    #a_p,a_n=y_smooth[y],y_smooth[~y]
+    #cts_fp=jsm(1.+a_n)
+    #cts_fn=jsm(1.-a_p)
+    return jsm(((V-U)*y+U)*y_diffs)+noth#non_orthog #U*cts_fp+V*cts_fn
+  return jit(l1)
+
+def mk_waqas(act=tanh,imp=f,eps=1e-5):
+  @jit
+  def _imp(A,B,x):
+    return imp(A,B,x,act=act)
+  @jit
+  def waqas(A,B,x,y,U,V,eps=eps):
+    y_smooth=imp(A,B,x,act=act)
+    y_diffs=maximum(0,-y_smooth*(2*y-1)/(jsm(x**2,axis=1)**.5+eps))
+    #return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
+    #return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
+    return jsm(y_diffs) #U*cts_fp+V*cts_fn
+  dwaqas=value_and_grad(waqas,argnums=[0,1])
+  return waqas,dwaqas,_imp
+
+def mk_hinge(act=tanh,imp=f):
+  def hinge(A,B,x,y,U,V,eps=.1):
+    y_smooth=imp(A,B,x,act=act)
+    y_diffs=maximum(0,-y_smooth*(2*y-1))
+    return jsm(y_diffs) #U*cts_fp+V*cts_fn
+    #return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
+  return jit(hinge)
+
 def mk_l1(act=tanh,imp=f):
   def l1(A,B,x,y,U,V,eps=.1):
     y_smooth=imp(A,B,x,act=act)
     y_diffs=1-y_smooth*(2*y-1)
-    #a_p,a_n=y_smooth[y],y_smooth[~y]
-    #cts_fp=jsm(1.+a_n)
-    #cts_fn=jsm(1.-a_p)
     return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
   return jit(l1)
 
@@ -483,26 +544,16 @@ dcoalescence_res_cost=value_and_grad(coalescence_res_cost,argnums=[0,1])
 #dnn_cost_contraction=value_and_grad(nn_cost_contraction,argnums=[0,1])
 dnn_cost_expansion=value_and_grad(nn_cost_expansion,argnums=[0,1])
 losses={'loss':mk_cross_entropy,'l1':mk_l1,'cross_entropy':mk_cross_entropy,
-        'l2':mk_l2}#,
+        'l1_orth':mk_l1_orth,'l2':mk_l2,'l1_fm':mk_l1_fm,
+        'hinge':mk_hinge,'waqas':mk_waqas}#,
         #'l1_soft':dl1_soft,'cross_entropy_soft':dcross_entropy_soft,
         #'resnet_cost':dresnet_cost,'resnet_cost_layer':dresnet_cost_layer,
         #'nn_pca_loss':nn_pca_loss,'distribution_flow_cost':ddistribution_flow_cost,
         #'coalescence_cost':dcoalescence_cost,'cross_entropy_rn':dcross_entropy_rn,
         #'coalescence_res_cost':dcoalescence_res_cost}
 
-def mk_loss(loss,act,imp=f):
-  @jit
-  def _imp(A,B,x):
-    return imp(A,B,x,act=act)
-  loss=losses[loss](act=act,imp=imp)
-  @jit
-  def _loss(A,B,x,y,U,V,eps=1e-8):
-    return loss(A,B,x,y,U,V,eps=eps)
-  dloss=value_and_grad(_loss,argnums=[0,1])
-  return _loss,dloss,_imp
-
-def init_layers(k,layer_dimensions,sigma_w=1.,sigma_b=1.,
-                no_sqrt_normalise=False,resnet=False,glorot_uniform=False,
+def init_layers(k,layer_dimensions,sigma_w=1.,sigma_b=1.,fm=False,init_ones=False,
+                no_sqrt_normalise=False,init_zeros=False,glorot_uniform=False,
                 glorot_normal=False,orthonormalise=False):
   k1,k2=split(k)
   wb=[]
@@ -512,8 +563,14 @@ def init_layers(k,layer_dimensions,sigma_w=1.,sigma_b=1.,
   a=[]
   b=[]
   for i,(k,l,d_i,d_o) in enumerate(zip(w_k,b_k,layer_dimensions,layer_dimensions[1:])):
-    if resnet:
+    if init_zeros:
       a.append(zeros(shape=(d_i,d_o)))
+      b.append(zeros(shape=d_o))
+    if init_ones:
+      a.append(ones(shape=(d_i,d_o)))
+      b.append(zeros(shape=d_o))
+    elif fm:
+      a.append(eye(d_i,d_o))
       b.append(zeros(shape=d_o))
     elif glorot_uniform:
       a.append((2*(6/(d_i+d_o))**.5)*(uniform(shape=(d_i,d_o),key=k)-.5))
@@ -591,7 +648,12 @@ def init_experiments(a,global_key):
   k1,k2,k3,k4,k5,k6=split(global_key,6)
   a.time_avgs=dict()
   if a.mode=='rbd24':
-    (a.x_train,a.y_train),(a.x_test,a.y_test),(_,a.x_columns)=rbd24()
+    (a.x_train,a.y_train),\
+    (a.x_test,a.y_test),\
+    (_,a.x_columns)=rbd24(rescale_log=not a.rbd24_no_rescale_log,
+                          preproc=not a.rbd24_no_preproc,
+                          categorical=not a.rbd24_no_categorical,
+                          single_dataset=a.rbd24_single_dataset)
     a.p=sum(a.y_train)/len(a.y_train)
     a.p_test=sum(a.y_test)/len(a.y_test)
     a.imbalances=[a.p]
@@ -633,7 +695,16 @@ def init_experiments(a,global_key):
   
     a.w_target=init_layers(k1,a.target_shape,a.target_sigma_w,a.target_sigma_b)
 
-  if a.resnet:
+  if a.fm:
+    a.act='fm'
+    a.model_shape=[a.in_dim]*a.fm#+[1]
+    a.glorot_uniform=a.glorot_normal=False
+  elif a.act=='linear':
+    a.model_shape=[a.in_dim,1]
+    a.init_ones=True
+
+  elif a.resnet:
+    a.init_zeros=True
     a.model_shape=[a.in_dim]+a.model_inner_dims+\
                   [a.model_inner_dims[-1]]*(a.resnet-len(a.model_inner_dims))+[1]
     a.zersq=zeros((a.in_dim,a.in_dim))
@@ -642,8 +713,10 @@ def init_experiments(a,global_key):
     a.model_shape=[a.in_dim]+a.model_inner_dims+[1]
 
   a.w_model_init=init_layers(k2,a.model_shape,sigma_w=a.model_sigma_w,
-                             sigma_b=a.model_sigma_b,resnet=a.resnet,
-                             glorot_uniform=a.glorot_uniform,
+                             sigma_b=a.model_sigma_b,
+                             init_zeros=a.init_zeros,
+                             init_ones=a.init_ones,
+                             glorot_uniform=a.glorot_uniform,fm=a.fm,
                              no_sqrt_normalise=a.no_sqrt_normalise_w,
                              orthonormalise=a.orthonormalise)
 
@@ -700,14 +773,12 @@ def init_experiments(a,global_key):
   return experiments
 
 def shuffle_xy(k,x,y):
-  shuff=permutation(k,len(y)).__array__()
+  shuff=permutation(k,len(y))
   x,y=x[shuff],y[shuff]
   return x,y
 
-activations={'tanh':tanh,'relu':relu,'softmax':softmax}
 
 def get_xy(a,imbs,bs,k):
-  k1,k2,k3,k4=split(k,4)
   if type(imbs)==float:
     ret_single=imbs
     imbs=[imbs]
@@ -721,6 +792,7 @@ def get_xy(a,imbs,bs,k):
                   ([p/a.n_gaussians]*a.n_gaussians))
       mix=choice(k,2*a.n_gaussians,shape=(bs,),p=probs)
       y=mix>=a.n_gaussians
+      k1,k=split(k)
       z=normal(k1,shape=(bs,a.in_dim))
       if a.gmm_compensate_variances:
         z/=(-2*log(p))**.5
@@ -729,37 +801,47 @@ def get_xy(a,imbs,bs,k):
   elif a.mode=='rbd24':
     if a.epochs: #epochs: sample randomly shuffled dataset without replacement
       next_offset=a.offset+a.bs
-      if next_offset>len(a.y_train):
+      if next_offset>len(a.y_train): #new epoch
         a.epoch_num+=1
-        a.x_train,a.y_train=shuffle_xy(k1,a.x_train,a.y_train)
+        print(len(a.y_train))
+        if a.rbd24_no_shuffle:
+          if a.epoch_num>1:
+            print('END OF TIME')
+        else:
+          k1,k=split(k)
+          a.x_train,a.y_train=shuffle_xy(k1,a.x_train,a.y_train)
         a.offset=0
         next_offset=a.bs
       ret={float(a.p):(a.x_train[a.offset:next_offset],
                        a.y_train[a.offset:next_offset])}
       a.offset=next_offset
     else: #sample without replacement
+      k1,k=split(k)
       batch_indices=choice(k1,len(a.y_train),shape=(a.bs,))
       ret={float(a.p):(a.x_train[batch_indices],
                       array(a.y_train[batch_indices]))}
 
   elif a.mode=='unsw':
+    k1,k=split(k)
     batch_indices=choice(k1,len(a.y_train),shape=(a.bs,))
     ret={float(p):(a.x_train[batch_indices],
                    array(a.y_train[batch_indices]==a.cats[p])) for p in a.imbalances}
   elif a.mode=='mnist': #force imbalance of mnist dataset
-    n_pos=[int(binomial(k,a.bs,p)) for k,p in zip(split(k1,a.n_imb),a.imbalances)]
-    x_pos=[choice(k,a.x_train_pos,shape=(np,)) for k,np in\
+    k1,k2,k3,k4,k=split(k,5)
+    n_pos=[int(binomial(kk,a.bs,p)) for kk,p in zip(split(k1,a.n_imb),a.imbalances)]
+    x_pos=[choice(kk,a.x_train_pos,shape=(np,)) for kk,np in\
            zip(split(k2,a.n_imb),n_pos)]
-    x_neg=[choice(k,a.x_train_neg,shape=(a.bs-np,)) for k,np in\
+    x_neg=[choice(kk,a.x_train_neg,shape=(a.bs-np,)) for kk,np in\
            zip(split(k3,a.n_imb),n_pos)]
     x_all=[(xn if not len(xp) else(xp if not len(xn) else concatenate([xp,xn]))) for\
            xp,xn in zip(x_pos,x_neg)]
-    perms=[permutation(k,a.bs) for k in split(k4,a.n_imb)]
+    perms=[permutation(kk,a.bs) for kk in split(k4,a.n_imb)]
 
     ret={p:(x[perm],perm<np) for p,x,np,perm in zip(a.imbalances,x_all,n_pos,perms)}
   else:
     ret=dict()
     for p in imbs:
+      k1,k=split(k)
       x=sample_x(a.bs,k1)
       ret[float(p)]=x,f(a.w_target[0],a.w_target[1],x).flatten()
 
@@ -885,13 +967,18 @@ def upd_adam(w,adam_V,adam_M,upd,beta1,beta2,lr,eps=1e-8):
     delta_v=lr*t/(adam_M**.5+eps)
     wa[i]-=delta_u
     wb[i]-=delta_v
-    w_l2+=nsm(wa[i]**2)+nsm(wb[i]**2)
-    dw_l2+=nsm(delta_u**2)+nsm(delta_v**2)
+    w_l2+=jsm(wa[i]**2)+jsm(wb[i]**2)
+    dw_l2+=jsm(delta_u**2)+jsm(delta_v**2)
   return (wa,wb),(adva,advb),adam_M,w_l2,dw_l2
 
 @jit
 def upd_grad(w,upd,lr):
-  return [a-lr*da for a,da in zip(w[0],upd[0])],[b-lr*db for b,db in zip(w[1],upd[1])]
+  A=[a-lr*da for a,da in zip(w[0],upd[0])]
+  B=[b-lr*db for b,db in zip(w[1],upd[1])]
+  dw=(lr**2)*sum([jsm(da**2)+jsm(db**2) for da,db in zip(*upd)])
+  w=sum([jsm(a**2)+jsm(b**2) for a,b in zip(A,B)])
+
+  return (A,B),w,dw
 
 #@jit
 def update_weights(a,e,upd):#,start=None,end=None):
@@ -904,7 +991,10 @@ def update_weights(a,e,upd):#,start=None,end=None):
     e.w_model,e.adam_V,e.adam_M,e.w_l2,e.dw_l2=upd_adam(e.w_model,e.adam_V,e.adam_M,upd,
                                                         1-a.gamma1,1-a.gamma2,e.lr)
   else:
-    e.w_model=upd_grad(e.w_model,upd,e.lr)
+    e.w_model,e.w_l2,e.dw_l2=upd_grad(e.w_model,upd,e.lr)
+
+  if a.no_bias:
+    e.w_model=e.w_model[0],[0. for b in e.w_model[1]]
 
 def plot_stopping_times(experiments,fd_tex,report_dir):
   for e in experiments: e.fpfn_ratio=float(e.fpfn_ratio)
@@ -1313,14 +1403,14 @@ def dl_rbd24(data_dir=str(Path.home())+'/data',
     print('rbd already extracted')
   return rbd24_dir
 
-def rbd24(preproc=True,split_test_train=True,rescale_log=True,
-          raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl',
+def rbd24(preproc=True,split_test_train=True,rescale_log=True,single_dataset=False,
+          raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl',categorical=True,
           processed_pickle_file=str(Path.home())+'/data/rbd24/rbd24_proc.pkl'):
-  if split_test_train and preproc and isfile(processed_pickle_file):
-    print('Loading processed pickle...')
+  if split_test_train and preproc and rescale_log and isfile(processed_pickle_file):
+    print('Loading processed log rescaled pickle...')
     with open(processed_pickle_file,'rb') as fd:
       return load(fd)
-  if isfile(raw_pickle_file):
+  elif isfile(raw_pickle_file):
     print('Loading raw pickle...')
     df=read_pickle(raw_pickle_file)
   else:
@@ -1333,11 +1423,18 @@ def rbd24(preproc=True,split_test_train=True,rescale_log=True,
     print('Writing raw pickle...')
     df.to_pickle(raw_pickle_file)
 
+  if single_dataset:
+    df=df[df.category==single_dataset].drop(['category'],axis=1)
   if preproc:
     df=preproc_rbd24(df,rescale_log=rescale_log)
   if not split_test_train:
     return df
-  x=get_dummies(df.drop(['label','user_id','timestamp'],axis=1))
+  if categorical:
+    x=get_dummies(df.drop(['label','user_id','timestamp'],axis=1))
+  else:
+    x=df.drop(['entity','user_id','timestamp',
+               'ssl_version_ratio_v20','ssl_version_ratio_v30',
+               'label'],axis=1)
   x_cols=x.columns
   x=x.__array__().astype(float)
   y=df.label.__array__().astype(bool)
@@ -1345,8 +1442,8 @@ def rbd24(preproc=True,split_test_train=True,rescale_log=True,
   split_point=int(l*.7)
   x_train,x_test=x[:split_point],x[split_point:]
   y_train,y_test=y[:split_point],y[split_point:]
-  if split_test_train and preproc:
-    print('Saving processed pickle...')
+  if split_test_train and preproc and rescale_log:
+    print('Saving processed log rescaled pickle...')
     with open(processed_pickle_file,'wb') as fd:
       dump(((x_train,y_train),(x_test,y_test),(df,x_cols)),fd)
   return (x_train,y_train),(x_test,y_test),(df,x_cols)

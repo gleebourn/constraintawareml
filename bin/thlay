@@ -15,9 +15,9 @@ from os.path import dirname,abspath
 from sys import path
 path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import init_ensemble,init_experiments,activations,f_to_str,save_ensemble,\
-                      exp_to_str,fpfnp_lab,f,get_xy,report_progress,update_lrs,mk_loss,\
+                      exp_to_str,fpfnp_lab,f,get_xy,report_progress,update_lrs,losses,\
                       evaluate_fp_fn,update_history,compute_U_V,update_weights,resnet,\
-                      read_input_if_ready
+                      read_input_if_ready,fm
 
 a=init_ensemble()
 
@@ -66,7 +66,12 @@ else:
   experiments=init_experiments(a,global_key)
 
 act=activations[a.act] #Would like to pickle but unable to do so to lambdas
-loss,dloss,imp=mk_loss(a.loss,act)
+imp=f
+if a.fm:
+  imp=fm
+elif a.resnet:
+  imp=resnet
+loss,dloss,imp=losses[a.loss](act,imp=imp)
 
 def get_timestep(label):
   global tl
@@ -77,24 +82,23 @@ def get_timestep(label):
   tl=t
 
 while True:
+  tl=perf_counter()
+  get_timestep('Start_step')
   xy=get_xy(a,a.imbalances,a.bs,emit_key())
-
   a.lr_phase+=a.lr_momentum
+  get_timestep('get_xy')
   for e in experiments:
+    get_timestep('start_loop')
     if a.stop_on_target and e.steps_to_target:
       continue
-    tl=perf_counter()
     x,y_t=xy[float(e.p)]
     e.lr=a.lr*exp(a.lr_amplitude*sin(a.lr_phase))
     e.bs=len(y_t)
-    get_timestep('start_loop')
-    if a.resnet:
-      y_p=jsm(imp(e.w_model[0],e.w_model[1],x),axis=1).flatten()>0
-    else:
-      y_p=imp(e.w_model[0],e.w_model[1],x).flatten()>0
+    get_timestep('access_xy')
+    y_p=imp(e.w_model[0],e.w_model[1],x).flatten()>0
 
     get_timestep('threshold')
-    evaluate_fp_fn(e,y_p,y_t)
+    evaluate_fp_fn(e,y_p,y_t,trad_avg=a.trad_avg)
     get_timestep('evaluate_fp_fn')
 
     if a.no_U_V:
@@ -106,6 +110,8 @@ while True:
                           scale_before_sm=a.scale_before_sm)
     get_timestep('U,V')
     e.loss_val,upd=dloss(e.w_model[0],e.w_model[1],x,y_t,e.U,e.V,eps=e.eps)#,act=act,
+    #print(y_t,nsm(x**2)**.5,
+    #      sum([nsm(u**2) for u in upd[0]]),sum([nsm(u**2) for u in upd[1]]))
     get_timestep('dloss')
     if e.loss_val==inf:
       print('nan encountered, increasing loss epsilon for experiment')
