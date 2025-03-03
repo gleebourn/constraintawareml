@@ -1,0 +1,7 @@
+#!/usr/bin/bash
+
+#one category only, linear model
+#bin/thlay rbd24 -lrs 1 -outf nonenc_smartphone_hinge_lin -fpfn_ratios 1. -epochs -p_scale 1. -loss waqas -act linear -no_adam -rbd24_no_rescale_log -rbd24_single_dataset NonEnc_smartphone -rbd24_no_categorical -rbd24_no_preproc -no_bias -rbd24_no_shuffle -no_stop_on_target
+
+#all categories, casewise linear
+bin/thlay rbd24 -lrs 1. -outf waqas_cwl -fpfn_ratios 1. -epochs -loss waqas -initialisation casewise_linear -rbd24_no_shuffle -rbd24_no_rescale_log -rbd24_no_preproc -reproduce_llpal

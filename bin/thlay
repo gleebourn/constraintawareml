@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 from pickle import load
-from time import perf_counter
 from numpy import sum as nsm,min as nmn,max as nmx
-from jax.numpy import exp,sin,inf
-from jax.random import key,split,choice
-from jax.profiler import save_device_memory_profile
+from jax.numpy import exp,sin,inf,array
+from jax.lax import dot_general
+from jax.random import key,split
+from jax import jit
 from sys import path,stdin
 from os import mkdir,environ
 #environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
@@ -17,7 +17,7 @@ path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import init_ensemble,init_experiments,activations,f_to_str,save_ensemble,\
                       exp_to_str,fpfnp_lab,f,get_xy,report_progress,update_lrs,losses,\
                       evaluate_fp_fn,update_history,compute_U_V,update_weights,resnet,\
-                      read_input_if_ready,fm
+                      read_input_if_ready,fm,implementation
 
 a=init_ensemble()
 
@@ -65,54 +65,53 @@ else:
   
   experiments=init_experiments(a,global_key)
 
-act=activations[a.act] #Would like to pickle but unable to do so to lambdas
-imp=f
-if a.fm:
-  imp=fm
-elif a.resnet:
-  imp=resnet
-loss,dloss,imp=losses[a.loss](act,imp=imp)
+act=activations[a.activation] if a.activation else None
+imp=implementation(a.implementation,act)
 
-def get_timestep(label):
-  global tl
-  t=perf_counter()
-  try: a.time_avgs[label]+=(1+a.clock_avg_rate)*a.clock_avg_rate*float(t-tl)
-  except: a.time_avgs[label]=(1+a.clock_avg_rate)*float(t-tl)
-  a.time_avgs[label]*=(1-a.clock_avg_rate)
-  tl=t
+if a.initialisation=='casewise_linear':
+  cat_mask=[]
+  for c in a.x_columns:
+    cat_mask.append([])
+    for d in a.x_columns:
+      cat_mask[-1].append(1.*(not('category' in c))*('category' in d))
+  cat_mask=array(cat_mask)
 
+  for e in experiments:
+    e.w_model=cat_mask.copy(),[0.]*a.in_dim
+
+loss,dloss=losses[a.loss](imp)
+a.ts=TimeStepper(a.clock_avg_rate)
 while True:
   tl=perf_counter()
-  get_timestep('Start_step')
+  a.ts.get_timestep('Start_step')
   xy=get_xy(a,a.imbalances,a.bs,emit_key())
   a.lr_phase+=a.lr_momentum
-  get_timestep('get_xy')
+  a.ts.get_timestep('get_xy')
   for e in experiments:
-    get_timestep('start_loop')
+    a.ts.get_timestep('start_loop')
     if a.stop_on_target and e.steps_to_target:
       continue
     x,y_t=xy[float(e.p)]
     e.lr=a.lr*exp(a.lr_amplitude*sin(a.lr_phase))
     e.bs=len(y_t)
-    get_timestep('access_xy')
-    y_p=imp(e.w_model[0],e.w_model[1],x).flatten()>0
+    a.ts.get_timestep('access_xy')
+    y_p=imp(e.w_model,x).flatten()>0
 
-    get_timestep('threshold')
+    a.ts.get_timestep('threshold')
     evaluate_fp_fn(e,y_p,y_t,trad_avg=a.trad_avg)
-    get_timestep('evaluate_fp_fn')
+    a.ts.get_timestep('evaluate_fp_fn')
 
     if a.no_U_V:
       e.U=e.V=1
     else:
-      e.U,e.V=compute_U_V(e.fp,e.fn,e.target_fp,e.target_fn,
-                          1 if a.iterate_minority else e.p,
+      e.U,e.V=compute_U_V(e.fp,e.fn,e.target_fp,e.target_fn,e.p,
                           sm=a.softmax_U_V,p_scale=a.p_scale,
                           scale_before_sm=a.scale_before_sm)
-    get_timestep('U,V')
-    e.loss_val,upd=dloss(e.w_model[0],e.w_model[1],x,y_t,e.U,e.V,eps=e.eps)#,act=act,
+    a.ts.get_timestep('U,V')
+    e.loss_val,upd=dloss(e.w_model,x,y_t,e.U,e.V,eps=e.eps)#,act=act,
     #print(y_t,nsm(x**2)**.5,
     #      sum([nsm(u**2) for u in upd[0]]),sum([nsm(u**2) for u in upd[1]]))
-    get_timestep('dloss')
+    a.ts.get_timestep('dloss')
     if e.loss_val==inf:
       print('nan encountered, increasing loss epsilon for experiment')
       e.eps*=2
@@ -120,10 +119,12 @@ while True:
 
     e.loss_vals[e.step]=float(e.loss_val)
     update_weights(a,e,upd)
-    get_timestep('update_weights')
+    if a.initialisation=='casewise_linear' and a.reproduce_llpal:
+      e.w_model=e.w_model[0]*cat_mask,e.w_model[1]
+    a.ts.get_timestep('update_weights')
 
     update_history(e)
-    get_timestep('update_history')
+    a.ts.get_timestep('update_history')
     e.step+=1
     
   '''
@@ -133,17 +134,14 @@ while True:
                            emit_key())
   '''
 
-
   line=read_input_if_ready()
+  a.ts.get_timestep('read_line')
   if not a.step%a.print_step_interval:
-    print('Step',a.step)
-
+    print('step',a.step)
   if not a.step%a.saving_interval:
     save_ensemble(a,experiments,global_key)
-
   if line or not a.step%a.reporting_interval:
     if not line:
       line=read_input_if_ready()
-    report_progress(a,experiments,line,act,emit_key(report=True))
-
+    report_progress(a,experiments,line,imp,emit_key(report=True))
   a.step+=1

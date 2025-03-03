@@ -10,14 +10,14 @@ from zipfile import ZipFile
 from pathlib import Path
 from select import select
 from sys import stdin
+from time import perf_counter
 from numpy import inf,unique as npunique,array as nparr,min as nmn,\
                   max as nmx,sum as nsm,log10 as npl10,round as rnd
 from numpy.random import default_rng #Only used for deterministic routines
 from jax.numpy import array,vectorize,zeros,log,log10,flip,maximum,minimum,pad,\
                       concat,exp,ones,linspace,array_split,reshape,corrcoef,eye,\
                       concatenate,unique,cov,expand_dims,identity,\
-                      diag,average,triu_indices,\
-                      sum as jsm,max as jmx
+                      diag,average,triu_indices,sum as jsm,max as jmx
 from jax.numpy.linalg import svdvals
 from jax.scipy.signal import convolve
 from jax.nn import tanh,softmax
@@ -30,6 +30,86 @@ from matplotlib.pyplot import imshow,legend,show,scatter,xlabel,ylabel,\
 from matplotlib.patches import Patch
 from matplotlib.cm import jet
 from pandas import read_pickle,read_parquet,concat,get_dummies
+
+class TimeStepper:
+  def __init__(self,clock_avg_rate=.01):
+    self.clock_avg_rate=clock_avg_rate
+    self.tl=perf_counter()
+    self.time_avgs={}
+  def get_timestep(self,label):
+    t=perf_counter()
+    try:
+      self.time_avgs[label]+=(1+self.clock_avg_rate)*\
+                             self.clock_avg_rate*\
+                             float(t-self.tl)
+    except:
+      self.time_avgs[label]=(1+self.clock_avg_rate)*\
+                            float(t-self.tl)
+      self.time_avgs[label]*=(1-self.clock_avg_rate)
+    self.tl=t
+  def report(self,p=False):
+    tai=self.time_avgs.items()
+    tsr='\n'.join([str(k)+':'+str(log10(v)) for k,v in tai])
+    if p:
+      print(tsr)
+      return
+    tsrx='\n'.join(['\\texttt{'+k.replace('_','\\_')+'}&'+\
+                    f_to_str(log10(v))+'\\\\\n' for k,v in tai])
+    tsrx+='\\end{tabular}'
+    return tr,tsrx
+
+class OTFBinWeights:
+  def __init__(self,avg_rate,rw_max_diff,target_fp,target_fn,imb,
+               adaptive_thresh_rate,tp=.25,tn=.25,fp=.25,
+               fn=.25,p_scale=.5,rw_max_mult=2):
+    self.adaption_factor=self.thresh=self.atanh_thresh=0
+    self.adaptive_thresh_rate=adaptive_thresh_rate
+    self.relative_weighting=p_scale*log(imb)
+    self.rw_min=rw_max_mult*self.relative_weighting
+    self.target_fp=target_fp
+    self.target_fn=target_fn
+    self.rw_max_diff=rw_max_diff
+    self.avg_rate=avg_rate
+    self.om_avg_rate=1-avg_rate
+    self.tp=tp
+    self.tn=tn
+    self.fp=fp
+    self.fn=fn
+
+  def upd(self,y,yp):
+    n_samps=len(y)
+    self.tp*=self.om_avg_rate
+    self.tn*=self.om_avg_rate
+    self.fp*=self.om_avg_rate
+    self.fn*=self.om_avg_rate
+    tp_b=jsm(yp&y)/n_samps
+    tn_b=jsm(~(yp|y))/n_samps
+    fp_b=jsm(yp&~y)/n_samps
+    fn_b=1-tp_b-tn_b-fp_b
+    self.tp+=self.avg_rate*tp_b
+    self.tn+=self.avg_rate*tn_b
+    self.fp+=self.avg_rate*fp_b
+    self.fn+=self.avg_rate*fn_b
+    #self.relative_weighting+=self.rw_max_diff*\
+    #                         (max(0,self.fp/self.target_fp-1)-\
+    #                          max(0,self.fn/self.target_fn-1))
+    self.adaption_factor+=max(0,fp_b/self.target_fp-1)-\
+                          max(0,fn_b/self.target_fn-1)
+    self.relative_weighting=self.rw_max_diff*\
+                            self.adaption_factor
+    self.relative_weighting=min(max(self.relative_weighting,
+                                    self.rw_min),0)
+    self.atanh_thresh-=self.adaption_factor
+    self.thresh=tanh(self.atanh_thresh*self.adaptive_thresh_rate)
+
+  def report(self,p='\r'):
+    rep='tp:'+f_to_str(self.tp)+'tn:'+f_to_str(self.tn)+\
+        'fp:'+f_to_str(self.fp)+'fn:'+f_to_str(self.fn)+\
+        'relative_weighting:'+\
+        f_to_str(self.relative_weighting)
+    if p:
+      print(rep,end=p)
+    return rep
 
 def read_input_if_ready():
   return stdin.readline().lower() if stdin in select([stdin],[],[],0)[0] else ''
@@ -54,9 +134,51 @@ class cyc:
   def avg(self):
     return sum(self.list[:self.virt_len])/self.virt_len if self.virt_len else 0
 
-activations={'tanh':tanh,'softmax':softmax,
-             'relu':jit(lambda x:minimum(1,maximum(-1,x))),
-             'linear':jit(lambda x:x)}
+def fm(w,x,act=tanh):
+  for a,b in zip(*w):
+    x=act(x*(x@a)+b)
+  return tanh(jsm(x,axis=1))
+
+def f(w,x,act=tanh):
+  for a,b in zip(*w):
+    x=act(x@a+b)
+  return x
+
+def pad_or_trunc(x,n):
+  return x[:n] if len(x)>=n else pad(x,n-len(x))
+
+def resnet(w,x,act=tanh,first_layer_no_skip=True):
+  if first_layer_no_skip:
+    x=act(x@w[0][0]+w[1][0])
+    A=w[0][1:]
+    B=w[1][1:]
+  for a,b in zip(*w):
+    #x=pad_or_trunc(x,len(b))+act(x@a+b)
+    x+=act(x@a+b)
+  return jsm(x,axis=1) # final layer: sum components, check + or -.
+
+activations={'tanh':tanh,'softmax':softmax,'linear':jit(lambda x:x),
+             'relu':jit(lambda x:minimum(1,maximum(-1,x)))}
+implementations={'mlp':f,'resnet':resnet,'fm':fm,'linear':lambda w,x,_:x@w[0]+w[1],
+                  'casewise_linear':lambda w,x,_:dot_general(x,(x@w[0]),((1,1),(0,0)))}
+
+def implementation(imp,act=None):
+  return jit(lambda w,x:implementations[imp](w,x,act))
+
+def select_initialisation(imp,act):
+  if imp in ['fm','resnet']:
+    return 'resnet'
+  else:
+    match act:
+      case 'relu':
+        return 'glorot_normal'
+      case 'tanh':
+        return 'glorot_uniform'
+      case 'linear':
+        return 'ones'
+      case _:
+        print('Initialising weights to glorot uniform!')
+        return 'glorot_uniform'
 
 def init_ensemble():
   ap=ArgumentParser()
@@ -66,9 +188,11 @@ def init_ensemble():
   ap.add_argument('-no_U_V',action='store_true')
   ap.add_argument('-epochs',action='store_true')
   ap.add_argument('-rbd24_no_rescale_log',action='store_true')
-  ap.add_argument('-rbd24_no_shuffle',action='store_true')
+  ap.add_argument('-rbd24_no_shuffle',action='store_true') #Very easy - sorted by label!!!!!!
+  ap.add_argument('-rbd24_sort_timestamp',action='store_true')
   ap.add_argument('-trad_avg',action='store_true')
   ap.add_argument('-resnet',default=0,type=int)
+  ap.add_argument('-resnet_dim',default=64,type=int)
   ap.add_argument('-fm',default=0,type=int)
   ap.add_argument('-nnpca',action='store_true')
   ap.add_argument('-single_layer_upd',action='store_true')
@@ -85,9 +209,12 @@ def init_ensemble():
   ap.add_argument('-no_gmm_compensate_variances',action='store_true')
   ap.add_argument('-gmm_min_dist',default=4,type=float)
   ap.add_argument('-force_batch_cost',default=0.,type=float)
+  ap.add_argument('-adam',action='store_true')
   ap.add_argument('-no_adam',action='store_true')
   ap.add_argument('-adaptive_threshold',action='store_true')
-  ap.add_argument('-act',choices=list(activations),default='tanh')
+  ap.add_argument('-activation',choices=list(activations),default='tanh')
+  ap.add_argument('-implementation',type=str,
+                  choices=list(implementations),default='mlp')
   ap.add_argument('--seed',default=20255202,type=int)
   ap.add_argument('-n_splits_img',default=100,type=int)
   ap.add_argument('-rbd24_single_dataset',default='',type=str)
@@ -122,13 +249,6 @@ def init_ensemble():
   ap.add_argument('-bs',default=0,type=int)
   ap.add_argument('-res',default=1000,type=int)
   ap.add_argument('-outf',default='thlay')
-  ap.add_argument('-model_sigma_w',default=1.,type=float)
-  ap.add_argument('-model_sigma_b',default=1.,type=float)
-  ap.add_argument('-no_sqrt_normalise_w',action='store_true')
-  ap.add_argument('-no_glorot_uniform',action='store_true')
-  ap.add_argument('-glorot_normal',action='store_true')
-  ap.add_argument('-init_zeros',action='store_true')
-  ap.add_argument('-init_ones',action='store_true')
   ap.add_argument('-model_resid',default=False,type=bool)
   ap.add_argument('-p',default=.1,type=float)
   ap.add_argument('-target_fp',default=.01,type=float)
@@ -138,13 +258,18 @@ def init_ensemble():
   ap.add_argument('-fpfn_ratios',default=[2,.5],nargs='+',type=float)
   ap.add_argument('-target_fns',default=[.1],nargs='+',type=float)
   ap.add_argument('-target_tolerance',default=.5,type=float)
-  ap.add_argument('-no_stop_on_target',action='store_true')
-  ap.add_argument('-iterate_minority',action='store_true')
+  ap.add_argument('-stop_on_target',action='store_true')
   #Silly
   ap.add_argument('-lr_phase',default=0.,type=float)
   ap.add_argument('-lr_momentum',default=0.05,type=float)
   ap.add_argument('-lr_amplitude',default=0.,type=float)
   ap.add_argument('-x_max',default=10.,type=float)
+  ap.add_argument('-sqrt_normalise_a',action='store_true')
+  ap.add_argument('-initialisation',type=str,
+                  choices=['glorot_uniform','glorot_normal','eye',
+                           'ones','zeros','resnet','casewise_linear'],default='')
+  ap.add_argument('-reproduce_llpal',action='store_true')
+  ap.add_argument('-mult_a',default=1.,type=float)
   
   a=ap.parse_args()
   if not isdir('reports'):
@@ -158,20 +283,32 @@ def init_ensemble():
     a.w_init=1.
     a.target_increment=.9
 
-  if a.act=='relu':
-    a.glorot_normal=True
-    a.no_glorot_uniform=True
+  if not a.implementation:
+    if a.resnet:
+      a.implementation='resnet'
+    elif a.fm:
+      a.implementation='fm'
+    else:
+      a.implementation='mlp'
 
-  a.glorot_uniform=(not a.no_glorot_uniform) and (not a.glorot_normal)
-  a.stop_on_target=not a.no_stop_on_target
+  if not a.activation and a.implementation not in ['linear','casewise_linear']:
+    a.activation='tanh'
+
+  if not a.initialisation:
+    a.initialisation=select_initialisation(a.implementation,a.activation)
+
   a.gmm_compensate_variances=not a.no_gmm_compensate_variances
-  a.adam=not a.no_adam
+  if a.adam and a.no_adam:
+    print('Cannot have adam and no_adam!')
+    exit(1)
+  elif not a.adam and not a.no_adam:
+    if a.implementation=='casewise_linear' or a.activation=='linear':
+      a.no_adam=True
+    else:
+      a.adam=True
   a.fpfn_ratios,a.target_fns,a.lrs=array(a.fpfn_ratios),array(a.target_fns),array(a.lrs)
   a.out_dir=a.outf+'_report'
   a.step=0
-  if a.bs>1 and a.iterate_minority:
-    print('Minority iterating unavailable since bs>1, continuing without')
-    a.iterate_minority=False
   if len(a.lrs)==1:
     a.lr=a.lrs[0]
   if not a.bs:
@@ -188,7 +325,7 @@ def init_ensemble():
       a.model_inner_dims=[64,32]
   return a
 
-f_to_str=lambda x,p=True:f'{x:.3g}'.ljust(10) if p else f'{x:.3g}'
+f_to_str=lambda x,p=True:f'{x:.3g}'.ljust(9) if p else f'{x:.3g}'
 
 exp_to_str=lambda e:'exp_p'+f_to_str(e.p,p=False)+'fpt'+f_to_str(e.target_fp,p=False)+\
                     'fnt'+f_to_str(e.target_fn,p=False)+'lr'+f_to_str(e.lr,p=False)
@@ -196,44 +333,14 @@ exp_to_str=lambda e:'exp_p'+f_to_str(e.p,p=False)+'fpt'+f_to_str(e.target_fp,p=F
 fpfnp_lab=lambda e:'FP_t,FN_t,p='+f_to_str(e.target_fp,p=False)+','+\
                    f_to_str(e.target_fn,p=False)+','+f_to_str(e.p,p=False)
 
-even_indices=lambda arr:[v for i,v in enumerate(arr) if not i%2]
-
-
-def fm_unbatched(A,B,x,act=tanh):
-  for a,b in zip(A,B):
-    x=act(x*(x@a)+b)
-  return tanh(jsm(x))
-fm=vectorize(fm_unbatched,excluded=[0,1],signature='(m)->()')
-
-def f(A,B,x,act=tanh):
-  for a,b in zip(A,B):
-    x=act(x@a+b)
-  return x.flatten() #assume last layer width 1
-#f=vectorize(f_unbatched,excluded=[0,1],signature='(m)->()')
-
-def pad_or_trunc(x,n):
-  return x[:n] if len(x)>=n else pad(x,n-len(x))
-
 @jit
-def resnet_unbatched(A,B,x,act=tanh,first_layer_no_skip=True):
-  if first_layer_no_skip:
-    x=act(x@A[0]+B[0])
-    A=A[1:]
-    B=B[1:]
-  for a,b in zip(A,B):
-    x=pad_or_trunc(x,len(b))+act(x@a+b)
-  return jsm(x) # final layer: sum components, check + or -.
-resnet=vectorize(resnet_unbatched,excluded=[0,1],signature='(m)->()')
-
-#Default: force two directions of growth,values specified are logarithmic
-@jit
-def svd_cost(A,B,x,act=tanh,top_growth=array([2,1]),imp=resnet,
+def svd_cost(w,x,act=tanh,top_growth=array([2,1]),imp=resnet,
              eps=1e-8,dimension=4,vol_growth=0.):
   if dimension is None: dimension=x.shape[1]
   iden=identity(x_dim)
   sqs=jsm(x**2,axis=1)
   dists_init=sqs+expand_dims(sqs,-1)-2*x@x.T
-  x=imp(A,B,x)
+  x=imp(*w,x)
   sqs=jsm(x**2,axis=1)
   dists_final=sqs+expand_dims(sqs,-1)-2*x@x.T
   distortion=dists_final/(dists_init+iden)
@@ -260,12 +367,12 @@ def dist_penalty(z,y):
   return (U*jsm(dists[pp])+V*jsm(dists[nn]))/(1e-8+jsm(dists[pn]))
 
 @jit
-def metric_cost(A,B,x,y,act=tanh,imp=resnet):
-  z=imp(A,B,x)
+def metric_cost(w,x,y,act=tanh,imp=resnet):
+  z=imp(*w,x)
   return dist_penalty(z,y)
 
 @jit
-def coalescence_cost(A,B,x,y,U,V,act=tanh,tol=1e-4):
+def coalescence_cost(w,x,y,U,V,act=tanh,tol=1e-4):
   bs=len(y)
   iden=identity(bs)
   n_pos=jsm(y)
@@ -279,7 +386,7 @@ def coalescence_cost(A,B,x,y,U,V,act=tanh,tol=1e-4):
   sqs=jsm(x**2,axis=1)
   old_ldists=log(iden+tol+sqs+expand_dims(sqs,-1)-2*x@x.T)
   ret=0.
-  for a,b in zip(A,B):
+  for a,b in zip(*w):
     x=act(x@a+b)
     iden=identity(bs)
     sqs=jsm(x**2,axis=1)
@@ -290,10 +397,10 @@ def coalescence_cost(A,B,x,y,U,V,act=tanh,tol=1e-4):
   return (ret+y@log(tol+1-x)+ny@log(tol+1+x))[0]
 
 @jit
-def nn_cost_expansion(A,B,xp,xn,contraction=False,act=tanh,tol=1e-2,imp=f):
+def nn_cost_expansion(w,xp,xn,contraction=False,act=tanh,tol=1e-2,imp=f):
   ret=0.
   dists_init=jsm((xp-xn)**2,axis=1)
-  xp,xn=imp(A,B,xp,act=act),imp(A,B,xn,act=act)
+  xp,xn=imp(w,xp,act=act),imp(w,xn,act=act)
   dists_final=jsm((xp-xn)**2,axis=1)
   expansion=jsm((tol+dists_final)/(tol+dists_init))
   return expansion if contraction else -expansion
@@ -308,7 +415,7 @@ def nn_cost_contraction(A,B,x,act=tanh,tol=1e-8,imp=f):
 '''
 
 @jit
-def coalescence_res_cost(A,B,x,y,U,V,act=tanh,tol=1e-2):
+def coalescence_res_cost(w,x,y,U,V,act=tanh,tol=1e-2):
   bs=len(y)
   #l=1/len(A)
   iden=identity(bs)
@@ -330,7 +437,7 @@ def coalescence_res_cost(A,B,x,y,U,V,act=tanh,tol=1e-2):
   ret=0.
   sqs=jsm(x**2,axis=1)
   old_ldists=log(tol+sqs+expand_dims(sqs,-1)-2*x@x.T)
-  for a,b in zip(A,B):
+  for a,b in zip(*w):
     dx=act(x@a+b)
     x+=dx
     sqs=jsm(x**2,axis=1)
@@ -352,7 +459,7 @@ def coalescence_res_cost(A,B,x,y,U,V,act=tanh,tol=1e-2):
   #return log(1+ret)+jsm(V*y*(1-x)+U*ny*(1+x))
 
 @jit
-def distribution_flow_cost(A,B,x,y,U,V,w_init,act=tanh,tol=1e-8):
+def distribution_flow_cost(*w,x,y,U,V,w_init,act=tanh,tol=1e-8):
   ret=0.
   n=len(A)
   bs=len(y)
@@ -369,7 +476,7 @@ def distribution_flow_cost(A,B,x,y,U,V,w_init,act=tanh,tol=1e-8):
   #init_dists**=.5
   UV_mask=U*(~y)+V*y
   UV_mask=UV_mask*expand_dims(UV_mask,-1)
-  for i,(a,b) in enumerate(zip(A,B)):
+  for i,(a,b) in enumerate(zip(*w)):
     x=act(x@a+b)
     sqs=jsm(x**2,axis=1)
     dists=log(1+sqs+expand_dims(sqs,-1)-2*x@x.T)
@@ -384,11 +491,11 @@ def distribution_flow_cost(A,B,x,y,U,V,w_init,act=tanh,tol=1e-8):
   return ret/n+(1-w_init)*jsm(U*(~y)*(1+x)+V*y*(1-x))
 
 @jit
-def resnet_cost(A,B,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
+def resnet_cost(w,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
   c=0
   n=len(A)
   UmV=y*(U+V)-U #weight positives and negatives by importance
-  for a,b in zip(A,B):
+  for a,b in zip(*w):
     dx=act(x@a.T+b)
     #sg_dx=dx.T*UmV
     sg_dx=dx.T*(2*y-1)
@@ -400,10 +507,10 @@ def resnet_cost(A,B,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
   return c-jsm(UmV*x.T) # final layer: sum components, check + or -.
 
 @jit
-def resnet_cost_layer(A,B,i,c,d,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
+def resnet_cost_layer(*w,i,c,d,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
   ret=0.
   UmV=y*(U+V)-U
-  for j,(a,b) in enumerate(zip(A,B)):
+  for j,(a,b) in enumerate(zip(*w)):
     if i==j:
       dx=act(x@(a.T+c.T)+b+d)
     else:
@@ -418,22 +525,20 @@ def resnet_cost_layer(A,B,i,c,d,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
     x+=dx
   return ret-jsm(UmV*x.T)
 
-def mk_l1_fm(act=tanh,imp=f):
-  def l1(A,B,x,y,U,V,eps=.1):
-    y_smooth=imp(A,B,x,act=act)
+def mk_l1_fm(imp=f):
+  @jit
+  def l1(w,x,y,U,V,eps=.1):
+    y_smooth=imp(w,x)
     y_diffs=1-y_smooth*(2*y-1)
     l=(x*(x@A[0]))**2
     sparsity=jsm(l)-jmx(l) #Foce layer 1 to be typically dominated by 1 term
-
-    #a_p,a_n=y_smooth[y],y_smooth[~y]
-    #cts_fp=jsm(1.+a_n)
-    #cts_fn=jsm(1.-a_p)
     return jsm(((V-U)*y+U)*y_diffs)+sparsity #U*cts_fp+V*cts_fn
-  return jit(l1)
+  return l1,value_and_grad(l1)
 
 def mk_l1_orth(act=tanh,imp=f):
-  def l1(A,B,x,y,U,V,eps=.1):
-    y_smooth=imp(A,B,x,act=act)
+  @jit
+  def l1(w,x,y,U,V,eps=.1):
+    y_smooth=imp(w,x,act=act)
     y_diffs=1-y_smooth*(2*y-1)
     #non_orthog=sum([jsm(((a.T@a)**2)[triu_indices(a.shape[1],k=1)]) for a in A])
     non_orthog=[jsm(((a.T@a)**2)[triu_indices(a.shape[1],k=1)]) for a in A]
@@ -445,58 +550,66 @@ def mk_l1_orth(act=tanh,imp=f):
     #cts_fp=jsm(1.+a_n)
     #cts_fn=jsm(1.-a_p)
     return jsm(((V-U)*y+U)*y_diffs)+noth#non_orthog #U*cts_fp+V*cts_fn
-  return jit(l1)
+  return l1,value_and_grad(l1)
 
-def mk_waqas(act=tanh,imp=f,eps=1e-5):
+def mk_waqas(imp,eps=1e-5):
   @jit
-  def _imp(A,B,x):
-    return imp(A,B,x,act=act)
-  @jit
-  def waqas(A,B,x,y,U,V,eps=eps):
-    y_smooth=imp(A,B,x,act=act)
+  def waqas(w,x,y,U,V,eps=eps):
+    y_smooth=imp(w,x)
     y_diffs=maximum(0,-y_smooth*(2*y-1)/(jsm(x**2,axis=1)**.5+eps))
-    #return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
-    #return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
     return jsm(y_diffs) #U*cts_fp+V*cts_fn
-  dwaqas=value_and_grad(waqas,argnums=[0,1])
-  return waqas,dwaqas,_imp
+  dwaqas=value_and_grad(waqas)
+  return waqas,dwaqas
 
-def mk_hinge(act=tanh,imp=f):
-  def hinge(A,B,x,y,U,V,eps=.1):
-    y_smooth=imp(A,B,x,act=act)
+def mk_waqas_consaw(imp,eps=1e-5):
+  @jit
+  def waqas(w,x,y,U,V,eps=eps):
+    y_smooth=imp(w,x)
+    y_diffs=maximum(0,-y_smooth*(2*y-1)/(jsm(x**2,axis=1)**.5+eps))
+    return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
+  dwaqas=value_and_grad(waqas)
+  return waqas,dwaqas
+
+def mk_hinge(imp,eps=1e-5):
+  @jit
+  def hinge(w,x,y,U,V,eps=eps):
+    y_smooth=imp(w,x,act=act)
     y_diffs=maximum(0,-y_smooth*(2*y-1))
-    return jsm(y_diffs) #U*cts_fp+V*cts_fn
-    #return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
-  return jit(hinge)
+    return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
+  dhinge=value_and_grad(hinge)
+  return hinge,dhinge
 
-def mk_l1(act=tanh,imp=f):
-  def l1(A,B,x,y,U,V,eps=.1):
-    y_smooth=imp(A,B,x,act=act)
+def mk_l1(imp=f):
+  @jit
+  def l1(w,x,y,U,V,eps=.1):
+    y_smooth=imp(w,x)
     y_diffs=1-y_smooth*(2*y-1)
     return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
-  return jit(l1)
+  dl1=value_and_grad(l1)
+  return l1,dl1
 
 def mk_lp(p=2.):
-  def mk_l(act=tanh,imp=f):
-    def lp(A,B,x,y,U,V,eps=.1):
-      y_smooth=imp(A,B,x,act=act)
+  def mk_l(imp=f):
+    @jit
+    def lp(w,x,y,U,V,eps=.1):
+      y_smooth=imp(w,x)
       y_diffs=((2*y-1)-y_smooth)**p
       #a_p,a_n=y_smooth[y],y_smooth[~y]
       #cts_fp=jsm(1.+a_n)
       #cts_fn=jsm(1.-a_p)
       return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
-    return lp
+    return lp,value_and_grad(lp)
   return mk_l
 
 mk_l2=mk_lp()
 
 @jit
-def l1(A,B,x,y,U,V,act=tanh):
-  return l1_soft(A,B,x,y,U,V,0.,act)
+def l1(w,x,y,U,V,act=tanh):
+  return l1_soft(w,x,y,U,V,0.,act)
 
 def mk_cross_entropy(act=tanh,imp=f):
-  def cross_entropy(A,B,x,y,U,V,eps=1e-8):
-    y_smooth=imp(A,B,x,act=act)
+  def cross_entropy(w,x,y,U,V,eps=1e-8):
+    y_smooth=imp(w,x,act=act)
     y_winnings=y_smooth*(2*y-1) #+ if same sign, - if different sign
     #return -jsm(((V-U)*y+U)*log(1+eps+y_preloss))
     return -jsm(((V-U)*y+U)*log(1+eps+y_winnings))
@@ -504,16 +617,16 @@ def mk_cross_entropy(act=tanh,imp=f):
   return jit(cross_entropy)
 
 @jit
-def cross_entropy_rn(A,B,x,y,U,V,act=tanh,eps=1e-8):
-  y_smooth=tanh(resnet(A,B,x,act=act))
+def cross_entropy_rn(w,x,y,U,V,act=tanh,eps=1e-8):
+  y_smooth=tanh(resnet(w,x,act=act))
   a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
   cts_fn=-jsm(log(eps+1.+a_p)) #y=1 => H(y,y')=-log(y'')=-log((1+y')/2)
   cts_fp=-jsm(log(eps+1.-a_n)) #y=0 => H(y,y')=-log(1-y'')=-log((1-y')/2)
   return U*cts_fp+V*cts_fn
 
 @jit
-def cross_entropy_soft(A,B,x,y,U,V,act=tanh,normalisation=False,softness=.1,eps=1e-8):
-  y_smooth=f(A,B,x,act=act)
+def cross_entropy_soft(w,x,y,U,V,act=tanh,normalisation=False,softness=.1,eps=1e-8):
+  y_smooth=f(w,x,act=act)
   a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
   cts_fn=-(1-softness)*jsm(log(eps+1.+a_p))-softness*jsm(log(eps+1.-a_p))
   cts_fp=-(1-softness)*jsm(log(eps+1.-a_n))-softness*jsm(log(eps+1.+a_n))
@@ -531,70 +644,59 @@ def nn_pca_loss(w_c,b_c,w_e,b_e,x,x_targ,eps=1e-8):
   l+=jsm((x_p-x_targ)**2)
   return l#log(jsm(w_c[-1]@w_c[-1].T)))
 
-dmetric_cost=value_and_grad(metric_cost,argnums=[0,1])
-dsvd_cost=value_and_grad(svd_cost,argnums=[0,1])
-dl1=value_and_grad(l1,argnums=[0,1])
-dresnet_cost=value_and_grad(resnet_cost,argnums=[0,1])
-dresnet_cost_layer=value_and_grad(resnet_cost_layer,argnums=[3,4])
-dcross_entropy_rn=value_and_grad(cross_entropy_rn,argnums=[0,1])
-dcross_entropy_soft=value_and_grad(cross_entropy_soft,argnums=[0,1])
-ddistribution_flow_cost=value_and_grad(distribution_flow_cost,argnums=[0,1])
-dcoalescence_cost=value_and_grad(coalescence_cost,argnums=[0,1])
-dcoalescence_res_cost=value_and_grad(coalescence_res_cost,argnums=[0,1])
-#dnn_cost_contraction=value_and_grad(nn_cost_contraction,argnums=[0,1])
-dnn_cost_expansion=value_and_grad(nn_cost_expansion,argnums=[0,1])
 losses={'loss':mk_cross_entropy,'l1':mk_l1,'cross_entropy':mk_cross_entropy,
         'l1_orth':mk_l1_orth,'l2':mk_l2,'l1_fm':mk_l1_fm,
-        'hinge':mk_hinge,'waqas':mk_waqas}#,
+        'hinge':mk_hinge,'waqas':mk_waqas,'waqas_consaw':mk_waqas_consaw}#,
         #'l1_soft':dl1_soft,'cross_entropy_soft':dcross_entropy_soft,
         #'resnet_cost':dresnet_cost,'resnet_cost_layer':dresnet_cost_layer,
         #'nn_pca_loss':nn_pca_loss,'distribution_flow_cost':ddistribution_flow_cost,
         #'coalescence_cost':dcoalescence_cost,'cross_entropy_rn':dcross_entropy_rn,
         #'coalescence_res_cost':dcoalescence_res_cost}
 
-def init_layers(k,layer_dimensions,sigma_w=1.,sigma_b=1.,fm=False,init_ones=False,
-                no_sqrt_normalise=False,init_zeros=False,glorot_uniform=False,
-                glorot_normal=False,orthonormalise=False):
+def init_layers(k,layer_dimensions,initialisation,mult_a=1.,
+                sqrt_normalise=False,orthonormalise=False):
   k1,k2=split(k)
   wb=[]
   n_steps=len(layer_dimensions)-1
   w_k=split(k1,n_steps)
   b_k=split(k2,n_steps)
-  a=[]
-  b=[]
+  A=[]
+  B=[]
   for i,(k,l,d_i,d_o) in enumerate(zip(w_k,b_k,layer_dimensions,layer_dimensions[1:])):
-    if init_zeros:
-      a.append(zeros(shape=(d_i,d_o)))
-      b.append(zeros(shape=d_o))
-    if init_ones:
-      a.append(ones(shape=(d_i,d_o)))
-      b.append(zeros(shape=d_o))
-    elif fm:
-      a.append(eye(d_i,d_o))
-      b.append(zeros(shape=d_o))
-    elif glorot_uniform:
-      a.append((2*(6/(d_i+d_o))**.5)*(uniform(shape=(d_i,d_o),key=k)-.5))
-      b.append(zeros(shape=d_o))
-    elif glorot_normal:
-      a.append(((2/(d_i+d_o))**.5)*(normal(shape=(d_i,d_o),key=k)))
-      b.append(zeros(shape=d_o))
-    else:
-      a.append(normal(shape=(d_i,d_o),key=k))
-      b.append(normal(shape=d_o,key=l))
-  #if orthonormalise:
-  #  for r,d_i,d_o in zip(ret,layer_dimensions,layer_dimensions[1:]):
-  #    if d_i>d_o:
-  #      r[0]=svd(r[0],full_matrices=False)[0]
-  #    else:
-  #      r[0]=svd(r[0],full_matrices=False)[2]
-  #for r in ret:
-  #  r[i][0]*=sigma_w
-  #  ret[i][1]*=sigma_b
-  #if no_sqrt_normalise:
-  #  return ret
-  #for r,d_i in zip(ret,layer_dimensions[1:]):
-  #  ret[i][0]/=d_i**.5
-  return a,b
+    match initialisation:
+      case 'zeros':
+        A.append(zeros((d_i,d_o)))
+        B.append(zeros(d_o))
+      case 'resnet'|'ones':
+        A.append(ones((d_i,d_o))*mult_a)
+        B.append(zeros(d_o))
+        initialisation='zeros' if initialisation=='resnet' else 'ones'
+      case 'eye':
+        A.append(eye(d_i,d_o))*mult_a
+        B.append(zeros(d_o))
+      case 'glorot_uniform':
+        A.append((2*(6/(d_i+d_o))**.5)*(uniform(shape=(d_i,d_o),key=k)-.5)*mult_a)
+        B.append(zeros(d_o))
+      case 'glorot_normal':
+        A.append(((2/(d_i+d_o))**.5)*(normal(shape=(d_i,d_o),key=k))*mult_a)
+        B.append(zeros(d_o))
+      case 'casewise_linear':
+        A=ones((d_i,d_i))
+        #A=zeros((d_i,d_i))
+        B=zeros(shape=d_i)
+        return A,B
+      case _:
+        raise Exception('Unknown initialisation: '+initialisation)
+  if orthonormalise:
+    for i,(d_i,d_o) in enumerate(layer_dimensions,layer_dimensions[1:]):
+      if d_i>d_o:
+        A[i]=svd(A[i],full_matrices=False)[0]
+      else:
+        A[i]=svd(A[i],full_matrices=False)[2]
+  if sqrt_normalise:
+    for i,d_i in enumerate(layer_dimensions[1:]):
+      A[i]/=d_i**.5
+  return A,B
 
 def sample_x(bs,key):
   return 2*a.x_max*uniform(shape=(bs,2),key=key)-a.x_max
@@ -613,7 +715,10 @@ def mk_experiment(p,thresh,fpfn_ratio,target_fn,lr,a,eps=1e-8):
   e.steps_to_target=False
   e.avg_rate=a.avg_rate
   e.dw_l2=e.w_l2=0
-  e.w_model=[v.copy() for v in a.w_model_init[0]],[v.copy() for v in a.w_model_init[1]]
+  if a.initialisation=='casewise_linear':
+    e.w_model=a.w_model_init[0].copy(),a.w_model_init[1].copy()
+  else:
+    e.w_model=[v.copy() for v in a.w_model_init[0]],[v.copy() for v in a.w_model_init[1]]
   e.history_len=a.history_len
   e.step=0
 
@@ -689,35 +794,24 @@ def init_experiments(a,global_key):
     a.y_test=df_test['attack_cat']
     a.in_dim=len(a.x_train[0])
 
-  elif a.mode=='all':
-    a.target_sigma_w=.75
-    a.target_sigma_b=2.
-  
-    a.w_target=init_layers(k1,a.target_shape,a.target_sigma_w,a.target_sigma_b)
+  #elif a.mode=='all':
+  #  a.target_mult_a=.75
+  #  a.target_mult_b=2.
+  #
+  #  a.w_target=init_layers(k1,a.target_shape,a.target_mult_a,a.target_mult_b)
+
+  if a.implementation=='linear':
+    a.model_shape=[a.in_dim,1]
 
   if a.fm:
-    a.act='fm'
     a.model_shape=[a.in_dim]*a.fm#+[1]
-    a.glorot_uniform=a.glorot_normal=False
-  elif a.act=='linear':
-    a.model_shape=[a.in_dim,1]
-    a.init_ones=True
-
   elif a.resnet:
-    a.init_zeros=True
-    a.model_shape=[a.in_dim]+a.model_inner_dims+\
-                  [a.model_inner_dims[-1]]*(a.resnet-len(a.model_inner_dims))+[1]
-    a.zersq=zeros((a.in_dim,a.in_dim))
-    a.zerarr=zeros(a.in_dim)
+    a.model_shape=[a.in_dim]+([a.resnet_dim]*a.resnet)
   else:
     a.model_shape=[a.in_dim]+a.model_inner_dims+[1]
 
-  a.w_model_init=init_layers(k2,a.model_shape,sigma_w=a.model_sigma_w,
-                             sigma_b=a.model_sigma_b,
-                             init_zeros=a.init_zeros,
-                             init_ones=a.init_ones,
-                             glorot_uniform=a.glorot_uniform,fm=a.fm,
-                             no_sqrt_normalise=a.no_sqrt_normalise_w,
+  a.w_model_init=init_layers(k2,a.model_shape,a.initialisation,a.mult_a,
+                             sqrt_normalise=a.sqrt_normalise_a,
                              orthonormalise=a.orthonormalise)
 
   if a.mode=='unsw':
@@ -803,7 +897,7 @@ def get_xy(a,imbs,bs,k):
       next_offset=a.offset+a.bs
       if next_offset>len(a.y_train): #new epoch
         a.epoch_num+=1
-        print(len(a.y_train))
+        print('Number of rows in training data:',len(a.y_train))
         if a.rbd24_no_shuffle:
           if a.epoch_num>1:
             print('END OF TIME')
@@ -863,6 +957,10 @@ def evaluate_fp_fn(e,y_p,y_t,trad_avg=False):
     e.fp+=e.fp_amnt*e.FP
     e.fn*=(1-e.fn_amnt)
     e.fn+=e.fn_amnt*e.FN
+
+def even_indices(li):
+  l=len(li)
+  return [li[2*i] for i in range(l//2)]
 
 def update_history(e):
   if not e.step%e.history.resolution: #for plotting purposes
@@ -973,28 +1071,37 @@ def upd_adam(w,adam_V,adam_M,upd,beta1,beta2,lr,eps=1e-8):
 
 @jit
 def upd_grad(w,upd,lr):
-  A=[a-lr*da for a,da in zip(w[0],upd[0])]
-  B=[b-lr*db for b,db in zip(w[1],upd[1])]
-  dw=(lr**2)*sum([jsm(da**2)+jsm(db**2) for da,db in zip(*upd)])
-  w=sum([jsm(a**2)+jsm(b**2) for a,b in zip(A,B)])
+  w=([a-lr*da for a,da in zip(w[0],upd[0])],
+     [b-lr*db for b,db in zip(w[1],upd[1])])
+  dw_lw=(lr**2)*sum([jsm(da**2)+jsm(db**2) for da,db in zip(*upd)])
+  w_l2=sum([jsm(a**2)+jsm(b**2) for a,b in zip(*w)])
 
-  return (A,B),w,dw
+  return w,w_l2,dw_l2
 
 #@jit
 def update_weights(a,e,upd):#,start=None,end=None):
+  if a.initialisation=='casewise_linear':
+    wm=list(e.w_model[0]),list(e.w_model[1])
+  else:
+    wm=e.w_model
   #offset=0 if start is None else start
   #adva=e.adam_V[0][start:end]
   #advb=e.adam_V[1][start:end]
   #wmoda=e.w_model[0][start:end]
   #wmodb=e.w_model[1][start:end]
   if a.adam:
-    e.w_model,e.adam_V,e.adam_M,e.w_l2,e.dw_l2=upd_adam(e.w_model,e.adam_V,e.adam_M,upd,
-                                                        1-a.gamma1,1-a.gamma2,e.lr)
+    wm,e.adam_V,e.adam_M,e.w_l2,e.dw_l2=upd_adam(wm,e.adam_V,e.adam_M,upd,
+                                                 1-a.gamma1,1-a.gamma2,e.lr)
   else:
-    e.w_model,e.w_l2,e.dw_l2=upd_grad(e.w_model,upd,e.lr)
+    wm,e.w_l2,e.dw_l2=upd_grad(wm,upd,e.lr)
 
   if a.no_bias:
-    e.w_model=e.w_model[0],[0. for b in e.w_model[1]]
+    wm=wm[0],[0. for b in wm[1]]
+
+  if a.initialisation=='casewise_linear':
+    e.w_model=array(wm[0]),array(wm[1])
+  else:
+    e.w_model=wm
 
 def plot_stopping_times(experiments,fd_tex,report_dir):
   for e in experiments: e.fpfn_ratio=float(e.fpfn_ratio)
@@ -1022,7 +1129,7 @@ def plot_stopping_times(experiments,fd_tex,report_dir):
   except AttributeError:
     print('fpfn ratios not found, skipping stopping time analysis')
 
-def plot_2d(experiments,fd_tex,a,act,line,k):
+def plot_2d(experiments,fd_tex,a,imp,line,k):
   if fd_tex:
     print('\\subsection{2d visualisation of classifications}',file=fd_tex)
     print('Here a 2d region is learned.\\\\',file=fd_tex)
@@ -1042,8 +1149,8 @@ def plot_2d(experiments,fd_tex,a,act,line,k):
     x=cartesian([linspace(x_0_min,x_0_max,num=a.res),
                  linspace(x_1_min,x_1_max,num=a.res)])
     x_split=array_split(x,a.n_splits_img)
-    y_p=concat([(f(e.w_model[0],e.w_model[1],
-                   _x,act=act)>0).flatten() for _x in x_split])
+    y_p=concat([(imp(e.w_model,_x)>0).flatten() for\
+                _x in x_split])
     y_p=flip(y_p.reshape(a.res,a.res),axis=1) #?!?!?!
 
     cm=None
@@ -1070,7 +1177,7 @@ def plot_2d(experiments,fd_tex,a,act,line,k):
     handles=[Patch(color=c,label=s) for c,s in zip(col_mat,labs)]
     if a.mode=='gmm':
       x_0,x_1=tuple(x_t.T)
-      y_p_s=f(e.w_model[0],e.w_model[1],x_t,act=act).flatten()>0
+      y_p_s=f(e.w_model,x_t,act=act).flatten()>0
       scatter(x_0[y_t&y_p_s],x_1[y_t&y_p_s],c='darkgreen',s=1,label='TP')
       scatter(x_0[y_t&~y_p_s],x_1[y_t&~y_p_s],c='palegreen',s=1,label='FP')
       scatter(x_0[~y_t&~y_p_s],x_1[~y_t&~y_p_s],c='cyan',s=1,label='TN')
@@ -1172,9 +1279,9 @@ def plot_fpfn_scatter(experiments,fd_tex,a):
   else:
     show()
 
-def report_progress(a,experiments,line,act,k):
+def report_progress(a,experiments,line,imp,k):
   k1,k2=split(k)
-  print('|'.join([t.ljust(10) for t in ['p','target_fp','target_fn',
+  print('|'.join([t.ljust(9) for t in ['p','target_fp','target_fn',
                                         'lr','fp','fn','w','dw','U','V','complete']]))
   for e in experiments:
     print('|'.join([f_to_str(t) for t in [e.p,e.target_fp,e.target_fn,e.lr,
@@ -1199,10 +1306,23 @@ def report_progress(a,experiments,line,act,k):
     print('a.'+line[1]+'->'+str(ty(l[2])))
     return
   elif '?' in line:
-    try:
-      print(vars(a)[line.split('?')[0]])
-    except KeyError:
+    query_var=line.split('?')[0]
+    va=vars(a)
+    if query_var in va:
+      print('a.'+query_var,':',va[query_var])
+    else:
       print('"',line.split('?')[0],'" not in a')
+    return
+  elif '!' in line:
+    query_var=line.split('!')[0]
+    found=False
+    for i,e in enumerate(experiments):
+      ve=vars(e)
+      if query_var in ve:
+        found=True
+        print('experiment_'+str(i)+'.'+query_var,':',ve[query_var])
+    if not found:
+      print('"',line.split('?')[0],'" not in any experiment')
     return
   elif '*' in line:
     print('a variables:')
@@ -1225,18 +1345,14 @@ def report_progress(a,experiments,line,act,k):
         print('target_fp_0,target_fn_0:',
               f_to_str(e.target_fp),f_to_str(e.target_fn))
         print('fp_train_0,fn_train_0:',
-              f_to_str(sum([nsm(f(e.w_model[0],e.w_model[1],
-                                  x_train_neg[i:i+a.bs])>0) for\
+              f_to_str(sum([nsm(f(e.w_model,x_train_neg[i:i+a.bs])>0) for\
                             i in range(0,len(x_train_neg),a.bs)])/len(a.x_train)),
-              f_to_str(sum([nsm(f(e.w_model[0],e.w_model[1],
-                                  x_train_pos[i:i+a.bs])<=0) for\
+              f_to_str(sum([nsm(f(e.w_model,x_train_pos[i:i+a.bs])<=0) for\
                             i in range(0,len(x_train_pos),a.bs)])/len(a.x_train)))
         print('fp_test_0,fn_test_0:',
-              f_to_str(sum([nsm(f(e.w_model[0],e.w_model[1],
-                                  x_test_neg[i:i+a.bs])>0) for\
+              f_to_str(sum([nsm(f(e.w_model,x_test_neg[i:i+a.bs])>0) for\
                             i in range(0,len(x_test_neg),a.bs)])/len(a.x_test)),
-              f_to_str(sum([nsm(f(e.w_model[0],e.w_model[1],
-                                  x_test_pos[i:i+a.bs])<=0) for\
+              f_to_str(sum([nsm(f(e.w_model,x_test_pos[i:i+a.bs])<=0) for\
                             i in range(0,len(x_test_pos),a.bs)])/len(a.x_test)))
       else:
         x_train_pos=a.x_train_pos
@@ -1248,15 +1364,11 @@ def report_progress(a,experiments,line,act,k):
         print('target_fp_0,target_fn_0:',
               f_to_str((1-.1)*e.target_fp/(1-e.p)),f_to_str(.1*e.target_fn/e.p))
         print('fp_train_0,fn_train_0:',
-              f_to_str(nsm(f(e.w_model[0],e.w_model[1],
-                             x_train_neg)>0)/len(a.x_train)),
-              f_to_str(nsm(f(e.w_model[0],e.w_model[1],
-                             x_train_pos)<=0)/len(a.x_train)))
+              f_to_str(nsm(f(e.w_model,x_train_neg)>0)/len(a.x_train)),
+              f_to_str(nsm(f(e.w_model,x_train_pos)<=0)/len(a.x_train)))
         print('fp_test_0,fn_test_0:',
-              f_to_str(nsm(f(e.w_model[0],e.w_model[1],
-                             x_test_neg)>0)/len(a.x_test)),
-              f_to_str(nsm(f(e.w_model[0],e.w_model[1],
-                             x_test_pos)<=0)/len(a.x_test)))
+              f_to_str(nsm(f(e.w_model,x_test_neg)>0)/len(a.x_test)),
+              f_to_str(nsm(f(e.w_model,x_test_pos)<=0)/len(a.x_test)))
   if 'r' in line:
     line+='clist'
     a.report_dir=a.outf+'_report'
@@ -1305,10 +1417,10 @@ def report_progress(a,experiments,line,act,k):
           if a.mode=='mnist':
             y_ones_test=a.y_test==1 #1 detector
 
-            report_fns.append(f_to_str(e.p*nsm(f(e.w_model[0],e.w_model[1],
+            report_fns.append(f_to_str(e.p*nsm(f(e.w_model,
                                                  a.x_test_pos)<=0)/\
                                        (.1*len(a.x_test))))
-            report_fps.append(f_to_str((1-e.p)*nsm(f(e.w_model[0],e.w_model[1],
+            report_fps.append(f_to_str((1-e.p)*nsm(f(e.w_model,
                                                      a.x_test_neg)>0)/\
                                        ((1-.1)*len(a.x_test))))
           else:
@@ -1329,36 +1441,22 @@ def report_progress(a,experiments,line,act,k):
           'step&$\\log(\\overline{\\texttt{T}_\\texttt{step}})$\\\\\n',file=fd_tex)
 
   print('Timing:')
-  for k,v in a.time_avgs.items():
-    print(k,log10(v))
-    if fd_tex: print('\\texttt{'+k.replace('_','\\_')+'}&'+\
-                     f_to_str(log10(v))+'\\\\\n',file=fd_tex)
-  if fd_tex: print('\\end{tabular}',file=fd_tex)
+  tsr,tsrx=a.ts.report()
+  print(tsr)
+  if fd_tex:print(tsrx,file=fd_tex)
 
   if a.in_dim==2 and 'c' in line:
-    plot_2d(experiments,fd_tex,a,act,line,k1)
+    plot_2d(experiments,fd_tex,a,imp,line,k1)
 
   if 'i' in line:
-    model_desc='- Model shape:\n'+('->'.join([str(l) for l in a.model_shape]))+'\n'+\
-               '- Activation: '+a.act
-  
-    if a.glorot_uniform:
-      model_desc+='\n- Glorot uniform initialisation'
-    elif a.glorot_normal:
-      model_desc+='\n- Glorot normal initialisation'
-    else:
-      model_desc+='\n'.join(['- matrix weight variance:'+\
-                             f_to_str(a.model_sigma_w,p=False),
-                             '- bias variance:'+f_to_str(a.model_sigma_b,p=False),
-                             '- residual initialisation:'+\
-                             f_to_str(a.model_resid,p=False),
-                             'sqrt variance correction:'+\
-                             str(not a.no_sqrt_normalise_w)])
-    model_desc+='\n- batch size:'+str(a.bs)
-    if a.mode=='gmm':
-      model_desc+='\n- learning rate:'+str(a.lr)
-    if a.iterate_minority:
-      model_desc+='Iterating minority class 1/p times'
+    model_desc='- Model shape:\n'+('->'.join([str(l) for l in a.model_shape]))+\
+               ('\n- Casewise linear\n' if a.initialisation=='casewise_linear' else\
+                '\n- Activation: '+a.act+'\n')+\
+               '- Model initialisation: '+str(a.initialisation)+'\n'\
+               '- Matrix weight multiplier: '+str(a.mult_a)+'\n'\
+               '- Sqrt variance correction:'+str(a.sqrt_normalise_a)+'\n'\
+               '- Batch size:'+str(a.bs)+'\n'\
+               '- learning rate:'+str(a.lr)
     print(model_desc)
     if fd_tex:
       print('\\subsection{Model parameters}',file=fd_tex)
@@ -1406,7 +1504,7 @@ def dl_rbd24(data_dir=str(Path.home())+'/data',
 def rbd24(preproc=True,split_test_train=True,rescale_log=True,single_dataset=False,
           raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl',categorical=True,
           processed_pickle_file=str(Path.home())+'/data/rbd24/rbd24_proc.pkl'):
-  if split_test_train and preproc and rescale_log and isfile(processed_pickle_file):
+  if split_test_train and preproc and rescale_log and isfile(processed_pickle_file) and not single_dataset:
     print('Loading processed log rescaled pickle...')
     with open(processed_pickle_file,'rb') as fd:
       return load(fd)
@@ -1442,7 +1540,7 @@ def rbd24(preproc=True,split_test_train=True,rescale_log=True,single_dataset=Fal
   split_point=int(l*.7)
   x_train,x_test=x[:split_point],x[split_point:]
   y_train,y_test=y[:split_point],y[split_point:]
-  if split_test_train and preproc and rescale_log:
+  if split_test_train and preproc and rescale_log and not single_dataset:
     print('Saving processed log rescaled pickle...')
     with open(processed_pickle_file,'wb') as fd:
       dump(((x_train,y_train),(x_test,y_test),(df,x_cols)),fd)

@@ -1,0 +1,262 @@
+#!/usr/bin/env python
+#from pickle import load,dump
+#from time import perf_counter
+from jax.numpy import zeros,sum as jsm,concatenate,isnan,\
+                      array,size,array_split,exp,log
+from jax.random import key,split,randint
+from jax import jit,grad,value_and_grad
+from sys import path,stdin
+from os import mkdir,environ
+from os.path import dirname,abspath
+from sys import path
+path.append(dirname(dirname(abspath(__file__))))
+from cal.thlay import rbd24,init_layers,read_input_if_ready,\
+                      TimeStepper,OTFBinWeights,activations,\
+                      implementation,select_initialisation
+
+k=key(1729)
+
+(x_r,y_r),(x_e,y_e),\
+(_,x_columns)=rbd24(rescale_log=True,preproc=True,categorical=True)
+
+n_r,x_dim=x_r.shape
+n_e=len(x_e)
+
+p_r=jsm(y_r)/len(y_r)
+p_e=jsm(y_e)/len(y_e)
+print('Train imbalance:',p_r)
+print('Test imbalance:',p_e)
+p_scale=0.#1
+adaptive_thresh_rate=1e-4
+
+
+state_dim=16
+
+in_dim=x_dim+state_dim
+
+expansion_factor=1
+
+predict_layers=5
+
+predict_dims=[in_dim]+[int((expansion_factor*in_dim)**(1-i/predict_layers)*\
+                           (state_dim**(i/predict_layers))) for\
+                       i in range(predict_layers+1)]
+
+ruminate_layers=0
+
+ruminate_dims=[state_dim]*(ruminate_layers+1)
+
+print(predict_dims)
+print(ruminate_dims)
+
+imp='mlp'
+act='relu'#'tanh'
+activation=activations[act]
+forward=implementation(imp,activation)
+init=select_initialisation(imp,act)
+w_predict=init_layers(k,predict_dims,init)
+w_ruminate=init_layers(k,ruminate_dims,init)
+w=(w_predict,w_ruminate)
+
+@jit
+def predict(w,s,X):
+  n,xl=X.shape
+  Yp=[]#zeros(n)
+  sl=len(s)
+  sx=concatenate(s0,X[0])
+  for i,x in enumerate(X):
+    sx=concatenate([s,x])
+    #sx.at[sl:].set(x)
+    z=forward(w_predict,sx)
+    Yp.append(jsm(z))
+    s=forward(w_ruminate,z)
+  return Yp
+
+@jit
+def predict_supervised(w,s,X,Y):
+  n,xl=X.shape
+  Yp=[]
+  sl=len(s)
+  sx=concatenate([s0,zeros(xl)])
+  for i,(x,y) in enumerate(zip(X,Y)):
+    sx=concatenate([s,x])
+    #sx.at[sl:].set(x)
+    z=forward(w[0],sx)
+    Yp.append(z[0])
+    #z.at[0].set(2*y-1)
+    #z=concatenate([array([2*y-1]),z[1:]])
+    s=forward(w[1],z)
+  return array(Yp),s
+
+@jit
+def loss(w,s0,X,Y,rw,lr,reg):
+  Yp=predict_supervised(w,s0,X,Y)[0]
+  w_pos=exp(rw)
+  w_neg=1/w_pos
+  sm_weights=w_pos+w_neg
+  w_pos/=sm_weights
+  w_neg/=sm_weights
+  diff=jsm((w_pos+(w_neg-w_pos)*Y)*\
+           (1-((2*Y-1)*activation(Yp))))
+  l2=sum(jsm(a**2) for a in w[0][0])+\
+     sum(jsm(a**2) for a in w[1][0])+\
+     sum(jsm(b**2) for b in w[0][1])+\
+     sum(jsm(b**2) for b in w[1][1])
+  return lr*diff+reg*l2
+
+@jit
+def update(w,dw):
+  return ([a-da for a,da in zip(w[0][0],dw[0][0])],
+          [b-db for b,db in zip(w[0][1],dw[0][1])]),\
+         ([a-da for a,da in zip(w[1][0],dw[1][0])],
+          [b-db for b,db in zip(w[1][1],dw[1][1])])
+def update_logarithmic(w,dw,eps):
+  return ([a-da/log(1+eps+abs(a)) for a,da in\
+          zip(w[0][0],dw[0][0])],
+          [b-db for b,db in\
+          zip(w[0][1],dw[0][1])]),\
+         ([a-da/log(1+eps+abs(a)) for a,da in\
+           zip(w[1][0],dw[1][0])],
+          [b-db for b,db in\
+           zip(w[1][1],dw[1][1])])
+
+def print_weight_met(w,lab,f=lambda a:jsm(a**2)):
+  print('Predict:')
+  print(lab+'a,'+lab+'b')
+  [print(f(a),f(b)) for a,b in zip(*w[0])]
+  print('ruminate:')
+  print(lab+'a,'+lab+'b')
+  [print(f(a),f(b)) for a,b in zip(*w[1])]
+
+#dloss=grad(loss)value_and_grad(loss)
+dloss=value_and_grad(loss)
+target_fp=.1
+target_fn=.01
+#Relative weighting
+#Relative weighting -
+#Larger updates for fp than fn
+#Loss weighting:
+# rw+1 for +, rw for -
+#Small rw-> don't worry about fp as much
+cycle_len=128
+max_start=n_r-cycle_len
+s0=zeros(state_dim)
+s=s0
+step=0
+#bs=128
+print_int=100
+lr=1e-5
+reg=1e-5
+eps=1e-8
+rw_max_diff=1e-2#1e-21e-5#1e-1#1e-3
+bs=1
+n_samps=(bs*cycle_len)
+avg_rate=max(.1,(min(target_fp,target_fn)**2)*n_samps)
+start=0
+YYp=[]
+YY=[]
+otfw=OTFBinWeights(avg_rate,rw_max_diff,target_fp,target_fn,
+                   p_r,adaptive_thresh_rate,p_scale=p_scale)
+ts=TimeStepper()
+wl=None
+while True:
+  ts.get_timestep('start_loop')
+  end=start+cycle_len
+  x,y=x_r[start:end],y_r[start:end]
+  ts.get_timestep('get_x_y')
+  l,dw=dloss(w,s,x,y,otfw.relative_weighting,lr,reg)
+  if isnan(l):
+    eps*=2
+    lr/=2
+    reg/=2
+    print('Encountered nan: doubling eps to',eps,
+          ', halving lr and reg to',lr,reg,
+          'and going back two updates')
+    print_weight_met(wl,'upon nan: wl')
+    print_weight_met(w,'upon nan: w')
+    print_weight_met(dw,'upon nan: dw')
+    print('upon nan: s:',*[float(si) for si in s])
+    w=wll
+    s=sl
+    start-=cycle_len
+    continue
+  ts.get_timestep('loss')
+  sl=s
+  yp_s,s=predict_supervised(w,s,x,y)
+  yp=yp_s>otfw.thresh
+  ts.get_timestep('predict')
+  otfw.upd(y,yp)
+  otfw.report()
+  ts.get_timestep('update_stats')
+  wll=wl
+  wl=w
+  w=update_logarithmic(w,dw,eps=eps)
+  ts.get_timestep('update')
+  if not(step%print_int):
+    print()
+    print(step)
+    print('start position:',start)
+    print('local statistic estimates:')
+    otfw.report('\n')
+    print('Last loss:',l)
+    line=read_input_if_ready()
+    if line:
+      print('=============================')
+      if 't' in line:
+        ts.report(p=True)
+      if 'h' in line:
+        print('Hidden state:',*[float(si) for si in s])
+      if 's' in line:
+        print('squares')
+        print('w')
+        print_weight_met(w,'w')
+        print('dw')
+        print_weight_met(dw,'dw')
+      if 'r' in line:
+        print('fp:fn relative update parameter:',
+              otfw.relative_weighting)
+      if 'd' in line:
+        print('disk usage')
+        print('w')
+        print_weight_met(w,'w',f=lambda a:size(a)/1024)
+      if 'p' in line:
+        n_to_predict=line.split('p')[0]
+        if n_to_predict:
+          try:
+            n_to_predict=int(n_to_predict)
+            X,Y=x_e[:n_to_predict],y_e[:n_to_predict]
+          except:
+            if n_to_predict:
+              print('Unable to convert',n_to_predict,'to int, ',
+                    end='')
+              n_to_predict=1000
+          X,Y=x_e[:n_to_predict],y_e[:n_to_predict]
+          print('Making predictions for  first',
+                n_to_predict,'rows of test set')
+        else:
+          X,Y=x_e,y_e
+        print('Hi')
+        n_runs=n_to_predict//cycle_len
+        tp_t=tn_t=fp_t=0.
+        for x,y in zip(array_split(X,n_runs),array_split(Y,n_runs)):
+          yp_s,s_f=predict_supervised(w,s0,x,y)
+          yp=yp_s>otfw.thresh
+          tp_t+=jsm(Yp&Y)/nt
+          tn_t+=jsm(~(Yp|Y))/nt
+          fp_t+=jsm(Yp&~Y)/nt
+        tp_t/=n_to_predict
+        tn_t/=n_to_predict
+        fp_t/=n_to_predict
+        fn_t=1-tp_t-tn_t-fp_t
+        print('tp:',tp_t,'tn:',tn_t,'fp:',fp_t,'fn:',fn_t)
+      print('=============================')
+    print()
+  ts.get_timestep('report')
+  step+=1
+  start=end
+  if end>n_r:
+    #k,_=split(k)
+    #start=randint(k,(),0,max_start)
+    s=s0
+  ts.get_timestep('end_loop')
+

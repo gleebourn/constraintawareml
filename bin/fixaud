@@ -1,0 +1,53 @@
+#!/usr/bin/env python
+from pickle import load,dump
+#from time import perf_counter
+from soundfile import read
+from os.path import isfile
+from argparse import ArgumentParser
+from pathlib import Path
+from matplotlib.pyplot import hist,show
+from numpy import diff,log10,float16,float32,finfo
+
+def get_audio():
+  if isfile(a.pkl):
+    with open(a.pkl,'rb') as fd:
+      return load(fd)
+  else:
+    d,sr=read(a.f,dtype=float32)
+    with open(a.pkl,'wb') as fd:
+      dump((d,sr),fd)
+    return d,sr
+
+
+ap=ArgumentParser()
+ap.add_argument('-f',default=Path.home()/'data/xrun_town.flac')
+ap.add_argument('-max_jumps_per_sec',default=200,type=int)
+a=ap.parse_args()
+a.f=Path(a.f)
+a.pkl=a.f.with_suffix('.pkl')
+
+d,sr=get_audio()
+n_samples,n_channels=d.shape
+time=n_samples/sr
+print('Runtime:',time/60,'minutes')
+print('Size on disk:',d.nbytes/(1024**2),'MiB')
+print('Datatype:',d.dtype)
+max_jumps=int(time*a.max_jumps_per_sec)
+print('Checking for up to',max_jumps,'jumps')
+f32_max=finfo(float32).max
+print('Max representable float32:',f32_max)
+
+upscale=.5*f32_max/n_channels
+dd=abs(diff(d*upscale,axis=0))
+print('Hi')
+dd_sum=log10(dd.sum(axis=1))#.astype(float16)
+print('Ho')
+dd_sort_indices=dd_sum.argsort()[-max_jumps:]
+print('It\'s')
+
+dd_sum=dd_sum[dd_sort_indices]
+print('off')
+
+hist(dd_sum,bins=100)
+print('to')
+show()
