@@ -21,7 +21,7 @@ from jax.numpy import array,vectorize,zeros,log,log10,flip,maximum,minimum,pad,\
 from jax.numpy.linalg import svdvals
 from jax.scipy.signal import convolve
 from jax.nn import tanh,softmax
-from jax import grad,value_and_grad,jit
+from jax import grad,value_and_grad,jit,config
 from jax.random import uniform,normal,split,key,choice,binomial,permutation
 from sklearn.utils.extmath import cartesian
 from pandas import read_csv
@@ -30,6 +30,13 @@ from matplotlib.pyplot import imshow,legend,show,scatter,xlabel,ylabel,\
 from matplotlib.patches import Patch
 from matplotlib.cm import jet
 from pandas import read_pickle,read_parquet,concat,get_dummies
+
+def set_jax_cache():
+  config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+  config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+  config.update("jax_persistent_cache_min_compile_time_secs", 0)
+  config.update("jax_persistent_cache_enable_xla_caches",
+                "xla_gpu_per_fusion_autotune_cache_dir")
 
 class TimeStepper:
   def __init__(self,clock_avg_rate=.01):
@@ -59,16 +66,12 @@ class TimeStepper:
     return tr,tsrx
 
 class OTFBinWeights:
-  def __init__(self,avg_rate,rw_max_diff,target_fp,target_fn,imb,
-               adaptive_thresh_rate,tp=.25,tn=.25,fp=.25,
-               fn=.25,p_scale=.5,rw_max_mult=2):
-    self.adaption_factor=self.thresh=self.atanh_thresh=0
+  def __init__(self,avg_rate,target_fp,target_fn,adaptive_thresh_rate,
+               tp=.25,tn=.25,fp=.25,fn=.25):
+    self.thresh=self.pre_thresh=0.
     self.adaptive_thresh_rate=adaptive_thresh_rate
-    self.relative_weighting=p_scale*log(imb)
-    self.rw_min=rw_max_mult*self.relative_weighting
     self.target_fp=target_fp
     self.target_fn=target_fn
-    self.rw_max_diff=rw_max_diff
     self.avg_rate=avg_rate
     self.om_avg_rate=1-avg_rate
     self.tp=tp
@@ -90,23 +93,24 @@ class OTFBinWeights:
     self.tn+=self.avg_rate*tn_b
     self.fp+=self.avg_rate*fp_b
     self.fn+=self.avg_rate*fn_b
-    #self.relative_weighting+=self.rw_max_diff*\
-    #                         (max(0,self.fp/self.target_fp-1)-\
-    #                          max(0,self.fn/self.target_fn-1))
-    self.adaption_factor+=max(0,fp_b/self.target_fp-1)-\
-                          max(0,fn_b/self.target_fn-1)
-    self.relative_weighting=self.rw_max_diff*\
-                            self.adaption_factor
-    self.relative_weighting=min(max(self.relative_weighting,
-                                    self.rw_min),0)
-    self.atanh_thresh-=self.adaption_factor
-    self.thresh=tanh(self.atanh_thresh*self.adaptive_thresh_rate)
+    self.pre_thresh+=(max(0,fp_b/self.target_fp-1)**2-\
+                      max(0,fn_b/self.target_fn-1)**2)*\
+                      self.adaptive_thresh_rate
+    #self.pre_thresh+=(max(0,fp_b/self.target_fp-1)-\
+    #                  max(0,fn_b/self.target_fn-1))*\
+    #                  self.adaptive_thresh_rate
+    #self.thresh=self.pre_thresh/\
+    #            (1+self.pre_thresh**2)**.5
+    #self.thresh=tanh(self.pre_thresh)
+    self.thresh=self.pre_thresh
 
   def report(self,p='\r'):
     rep='tp:'+f_to_str(self.tp)+'tn:'+f_to_str(self.tn)+\
         'fp:'+f_to_str(self.fp)+'fn:'+f_to_str(self.fn)+\
-        'relative_weighting:'+\
-        f_to_str(self.relative_weighting)
+        'threshold:'+\
+        f_to_str(self.thresh)+\
+        'pre_threshold:'+\
+        f_to_str(self.pre_thresh)
     if p:
       print(rep,end=p)
     return rep
