@@ -30,6 +30,7 @@ from matplotlib.pyplot import imshow,legend,show,scatter,xlabel,ylabel,\
 from matplotlib.patches import Patch
 from matplotlib.cm import jet
 from pandas import read_pickle,read_parquet,concat,get_dummies
+from traceback import format_exc
 
 def set_jax_cache():
   config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
@@ -37,6 +38,22 @@ def set_jax_cache():
   config.update("jax_persistent_cache_min_compile_time_secs", 0)
   config.update("jax_persistent_cache_enable_xla_caches",
                 "xla_gpu_per_fusion_autotune_cache_dir")
+
+class KeyEmitter:
+  def __init__(self,seed=1729,parents=['main','vis']):
+    k=key(seed)
+    if isinstance(parents,list):
+      self.parents={a:k for a,k in zip(parents,split(k,len(parents)))}
+    elif isinstance(parents,str):
+      self.parents={parents:k}
+    else:
+      self.parents=parents
+  def emit_key(self,n=1,parent='main',vis=False,report=False):
+    if vis or report:
+      parent='vis'
+    keys=split(self.parents[parent],n+1)
+    self.parents[parent]=keys[0]
+    return keys[1:] if n>1 else keys[1]
 
 class TimeStepper:
   def __init__(self,clock_avg_rate=.01):
@@ -270,6 +287,7 @@ def init_ensemble():
   ap.add_argument('-lr_min',default=1e-5,type=float)
   ap.add_argument('-lr_max',default=1e-1,type=float)
   ap.add_argument('-lrs',default=[1e-2],type=float,nargs='+')
+  ap.add_argument('-regs',default=[1e-1],type=float,nargs='+')
   ap.add_argument('-lr_update_interval',default=1000,type=int)
   ap.add_argument('-recent_memory_len',default=1000,type=int)
   ap.add_argument('-beta1',default=.9,type=float) #1- beta1 in adam
@@ -361,13 +379,13 @@ def init_ensemble():
       a.model_inner_dims=[64,32]
   return a
 
-f_to_str=lambda x,p=True:f'{x:.3g}'.ljust(9) if p else f'{x:.3g}'
+f_to_str=lambda x,lj=9:f'{x:.3g}'.ljust(lj) if lj else f'{x:.3g}'
 
-exp_to_str=lambda e:'exp_p'+f_to_str(e.p,p=False)+'fpt'+f_to_str(e.target_fp,p=False)+\
-                    'fnt'+f_to_str(e.target_fn,p=False)+'lr'+f_to_str(e.lr,p=False)
+exp_to_str=lambda e:'exp_p'+f_to_str(e.p,lj=False)+'fpt'+f_to_str(e.target_fp,lj=False)+\
+                    'fnt'+f_to_str(e.target_fn,lj=False)+'lr'+f_to_str(e.lr,lj=False)
 
-fpfnp_lab=lambda e:'FP_t,FN_t,p='+f_to_str(e.target_fp,p=False)+','+\
-                   f_to_str(e.target_fn,p=False)+','+f_to_str(e.p,p=False)
+fpfnp_lab=lambda e:'FP_t,FN_t,p='+f_to_str(e.target_fp,lj=False)+','+\
+                   f_to_str(e.target_fn,lj=False)+','+f_to_str(e.p,lj=False)
 
 @jit
 def svd_cost(w,x,act=tanh,top_growth=array([2,1]),imp=resnet,
@@ -760,10 +778,11 @@ def colour_rescale(fpfn):
   l/=log(a.fpfn_max)-log(a.fpfn_min)
   return jet(l)
 
-def mk_experiment(p,thresh,target_fp,target_fn,lr,a,eps=1e-8):
+def mk_experiment(p,thresh,target_fp,target_fn,lr,a,reg=0.,eps=1e-8):
   e=SimpleNamespace()
   e.report_done=False
   e.eps=eps
+  e.reg=reg
   e.bs=a.bs
   e.target_tolerance=a.target_tolerance
   e.steps_to_target=False
@@ -803,9 +822,8 @@ def mk_experiment(p,thresh,target_fp,target_fn,lr,a,eps=1e-8):
                             resolution=1,l=0)
   return e
 
-def init_experiments(a,global_key):
-  a.global_key=global_key
-  k1,k2,k3,k4,k5,k6=split(global_key,6)
+def init_experiments(a,ke):
+  k1,k2,k3,k4,k5,k6=ke.emit_key(6)
   a.time_avgs=dict()
   if a.mode=='rbd24':
     (a.x_train,a.y_train),\
@@ -904,8 +922,8 @@ def init_experiments(a,global_key):
   #               lr in a.lrs]
   if a.mode in ['unsw','gmm','mnist','rbd24']:
     a.imbalances=None
-    experiments=[mk_experiment(a.p,0.,t_fp,t_fn,a.lr,a)\
-                 for t_fp,t_fn in a.target_fpfns]
+    experiments=[mk_experiment(a.p,0.,t_fp,t_fn,lr,a,reg=reg)\
+                 for t_fp,t_fn in a.target_fpfns for lr in a.lrs for reg in a.regs]
   #elif a.mode in ['imbalances']:
   #  experiments=[mk_experiment(float(p),float(a.thresholds[float(p)]),fpfn_ratio,
   #                             float(p*target_fn),a.lr,a)\
@@ -1333,11 +1351,11 @@ def plot_fpfn_scatter(experiments,fd_tex,a):
 def report_progress(a,experiments,line,imp,k):
   try:
     k1,k2=split(k)
-    print('|'.join([t.ljust(9) for t in ['p','target_fp','target_fn',
-                                          'lr','fp','fn','w','dw','U','V','complete']]))
+    print('|'.join([t.ljust(8) for t in ['p','tgt_fp','tgt_fn','lr',
+                                         'fp','fn','w','dw','reg','U','V','done']]))
     for e in experiments:
-      print('|'.join([f_to_str(t) for t in [e.p,e.target_fp,e.target_fn,e.lr,
-                                            e.fp,e.fn,e.w_l2,e.dw_l2,e.U,e.V]])+'|'+\
+      print('|'.join([f_to_str(t,lj=8) for t in [e.p,e.target_fp,e.target_fn,e.lr,e.fp,e.fn,
+                                                 e.w_l2,e.dw_l2,e.reg,e.U,e.V]])+'|'+\
             (f_to_str(e.steps_to_target) if e.steps_to_target else 'no'))
     for e in experiments:
       print('Recent FPs:',
@@ -1532,11 +1550,14 @@ def report_progress(a,experiments,line,imp,k):
   except Exception as e:
     print('Error reporting on progress:')
     print(e)
+    print(format_exc())
 
-def save_ensemble(a,experiments,global_key):
-  with open(a.out_dir+'/ensemble.pkl','wb') as fd:
-    a.global_key=global_key
-    dump((a,experiments,global_key),fd)
+def save_ensemble(a,experiments,parent_keys):
+  ens_file=Path(a.out_dir+'/ensemble.pkl')
+  ens_file.rename(ens_file.with_suffix('.pkl.bak'))
+  with open(ens_file,'wb') as fd:
+    a.parent_keys=parent_keys
+    dump((a,experiments),fd)
 
 def dl_rbd24(data_dir=str(Path.home())+'/data',
              data_url='https://zenodo.org/api/records/13787591/files-archive',
