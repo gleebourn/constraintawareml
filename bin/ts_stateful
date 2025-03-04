@@ -13,7 +13,7 @@ path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import rbd24,init_layers,read_input_if_ready,\
                       TimeStepper,OTFBinWeights,activations,\
                       implementation,select_initialisation,\
-                      upd_adam,set_jax_cache
+                      upd_adam,set_jax_cache,l2,dl2
 
 set_jax_cache()
 k=key(1729)
@@ -62,18 +62,17 @@ def predict(w,s,X):
     Yp.append(activation(jsm(s)))
   return Yp
 
-
-ohot0=concatenate([array([1]),zeros(state_dim-1)])
 @jit
-def predict_supervised(w,s,X,Y,thresh,eps):
+def predict_supervised(w,s,X,Y,pre_thresh,eps):
   Yp=[]
+  l=len(s)
   for i,(x,y) in enumerate(zip(X,Y)):
     sx=concatenate([s,x])
     s0=forward(w,sx)
-    yp=s0[0]
+    yp=jsm(s0)
     Yp.append(yp)
-    s=s0+(signbit(yp-thresh)^y)*\
-         (1+eps)*(thresh-yp)*ohot0
+    s=s0+(signbit(yp-pre_thresh)^y)*\
+         (1+eps)*(pre_thresh-yp)/l
 
   return array(Yp),s
 
@@ -94,21 +93,15 @@ def loss(w,s0,X,Y,rw,lr,reg):
 '''
 
 @jit
-def l2(w):
-  return sum(jsm(a**2) for a in w[0])+\
-         sum(jsm(a**2) for a in w[1])
-dl2=jit(value_and_grad(l2))
-
-@jit
-def hinge(w,s0,X,Y,thresh,eps):
-  Yp=predict_supervised(w,s0,X,Y,thresh,eps)[0]
-  return jsm(log(maximum((Yp-thresh)*(Y-.5),eps)))
+def hinge(w,s0,X,Y,pre_thresh,eps):
+  Yp=predict_supervised(w,s0,X,Y,pre_thresh,eps)[0]
+  return jsm(maximum((pre_thresh-Yp)*(Y-.5),0))
   #return jsm(log(eps+maximum((thresh-Yp)*(Y-.5),0))-log(eps))
 dh=jit(value_and_grad(hinge))
 
 @jit
-def hinge_loss(w,s0,X,Y,thresh,eps,reg,lr):
-  return reg*l2(w)+lr*hinge(w,s0,X,Y,thresh,eps)
+def hinge_loss(w,s0,X,Y,pre_thresh,eps,reg,lr):
+  return reg*l2(w)+lr*hinge(w,s0,X,Y,pre_thresh,eps)
 
 @jit
 def update(w,dw):
@@ -135,9 +128,9 @@ step=0
 #bs=128
 print_int=100
 lr=1e-2
-reg=1e-5#1e-3
-eps=1e-6
-adaptive_thresh_rate=1e-7
+reg=1e-6#1e-3
+eps=1e-5
+adaptive_thresh_rate=.5*(1-2*(3**-1.5))*min(target_fp,target_fn)
 bs=1
 n_samps=(bs*cycle_len)
 avg_rate=max(.1,(min(target_fp,target_fn)**2)*n_samps)
@@ -157,12 +150,12 @@ while True:
   x,y=x_r[start:end],y_r[start:end]
   ts.get_timestep('get_x_y')
   l=abs(l)
-  l,dw=dhinge_loss(w,s,x,y,otfw.thresh,eps,reg,lr)
+  l,dw=dhinge_loss(w,s,x,y,otfw.pre_thresh,eps,reg,lr)
   if not isfinite(l):
     l_2,d_l2=dl2(w)
     if not isfinite(l_2):
       reg/=adj
-    h,d_h=dh(w,s,x,y,otfw.thresh,eps)
+    h,d_h=dh(w,s,x,y,otfw.pre_thresh,eps)
     if not isfinite(h):
       lr/=adj
     #dl2l2=l2(d_l2)
@@ -190,8 +183,8 @@ while True:
     continue
   ts.get_timestep('loss')
   sl=s
-  yp_s,s=predict_supervised(w,s,x,y,otfw.thresh,eps)
-  yp=yp_s>otfw.thresh
+  yp_s,s=predict_supervised(w,s,x,y,otfw.pre_thresh,eps)
+  yp=yp_s>otfw.pre_thresh
   ts.get_timestep('predict')
   otfw.upd(y,yp)
   otfw.report()
@@ -246,7 +239,7 @@ while True:
         tp_t=tn_t=fp_t=0.
         for x,y in zip(array_split(X,n_runs),array_split(Y,n_runs)):
           yp_s,s_f=predict_supervised(w,s0,x,y,thresh,eps)
-          yp=yp_s>otfw.thresh
+          yp=yp_s>otfw.pre_thresh
           tp_t+=jsm(Yp&Y)/nt
           tn_t+=jsm(~(Yp|Y))/nt
           fp_t+=jsm(Yp&~Y)/nt

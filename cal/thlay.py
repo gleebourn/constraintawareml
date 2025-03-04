@@ -63,39 +63,55 @@ class TimeStepper:
     tsrx='\n'.join(['\\texttt{'+k.replace('_','\\_')+'}&'+\
                     f_to_str(log10(v))+'\\\\\n' for k,v in tai])
     tsrx+='\\end{tabular}'
-    return tr,tsrx
+    return tsr,tsrx
 
 class OTFBinWeights:
   def __init__(self,avg_rate,target_fp,target_fn,adaptive_thresh_rate,
-               tp=.25,tn=.25,fp=.25,fn=.25):
-    self.thresh=self.pre_thresh=0.
+               tp0=.25,tn0=.25,fp0=.25,fn0=.25,nl_avg=False,
+               sm_UV=False,imb=.5,p_scale=1.):
+    self.thresh=self.pre_thresh=self.d_pre_thresh=0.
     self.adaptive_thresh_rate=adaptive_thresh_rate
     self.target_fp=target_fp
     self.target_fn=target_fn
     self.avg_rate=avg_rate
     self.om_avg_rate=1-avg_rate
-    self.tp=tp
-    self.tn=tn
-    self.fp=fp
-    self.fn=fn
+    self.tp=tp0
+    self.tn=tn0
+    self.fp=fp0
+    self.fn=fn0
+    self.nl_avg=nl_avg
+    self.sm_UV=sm_UV
+    self.U=.5
+    self.V=.5
+    self.imb=imb
+    self.p_scale=p_scale
 
   def upd(self,y,yp):
     n_samps=len(y)
-    self.tp*=self.om_avg_rate
-    self.tn*=self.om_avg_rate
-    self.fp*=self.om_avg_rate
-    self.fn*=self.om_avg_rate
     tp_b=jsm(yp&y)/n_samps
     tn_b=jsm(~(yp|y))/n_samps
     fp_b=jsm(yp&~y)/n_samps
-    fn_b=1-tp_b-tn_b-fp_b
-    self.tp+=self.avg_rate*tp_b
-    self.tn+=self.avg_rate*tn_b
-    self.fp+=self.avg_rate*fp_b
-    self.fn+=self.avg_rate*fn_b
-    self.pre_thresh+=(max(0,fp_b/self.target_fp-1)**2-\
-                      max(0,fn_b/self.target_fn-1)**2)*\
+    fn_b=1.-tp_b-tn_b-fp_b
+    if self.nl_avg:
+      fp_amnt=self.avg_rate*min(1,n_samps*self.fp)
+      fn_amnt=self.avg_rate*min(1,n_samps*self.fn)
+      self.fp*=(1-fp_amnt)
+      self.fn*=(1-fn_amnt)
+      self.fp+=fp_amnt*fp_b
+      self.fn+=fn_amnt*fn_b
+    else:
+      self.tp*=self.om_avg_rate
+      self.tn*=self.om_avg_rate
+      self.fp*=self.om_avg_rate
+      self.fn*=self.om_avg_rate
+      self.tp+=self.avg_rate*tp_b
+      self.tn+=self.avg_rate*tn_b
+      self.fp+=self.avg_rate*fp_b
+      self.fn+=self.avg_rate*fn_b
+    self.pre_thresh+=(max(0,(fp_b-self.target_fp))**2-\
+                      max(0,(fn_b-self.target_fn))**2)*\
                       self.adaptive_thresh_rate
+    self.pre_thresh*=(1-self.pre_thresh**2)**.25
     #self.pre_thresh+=(max(0,fp_b/self.target_fp-1)-\
     #                  max(0,fn_b/self.target_fn-1))*\
     #                  self.adaptive_thresh_rate
@@ -103,6 +119,13 @@ class OTFBinWeights:
     #            (1+self.pre_thresh**2)**.5
     #self.thresh=tanh(self.pre_thresh)
     self.thresh=self.pre_thresh
+    U=self.fp/self.target_fp
+    V=self.fn/(self.target_fn*self.imb**self.p_scale)
+    if self.sm_UV:
+      self.U,self.V=softmax(array([U,V]))
+    else:
+      sUV=U+V
+      self.U,self.V=U/sUV,V/sUV
 
   def report(self,p='\r'):
     rep='tp:'+f_to_str(self.tp)+'tn:'+f_to_str(self.tn)+\
@@ -110,7 +133,8 @@ class OTFBinWeights:
         'threshold:'+\
         f_to_str(self.thresh)+\
         'pre_threshold:'+\
-        f_to_str(self.pre_thresh)
+        f_to_str(self.pre_thresh)+\
+        'U:'+f_to_str(self.U)+'V:'+f_to_str(self.V)
     if p:
       print(rep,end=p)
     return rep
@@ -186,11 +210,14 @@ def select_initialisation(imp,act):
 
 def init_ensemble():
   ap=ArgumentParser()
+  n_exps=5
+  target_fps=[int(50*10**(1-i/n_exps))/1000 for i in range(n_exps+1)]
+  target_fns=[int(10*10**(i/n_exps))/1000 for i in range(n_exps+1)]
   ap.add_argument('mode',default='all',
                   choices=['all','adaptive_lr','imbalances',
                            'unsw','gmm','mnist','rbd24'])
   ap.add_argument('-no_U_V',action='store_true')
-  ap.add_argument('-epochs',action='store_true')
+  ap.add_argument('-no_epochs',action='store_true')
   ap.add_argument('-rbd24_no_rescale_log',action='store_true')
   ap.add_argument('-rbd24_no_shuffle',action='store_true') #Very easy - sorted by label!!!!!!
   ap.add_argument('-rbd24_sort_timestamp',action='store_true')
@@ -200,8 +227,9 @@ def init_ensemble():
   ap.add_argument('-fm',default=0,type=int)
   ap.add_argument('-nnpca',action='store_true')
   ap.add_argument('-single_layer_upd',action='store_true')
-  ap.add_argument('-p_scale',default=.5,type=float)
+  ap.add_argument('-p_scale',default=1.,type=float)#.5
   ap.add_argument('-scale_before_sm',action='store_true')
+  #ap.add_argument('-no_softmax_U_V',action='store_true')
   ap.add_argument('-softmax_U_V',action='store_true')
   ap.add_argument('-window_avg',action='store_true')
   ap.add_argument('-n_gaussians',default=4,type=int)
@@ -244,8 +272,8 @@ def init_ensemble():
   ap.add_argument('-lrs',default=[1e-2],type=float,nargs='+')
   ap.add_argument('-lr_update_interval',default=1000,type=int)
   ap.add_argument('-recent_memory_len',default=1000,type=int)
-  ap.add_argument('-gamma1',default=.1,type=float) #1- beta1 in adam
-  ap.add_argument('-gamma2',default=.001,type=float)
+  ap.add_argument('-beta1',default=.9,type=float) #1- beta1 in adam
+  ap.add_argument('-beta2',default=.999,type=float)
   ap.add_argument('-avg_rate',default=.1,type=float)#binom avg parameter
   ap.add_argument('-unsw_test',default='~/data/UNSW_NB15_testing-set.csv')
   ap.add_argument('-unsw_train',default='~/data/UNSW_NB15_training-set.csv')
@@ -259,14 +287,12 @@ def init_ensemble():
   ap.add_argument('-target_fn',default=.01,type=float)
   ap.add_argument('-clock_avg_rate',default=.1,type=float) #Track timings
   ap.add_argument('-threshold_accuracy_tolerance',default=.1,type=float)
-  ap.add_argument('-fpfn_ratios',default=[2,.5],nargs='+',type=float)
-  ap.add_argument('-target_fns',default=[.1],nargs='+',type=float)
+  ap.add_argument('-fpfn_ratios',default=[],nargs='+',type=float)
+  ap.add_argument('-target_fps',default=target_fps,nargs='+',type=float)
+  ap.add_argument('-target_fns',default=target_fns,nargs='+',type=float)
   ap.add_argument('-target_tolerance',default=.5,type=float)
   ap.add_argument('-stop_on_target',action='store_true')
   #Silly
-  ap.add_argument('-lr_phase',default=0.,type=float)
-  ap.add_argument('-lr_momentum',default=0.05,type=float)
-  ap.add_argument('-lr_amplitude',default=0.,type=float)
   ap.add_argument('-x_max',default=10.,type=float)
   ap.add_argument('-sqrt_normalise_a',action='store_true')
   ap.add_argument('-initialisation',type=str,
@@ -276,6 +302,8 @@ def init_ensemble():
   ap.add_argument('-mult_a',default=1.,type=float)
   
   a=ap.parse_args()
+  a.epochs=not a.no_epochs
+  ##a.softmax_U_V=not a.no_softmax_U_V
   if not isdir('reports'):
     mkdir('reports')
   a.outf='reports/'+a.outf
@@ -310,7 +338,11 @@ def init_ensemble():
       a.no_adam=True
     else:
       a.adam=True
-  a.fpfn_ratios,a.target_fns,a.lrs=array(a.fpfn_ratios),array(a.target_fns),array(a.lrs)
+  if a.fpfn_ratios:
+    a.target_fpfns=array([[a*b,a] for a,b in zip(a.target_fns,a.target_fpfns)])
+  else:
+    a.target_fpfns=array(list(zip(a.target_fps,a.target_fns)))
+  a.lrs=array(a.lrs)
   a.out_dir=a.outf+'_report'
   a.step=0
   if len(a.lrs)==1:
@@ -529,6 +561,13 @@ def resnet_cost_layer(*w,i,c,d,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
     x+=dx
   return ret-jsm(UmV*x.T)
 
+@jit
+def l2(w):
+  return sum(jsm(a**2) for a in w[0])+\
+         sum(jsm(a**2) for a in w[1])
+dl2=jit(value_and_grad(l2))
+
+'''
 def mk_l1_fm(imp=f):
   @jit
   def l1(w,x,y,U,V,eps=.1):
@@ -573,6 +612,7 @@ def mk_waqas_consaw(imp,eps=1e-5):
     return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
   dwaqas=value_and_grad(waqas)
   return waqas,dwaqas
+'''
 
 def mk_hinge(imp,eps=1e-5):
   @jit
@@ -583,42 +623,53 @@ def mk_hinge(imp,eps=1e-5):
   dhinge=value_and_grad(hinge)
   return hinge,dhinge
 
-def mk_l1(imp=f):
-  @jit
-  def l1(w,x,y,U,V,eps=.1):
+def mk_l1(act=None,imp=f,reg=True):
+  def l1(w,x,y,U,V,eps=None):
     y_smooth=imp(w,x)
     y_diffs=1-y_smooth*(2*y-1)
     return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
-  dl1=value_and_grad(l1)
-  return l1,dl1
+  if reg:
+    def ret(w,x,y,U,V,eps=None,reg=1e-2):
+      return l1(w,x,y,U,V,eps=None)+reg*l2(w)
+  else:
+    ret=l1
+  return jit(ret)
 
-def mk_lp(p=2.):
-  def mk_l(imp=f):
-    @jit
-    def lp(w,x,y,U,V,eps=.1):
+def mk_mk_lp(p=2.):
+  def mk_l(imp=f,reg=True):
+    def lp(w,x,y,U,V,eps=None):
       y_smooth=imp(w,x)
       y_diffs=((2*y-1)-y_smooth)**p
       #a_p,a_n=y_smooth[y],y_smooth[~y]
       #cts_fp=jsm(1.+a_n)
       #cts_fn=jsm(1.-a_p)
       return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
-    return lp,value_and_grad(lp)
+    if reg:
+      def ret(w,x,y,U,V,eps=None,reg=.1):
+        return lp(w,x,y,U,V)+reg*l2(w)
+    else:
+      ret=lp
+    return jit(ret)
   return mk_l
 
-mk_l2=mk_lp()
+mk_l2=mk_mk_lp()
 
 @jit
 def l1(w,x,y,U,V,act=tanh):
   return l1_soft(w,x,y,U,V,0.,act)
 
-def mk_cross_entropy(act=tanh,imp=f):
+def mk_cross_entropy(act=tanh,imp=f,reg=True):
   def cross_entropy(w,x,y,U,V,eps=1e-8):
-    y_smooth=imp(w,x,act=act)
+    y_smooth=imp(w,x)#,act=act)
     y_winnings=y_smooth*(2*y-1) #+ if same sign, - if different sign
     #return -jsm(((V-U)*y+U)*log(1+eps+y_preloss))
     return -jsm(((V-U)*y+U)*log(1+eps+y_winnings))
-    #return jsm(((V-U)*y+U)*log(1+eps-y_preloss))
-  return jit(cross_entropy)
+  if reg:
+    def ret(w,x,y,U,V,eps=1e-8,reg=1.):
+      return cross_entropy(w,x,y,U,V,eps)+reg*l2(w)
+  else:
+    ret=cross_entropy
+  return jit(ret)
 
 @jit
 def cross_entropy_rn(w,x,y,U,V,act=tanh,eps=1e-8):
@@ -649,8 +700,7 @@ def nn_pca_loss(w_c,b_c,w_e,b_e,x,x_targ,eps=1e-8):
   return l#log(jsm(w_c[-1]@w_c[-1].T)))
 
 losses={'loss':mk_cross_entropy,'l1':mk_l1,'cross_entropy':mk_cross_entropy,
-        'l1_orth':mk_l1_orth,'l2':mk_l2,'l1_fm':mk_l1_fm,
-        'hinge':mk_hinge,'waqas':mk_waqas,'waqas_consaw':mk_waqas_consaw}#,
+        'l2':mk_l2,'hinge':mk_hinge}
         #'l1_soft':dl1_soft,'cross_entropy_soft':dcross_entropy_soft,
         #'resnet_cost':dresnet_cost,'resnet_cost_layer':dresnet_cost_layer,
         #'nn_pca_loss':nn_pca_loss,'distribution_flow_cost':ddistribution_flow_cost,
@@ -710,11 +760,11 @@ def colour_rescale(fpfn):
   l/=log(a.fpfn_max)-log(a.fpfn_min)
   return jet(l)
 
-def mk_experiment(p,thresh,fpfn_ratio,target_fn,lr,a,eps=1e-8):
+def mk_experiment(p,thresh,target_fp,target_fn,lr,a,eps=1e-8):
   e=SimpleNamespace()
+  e.report_done=False
   e.eps=eps
   e.bs=a.bs
-  e.fpfn_ratio=float(fpfn_ratio)
   e.target_tolerance=a.target_tolerance
   e.steps_to_target=False
   e.avg_rate=a.avg_rate
@@ -732,8 +782,9 @@ def mk_experiment(p,thresh,fpfn_ratio,target_fn,lr,a,eps=1e-8):
   e.lr=float(lr)
   e.p=float(p) #"imbalance"
   #e.p_its=int(1/p) #if repeating minority class iterations
-  e.target_fp=target_fn*fpfn_ratio
+  e.target_fp=target_fp#target_fn*fpfn_ratio
   e.target_fn=target_fn
+  e.fpfn_ratio=e.target_fp/e.target_fn
   e.recent_memory_len=int((1/a.avg_rate)*max(1,1/(e.bs*min(e.target_fp,e.target_fn))))
 
   e.FPs=cyc(e.recent_memory_len)
@@ -765,7 +816,6 @@ def init_experiments(a,global_key):
                           single_dataset=a.rbd24_single_dataset)
     a.p=sum(a.y_train)/len(a.y_train)
     a.p_test=sum(a.y_test)/len(a.y_test)
-    a.imbalances=[a.p]
     a.in_dim=len(a.x_train[0])
     if a.epochs:
       a.epoch_num=0
@@ -844,23 +894,23 @@ def init_experiments(a,global_key):
   a.loop_master_key=k4
   a.step=0
 
-  if a.mode=='all':
-    a.targets=list(zip(a.fpfn_ratios,a.target_fns))
-    experiments=[mk_experiment(p,a.thresholds[p],fpfn_ratio,target_fn,a.lr,a)\
-                 for p in a.imbalances for (fpfn_ratio,target_fn) in a.targets\
-                 for lr in a.lrs]
-  elif a.mode=='adaptive_lr':
-    experiments=[mk_experiment(.1,a.thresholds[.1],1.,.01,lr,a) for\
-                 lr in a.lrs]
-  elif a.mode in ['unsw','gmm','mnist','rbd24']:
-    experiments=[mk_experiment(float(p),0.,fpfn_ratio,float(p*target_fn),a.lr,a)\
-                 for p in a.imbalances for fpfn_ratio in a.fpfn_ratios\
-                 for target_fn in a.target_fns]
-  elif a.mode in ['imbalances']:
-    experiments=[mk_experiment(float(p),float(a.thresholds[float(p)]),fpfn_ratio,
-                               float(p*target_fn),a.lr,a)\
-                 for p in a.imbalances for fpfn_ratio in a.fpfn_ratios\
-                 for target_fn in a.target_fns]
+  #if a.mode=='all':
+  #  a.targets=list(zip(a.fpfn_ratios,a.target_fns))
+  #  experiments=[mk_experiment(p,a.thresholds[p],fpfn_ratio,target_fn,a.lr,a)\
+  #               for p in a.imbalances for (fpfn_ratio,target_fn) in a.targets\
+  #               for lr in a.lrs]
+  #elif a.mode=='adaptive_lr':
+  #  experiments=[mk_experiment(.1,a.thresholds[.1],1.,.01,lr,a) for\
+  #               lr in a.lrs]
+  if a.mode in ['unsw','gmm','mnist','rbd24']:
+    a.imbalances=None
+    experiments=[mk_experiment(a.p,0.,t_fp,t_fn,a.lr,a)\
+                 for t_fp,t_fn in a.target_fpfns]
+  #elif a.mode in ['imbalances']:
+  #  experiments=[mk_experiment(float(p),float(a.thresholds[float(p)]),fpfn_ratio,
+  #                             float(p*target_fn),a.lr,a)\
+  #               for p in a.imbalances for fpfn_ratio in a.fpfn_ratios\
+  #               for target_fn in a.target_fns]
 
   if a.mode=='gmm':
     min_dist=0
@@ -875,8 +925,18 @@ def shuffle_xy(k,x,y):
   x,y=x[shuff],y[shuff]
   return x,y
 
+def get_xy_jit(X,Y,start,bs,k,new_epoch):
+  end=start+bs
+  if new_epoch:
+    new_epoch=True
+    k1,k=split(k)
+    X,Y=shuffle_xy(k1,X,Y)
+    start=0
+    end=bs
+  return (X,Y),(X[start:end],Y[start:end]),end,new_epoch
+get_xy_jit=jit(get_xy_jit,static_argnames='new_epoch')
 
-def get_xy(a,imbs,bs,k):
+def get_xy(a,bs,k,imbs=None):
   if type(imbs)==float:
     ret_single=imbs
     imbs=[imbs]
@@ -901,6 +961,7 @@ def get_xy(a,imbs,bs,k):
       next_offset=a.offset+a.bs
       if next_offset>len(a.y_train): #new epoch
         a.epoch_num+=1
+        print('Start of epoch',a.epoch_num)
         print('Number of rows in training data:',len(a.y_train))
         if a.rbd24_no_shuffle:
           if a.epoch_num>1:
@@ -945,22 +1006,19 @@ def get_xy(a,imbs,bs,k):
 
   return ret[ret_single] if ret_single else ret
 
-def evaluate_fp_fn(e,y_p,y_t,trad_avg=False):
-  e.FP=int(jsm(y_p&(~y_t)))/e.bs #Stop jax weirdness after ADC
-  e.FN=int(jsm(y_t&(~y_p)))/e.bs
-  e.cost=(e.FP/e.target_fp+e.FN/e.target_fn)
-  e.FPs[e.step]=e.FP
-  e.FNs[e.step]=e.FN
-  if trad_avg:
-    e.fp=e.FPs.avg()
-    e.fn=e.FNs.avg()
-  else:
-    e.fp_amnt=e.avg_rate*min(1,e.bs*e.fp)
-    e.fn_amnt=e.avg_rate*min(1,e.bs*e.fn)
-    e.fp*=(1-e.fp_amnt)
-    e.fp+=e.fp_amnt*e.FP
-    e.fn*=(1-e.fn_amnt)
-    e.fn+=e.fn_amnt*e.FN
+@jit
+def evaluate_fp_fn(bs,avg_rate,target_fp,target_fn,y_p,y_t,fp,fn):
+  FP=jsm(y_p&(~y_t))/bs #Stop jax weirdness after ADC
+  FN=jsm(y_t&(~y_p))/bs
+  cost=maximum(FP/target_fp,FN/target_fn)
+  fp_amnt=avg_rate*minimum(1,bs*fp)
+  fn_amnt=avg_rate*minimum(1,bs*fn)
+  fp*=(1-fp_amnt)
+  fp+=fp_amnt*FP
+  fn*=(1-fn_amnt)
+  fn+=fn_amnt*FN
+  return FP,FN,cost,fp,fn
+
 
 def even_indices(li):
   l=len(li)
@@ -990,31 +1048,25 @@ def update_history(e):
      e.fn<e.target_tolerance*e.target_fn and\
      not e.steps_to_target:
        e.steps_to_target=e.step
+       e.report_done=True
     
 
 def compute_U_V(fp,fn,target_fp,target_fn,p,sm=False,p_scale=.5,scale_before_sm=True):
-  #e.p_empirical*=(1-min(e.fp_amnt,e.fn_amnt))
-  #e.p_empirical+=(1-min(e.fp_amnt,e.fn_amnt))*jsm(e.y_t)/e.bs
-  #U,V=log(1+fp/target_fp),log(1+fn/target_fn)
-  #U=u/(u+v)
-  #V=v/(u+v)
-  #U,V=softmax(array([gamma1*fp/target_fp,gamma1*fn/target_fn]))
-  #U,V=softmax(array([fp/target_fp,fn/target_fn]))
-  #U,V=fp/target_fp,fn/target_fn
+  pp=p**p_scale
+  U=fp/target_fp
+  V=fn/target_fn
   if sm:
     if scale_before_sm:
-      U,V=softmax(array([fp/target_fp,fn/(target_fn*p**p_scale)]))
+      return softmax(array([U,V/pp]))
     else:
-      U,V=softmax(array([fp/target_fp,fn/target_fn]))
-  else:
-    U,V=fp/target_fp,fn/target_fn
-  if not scale_before_sm:
-    V/=p**p_scale #scale dfn with the imbalance
-  nUV=U+V
-  if nUV>0:
-    U/=nUV
-    V/=nUV
+      U,V=softmax(array([U,V]))
+  V/=pp
+  UpV=U+V
+  #if UpV>0:#Should be fine, moving average never hits 0
+  U/=UpV
+  V/=UpV
   return U,V
+compute_U_V=jit(compute_U_V,static_argnames=['sm','scale_before_sm'])
 
 def update_lrs(a,experiments,k): 
   k1,k2,k3=split(k,3)
@@ -1088,14 +1140,9 @@ def update_weights(a,e,upd):#,start=None,end=None):
     wm=list(e.w_model[0]),list(e.w_model[1])
   else:
     wm=e.w_model
-  #offset=0 if start is None else start
-  #adva=e.adam_V[0][start:end]
-  #advb=e.adam_V[1][start:end]
-  #wmoda=e.w_model[0][start:end]
-  #wmodb=e.w_model[1][start:end]
   if a.adam:
     wm,e.adam_V,e.adam_M,e.w_l2,e.dw_l2=upd_adam(wm,e.adam_V,e.adam_M,upd,
-                                                 1-a.gamma1,1-a.gamma2,e.lr)
+                                                 a.beta1,a.beta2,e.lr)
   else:
     wm,e.w_l2,e.dw_l2=upd_grad(wm,upd,e.lr)
 
@@ -1217,8 +1264,8 @@ get_dw=lambda e:log10(1e-8+array(e.history.dw))
 def plot_historical_statistics(experiments,fd_tex,a,smoothing=100):
   if fd_tex:
     print('\\subsection{Historical statistics}',file=fd_tex)
-  stats=[(get_cost,'log(1e-8+fp/target_fp+fn/target_fn)','Loss'),
-         (get_dw,'log(e1-8+dw)','Change_in_weights')]
+  stats=[(get_cost,'log(eps+max(fp/target_fp,fn/target_fn))','Loss'),
+         (get_dw,'log(eps+dw)','Change_in_weights')]
   if a.mode=='adaptive_lr':
     stats.append((get_lr,'log(lr)','Learning_rate'))
   for get_var,yl,desc in stats:
@@ -1231,7 +1278,7 @@ def plot_historical_statistics(experiments,fd_tex,a,smoothing=100):
         lab=a.cats[e.p]
       else:
         lab=fpfnp_lab(e)
-      plot(arr,label=lab)
+      plot(arr,label=lab,alpha=.5)
     xlabel('Step number *'+str(e.history.resolution))
     ylabel(yl)
     title(desc.replace('_',' '))
@@ -1250,7 +1297,7 @@ def plot_historical_statistics(experiments,fd_tex,a,smoothing=100):
     ker=ones(conv_len)/conv_len
     smoothed_fp=convolve(array(e.history.FP,dtype=float),ker,'valid')
     smoothed_fn=convolve(array(e.history.FN,dtype=float),ker,'valid')
-    plot(log10(smoothed_fp),log10(smoothed_fn),label=fpfnp_lab(e))
+    plot(log10(smoothed_fp),log10(smoothed_fn),label=fpfnp_lab(e),alpha=.5)
     xlabel('log(fp)')
     ylabel('log(fn)')
     title('FP versus FN rate')
@@ -1284,200 +1331,207 @@ def plot_fpfn_scatter(experiments,fd_tex,a):
     show()
 
 def report_progress(a,experiments,line,imp,k):
-  k1,k2=split(k)
-  print('|'.join([t.ljust(9) for t in ['p','target_fp','target_fn',
-                                        'lr','fp','fn','w','dw','U','V','complete']]))
-  for e in experiments:
-    print('|'.join([f_to_str(t) for t in [e.p,e.target_fp,e.target_fn,e.lr,
-                                          e.fp,e.fn,e.w_l2,e.dw_l2,e.U,e.V]])+'|'+\
-          (f_to_str(e.steps_to_target) if e.steps_to_target else 'no'))
-  for e in experiments:
-    print('Recent batches: FPs:',
-          e.FPs[e.step-5:e.step],'FNs:',
-          e.FNs[e.step-5:e.step])
-    print('Losses:',e.loss_vals[e.step-5:e.step])
-
-  if ':' in line:
-    l=line.split(':')
-    if len(l)<3:
-      print('Invalid command')
-      return
-    if l[0]=='f':
-      ty=float
-    elif line[0]=='i':
-      ty=int
-    vars(a)[l[1]]=ty(l[2])
-    print('a.'+line[1]+'->'+str(ty(l[2])))
-    return
-  elif '?' in line:
-    query_var=line.split('?')[0]
-    va=vars(a)
-    if query_var in va:
-      print('a.'+query_var,':',va[query_var])
-    else:
-      print('"',line.split('?')[0],'" not in a')
-    return
-  elif '!' in line:
-    query_var=line.split('!')[0]
-    found=False
-    for i,e in enumerate(experiments):
-      ve=vars(e)
-      if query_var in ve:
-        found=True
-        print('experiment_'+str(i)+'.'+query_var,':',ve[query_var])
-    if not found:
-      print('"',line.split('?')[0],'" not in any experiment')
-    return
-  elif '*' in line:
-    print('a variables:')
-    [print(v) for v in vars(a).keys()]
-    return
-
-  fd_tex=False
-  if 'x' in line:
-    print('Bye!')
-    exit()
-  if 'e' in line and a.mode in ['mnist','rbd24']:
+  try:
+    k1,k2=split(k)
+    print('|'.join([t.ljust(9) for t in ['p','target_fp','target_fn',
+                                          'lr','fp','fn','w','dw','U','V','complete']]))
     for e in experiments:
-      if a.mode=='rbd24':
-        x_train_pos=a.x_train[a.y_train]
-        x_train_neg=a.x_train[~a.y_train]
-        x_test_pos=a.x_test[a.y_test]
-        x_test_neg=a.x_test[~a.y_test]
-        print()
-        print('mavg_fp_0,mavg_fn_0:',f_to_str(e.fp),f_to_str(e.fn))
-        print('target_fp_0,target_fn_0:',
-              f_to_str(e.target_fp),f_to_str(e.target_fn))
-        print('fp_train_0,fn_train_0:',
-              f_to_str(sum([nsm(f(e.w_model,x_train_neg[i:i+a.bs])>0) for\
-                            i in range(0,len(x_train_neg),a.bs)])/len(a.x_train)),
-              f_to_str(sum([nsm(f(e.w_model,x_train_pos[i:i+a.bs])<=0) for\
-                            i in range(0,len(x_train_pos),a.bs)])/len(a.x_train)))
-        print('fp_test_0,fn_test_0:',
-              f_to_str(sum([nsm(f(e.w_model,x_test_neg[i:i+a.bs])>0) for\
-                            i in range(0,len(x_test_neg),a.bs)])/len(a.x_test)),
-              f_to_str(sum([nsm(f(e.w_model,x_test_pos[i:i+a.bs])<=0) for\
-                            i in range(0,len(x_test_pos),a.bs)])/len(a.x_test)))
-      else:
-        x_train_pos=a.x_train_pos
-        x_train_neg=a.x_train_neg
-        x_test_pos=a.x_test_pos
-        x_test_neg=a.x_test_neg
-        print()
-        print('mavg_fp_0,mavg_fn_0:',f_to_str((1-.1)*e.fp/(1-e.p)),f_to_str(.1*e.fn/e.p))
-        print('target_fp_0,target_fn_0:',
-              f_to_str((1-.1)*e.target_fp/(1-e.p)),f_to_str(.1*e.target_fn/e.p))
-        print('fp_train_0,fn_train_0:',
-              f_to_str(nsm(f(e.w_model,x_train_neg)>0)/len(a.x_train)),
-              f_to_str(nsm(f(e.w_model,x_train_pos)<=0)/len(a.x_train)))
-        print('fp_test_0,fn_test_0:',
-              f_to_str(nsm(f(e.w_model,x_test_neg)>0)/len(a.x_test)),
-              f_to_str(nsm(f(e.w_model,x_test_pos)<=0)/len(a.x_test)))
-  if 'r' in line:
-    line+='clist'
-    a.report_dir=a.outf+'_report'
-    fd_tex=open(a.outf+'_report/report.tex','w')
-    print('\\documentclass[landscape]{article}\n'
-          '\\usepackage[margin=0.7in]{geometry}\n'
-          '\\usepackage[utf8]{inputenc}\n'
-          '\\usepackage{graphicx}\n'
-          '\\usepackage{float}\n'
-          '\\usepackage{caption}\n'
-          '\\usepackage{subcaption}\n'
-          '\\usepackage{amsmath,amssymb,amsfonts,amsthm}\n'
-          '\n'
-          '\\title{Experiment ensemble report: '+a.mode+'}\n'
-          '\\author{George Lee}\n'
-          '\n'
-          '\\begin{document}\n'
-          '\\maketitle\n'
-          'Report for ensemble labelled '+a.outf.replace('_','\\_')+'\n'
-          '\\subsection{Performance after '+str(a.step)+' steps}',file=fd_tex)
-    
-    with open(a.out_dir+'/performance.csv','w') as fd_csv:
-      w=writer(fd_csv)
-      n_fps=len(a.fpfn_ratios)
-      row=['imbalance','target_fps']+['']*(n_fps-1)+['target_fn','fp']+\
-          ['']*(n_fps-1)+['fn']+['']*(n_fps-1)+['steps_to_target']
-      if a.mode=='unsw':
-        row=['attack_cat']+row
-      w.writerow(row)
-      if fd_tex:
-        conf_fill='r'*n_fps
-        ct='l' if a.mode=='unsw' else ''
-        print('\\begin{tabular}{l'+ct+'|'+conf_fill+'|r'+(('|'+conf_fill)*4)+'}',
-              file=fd_tex)
-        print(' & '.join(row).replace('_',' ')+'\\\\',file=fd_tex)
-        print('\\hline',file=fd_tex)
-      for p in a.imbalances:
-        tgt_fps=[]
-        report_fps=[]
-        report_fns=[]
-        steps_to_target=[]
-        for e in [e for e in experiments if e.p==p]:
-          tgt_fps.append(f_to_str(e.target_fp))
-          fp_hist=e.history.FP[-int(10/e.p**2):]
-          fn_hist=e.history.FN[-int(10/e.p**2):]
-          if a.mode=='mnist':
-            y_ones_test=a.y_test==1 #1 detector
+      print('|'.join([f_to_str(t) for t in [e.p,e.target_fp,e.target_fn,e.lr,
+                                            e.fp,e.fn,e.w_l2,e.dw_l2,e.U,e.V]])+'|'+\
+            (f_to_str(e.steps_to_target) if e.steps_to_target else 'no'))
+    for e in experiments:
+      print('Recent FPs:',
+            ','.join([str(t) for t in e.FPs[e.step-5:e.step]]))
+      print('Recent FNs:',
+            ','.join([str(t) for t in e.FNs[e.step-5:e.step]]))
+      print('Losses:',e.loss_vals[e.step-5:e.step])
 
-            report_fns.append(f_to_str(e.p*nsm(f(e.w_model,
-                                                 a.x_test_pos)<=0)/\
-                                       (.1*len(a.x_test))))
-            report_fps.append(f_to_str((1-e.p)*nsm(f(e.w_model,
-                                                     a.x_test_neg)>0)/\
-                                       ((1-.1)*len(a.x_test))))
-          else:
-            report_fps.append(f_to_str(sum(fp_hist)/(e.bs*len(fp_hist))))
-            report_fns.append(f_to_str(sum(fn_hist)/(e.bs*len(fn_hist))))
-          steps_to_target.append(str(e.steps_to_target) if e.steps_to_target else '-')
-        row=[f_to_str(p)]+tgt_fps+[f_to_str(p/10)]+report_fps+report_fns+steps_to_target
+    if ':' in line:
+      l=line.split(':')
+      if len(l)<3:
+        print('Invalid command')
+        return
+      if l[0]=='f':
+        ty=float
+      elif line[0]=='i':
+        ty=int
+      vars(a)[l[1]]=ty(l[2])
+      print('a.'+line[1]+'->'+str(ty(l[2])))
+      return
+    elif '?' in line:
+      query_var=line.split('?')[0]
+      va=vars(a)
+      if query_var in va:
+        print('a.'+query_var,':',va[query_var])
+      else:
+        print('"',line.split('?')[0],'" not in a')
+      return
+    elif '!' in line:
+      query_var=line.split('!')[0]
+      found=False
+      for i,e in enumerate(experiments):
+        ve=vars(e)
+        if query_var in ve:
+          found=True
+          print('experiment_'+str(i)+'.'+query_var,':',ve[query_var])
+      if not found:
+        print('"',line.split('?')[0],'" not in any experiment')
+      return
+    elif '*' in line:
+      print('a variables:')
+      [print(v) for v in vars(a).keys()]
+      return
+
+    fd_tex=False
+    if 'e' in line and a.mode in ['mnist','rbd24']:
+      print('p_train:',a.p)
+      print('p_test:',a.p_test)
+      for e in experiments:
+        if a.mode=='rbd24':
+          x_train_pos=a.x_train[a.y_train]
+          x_train_neg=a.x_train[~a.y_train]
+          x_test_pos=a.x_test[a.y_test]
+          x_test_neg=a.x_test[~a.y_test]
+          print()
+          print('mavg_fp_0,mavg_fn_0:',f_to_str(e.fp),f_to_str(e.fn))
+          print('target_fp_0,target_fn_0:',
+                f_to_str(e.target_fp),f_to_str(e.target_fn))
+          print('fp_train,fn_train:',
+                f_to_str(sum([nsm(f(e.w_model,x_train_neg[i:i+a.bs])>0) for\
+                              i in range(0,len(x_train_neg),a.bs)])/len(a.x_train)),
+                f_to_str(sum([nsm(f(e.w_model,x_train_pos[i:i+a.bs])<=0) for\
+                              i in range(0,len(x_train_pos),a.bs)])/len(a.x_train)))
+          print('fp_test,fn_test:',
+                f_to_str(sum([nsm(f(e.w_model,x_test_neg[i:i+a.bs])>0) for\
+                              i in range(0,len(x_test_neg),a.bs)])/len(a.x_test)),
+                f_to_str(sum([nsm(f(e.w_model,x_test_pos[i:i+a.bs])<=0) for\
+                              i in range(0,len(x_test_pos),a.bs)])/len(a.x_test)))
+        else:
+          x_train_pos=a.x_train_pos
+          x_train_neg=a.x_train_neg
+          x_test_pos=a.x_test_pos
+          x_test_neg=a.x_test_neg
+          print()
+          print('mavg_fp_0,mavg_fn_0:',f_to_str((1-.1)*e.fp/(1-e.p)),f_to_str(.1*e.fn/e.p))
+          print('target_fp_0,target_fn_0:',
+                f_to_str((1-.1)*e.target_fp/(1-e.p)),f_to_str(.1*e.target_fn/e.p))
+          print('fp_train_0,fn_train_0:',
+                f_to_str(nsm(f(e.w_model,x_train_neg)>0)/len(a.x_train)),
+                f_to_str(nsm(f(e.w_model,x_train_pos)<=0)/len(a.x_train)))
+          print('fp_test_0,fn_test_0:',
+                f_to_str(nsm(f(e.w_model,x_test_neg)>0)/len(a.x_test)),
+                f_to_str(nsm(f(e.w_model,x_test_pos)<=0)/len(a.x_test)))
+    if 'r' in line:
+      line+='clist'
+      a.report_dir=a.outf+'_report'
+      fd_tex=open(a.outf+'_report/report.tex','w')
+      print('\\documentclass[landscape]{article}\n'
+            '\\usepackage[margin=0.7in]{geometry}\n'
+            '\\usepackage[utf8]{inputenc}\n'
+            '\\usepackage{graphicx}\n'
+            '\\usepackage{float}\n'
+            '\\usepackage{caption}\n'
+            '\\usepackage{subcaption}\n'
+            '\\usepackage{amsmath,amssymb,amsfonts,amsthm}\n'
+            '\n'
+            '\\title{Experiment ensemble report: '+a.mode+'}\n'
+            '\\author{George Lee}\n'
+            '\n'
+            '\\begin{document}\n'
+            '\\maketitle\n'
+            'Report for ensemble labelled '+a.outf.replace('_','\\_')+'\n'
+            '\\subsection{Performance after '+str(a.step)+' steps}',file=fd_tex)
+      
+      with open(a.out_dir+'/performance.csv','w') as fd_csv:
+        w=writer(fd_csv)
+        n_fps=len(a.fpfn_ratios)
+        row=['imbalance','target_fps']+['']*(n_fps-1)+['target_fn','fp']+\
+            ['']*(n_fps-1)+['fn']+['']*(n_fps-1)+['steps_to_target']
         if a.mode=='unsw':
-          row=[a.cats[p]]+row
+          row=['attack_cat']+row
         w.writerow(row)
         if fd_tex:
-          print('&'.join(row)+'\\\\',file=fd_tex)
-  if fd_tex:
-    print('\\end{tabular}\n'
-          '\\subsection{Timing analysis of update step}\n'
-          'Distinct steps in the algorithm taking on average:\\\\\n'
-          '\\begin{tabular}{r|r}\n'
-          'step&$\\log(\\overline{\\texttt{T}_\\texttt{step}})$\\\\\n',file=fd_tex)
+          conf_fill='r'*n_fps
+          ct='l' if a.mode=='unsw' else ''
+          print('\\begin{tabular}{l'+ct+'|'+conf_fill+'|r'+(('|'+conf_fill)*4)+'}',
+                file=fd_tex)
+          print(' & '.join(row).replace('_',' ')+'\\\\',file=fd_tex)
+          print('\\hline',file=fd_tex)
+        for p in a.imbalances:
+          tgt_fps=[]
+          report_fps=[]
+          report_fns=[]
+          steps_to_target=[]
+          for e in [e for e in experiments if e.p==p]:
+            tgt_fps.append(f_to_str(e.target_fp))
+            fp_hist=e.history.FP[-int(10/e.p**2):]
+            fn_hist=e.history.FN[-int(10/e.p**2):]
+            if a.mode=='mnist':
+              y_ones_test=a.y_test==1 #1 detector
 
-  print('Timing:')
-  tsr,tsrx=a.ts.report()
-  print(tsr)
-  if fd_tex:print(tsrx,file=fd_tex)
-
-  if a.in_dim==2 and 'c' in line:
-    plot_2d(experiments,fd_tex,a,imp,line,k1)
-
-  if 'i' in line:
-    model_desc='- Model shape:\n'+('->'.join([str(l) for l in a.model_shape]))+\
-               ('\n- Casewise linear\n' if a.initialisation=='casewise_linear' else\
-                '\n- Activation: '+a.act+'\n')+\
-               '- Model initialisation: '+str(a.initialisation)+'\n'\
-               '- Matrix weight multiplier: '+str(a.mult_a)+'\n'\
-               '- Sqrt variance correction:'+str(a.sqrt_normalise_a)+'\n'\
-               '- Batch size:'+str(a.bs)+'\n'\
-               '- learning rate:'+str(a.lr)
-    print(model_desc)
+              report_fns.append(f_to_str(e.p*nsm(f(e.w_model,
+                                                   a.x_test_pos)<=0)/\
+                                         (.1*len(a.x_test))))
+              report_fps.append(f_to_str((1-e.p)*nsm(f(e.w_model,
+                                                       a.x_test_neg)>0)/\
+                                         ((1-.1)*len(a.x_test))))
+            else:
+              report_fps.append(f_to_str(sum(fp_hist)/(e.bs*len(fp_hist))))
+              report_fns.append(f_to_str(sum(fn_hist)/(e.bs*len(fn_hist))))
+            steps_to_target.append(str(e.steps_to_target) if e.steps_to_target else '-')
+          row=[f_to_str(p)]+tgt_fps+[f_to_str(p/10)]+report_fps+report_fns+steps_to_target
+          if a.mode=='unsw':
+            row=[a.cats[p]]+row
+          w.writerow(row)
+          if fd_tex:
+            print('&'.join(row)+'\\\\',file=fd_tex)
     if fd_tex:
-      print('\\subsection{Model parameters}',file=fd_tex)
-      print('Here the batch size was set to '+str(a.bs)+'.\\\\',file=fd_tex)
-      print('\\texttt{'+(model_desc.replace('\n','}\\\\\n\\texttt{'))+'}\\\\',
-            file=fd_tex)
+      print('\\end{tabular}\n'
+            '\\subsection{Timing analysis of update step}\n'
+            'Distinct steps in the algorithm taking on average:\\\\\n'
+            '\\begin{tabular}{r|r}\n'
+            'step&$\\log(\\overline{\\texttt{T}_\\texttt{step}})$\\\\\n',file=fd_tex)
 
-  if 's' in line and a.mode=='all':
-    plot_fpfn_scatter(experiments,fd_tex,a)
-  if 't' in line:
-    plot_stopping_times(experiments,fd_tex,a.report_dir)
-  if 'l' in line:
-    plot_historical_statistics(experiments,fd_tex,a)
+    print('Timing:')
+    tsr,tsrx=a.ts.report()
+    print(tsr)
+    if fd_tex:print(tsrx,file=fd_tex)
 
-  if fd_tex:
-    print('\\end{document}',file=fd_tex,flush=True)
-    fd_tex.close()
+    if a.in_dim==2 and 'c' in line:
+      plot_2d(experiments,fd_tex,a,imp,line,k1)
+
+    if 'i' in line:
+      model_desc='- Model shape:\n'+('->'.join([str(l) for l in a.model_shape]))+\
+                 '\n- Activation: '+a.activation+'\n'+\
+                 '- Implementation: '+a.implementation+'\n'+\
+                 '- Model initialisation: '+str(a.initialisation)+'\n'\
+                 '- Matrix weight multiplier: '+str(a.mult_a)+'\n'\
+                 '- Sqrt variance correction:'+str(a.sqrt_normalise_a)+'\n'\
+                 '- Batch size:'+str(a.bs)+'\n'\
+                 '- learning rate:'+str(a.lr)
+      print(model_desc)
+      if fd_tex:
+        print('\\subsection{Model parameters}',file=fd_tex)
+        print('Here the batch size was set to '+str(a.bs)+'.\\\\',file=fd_tex)
+        print('\\texttt{'+(model_desc.replace('\n','}\\\\\n\\texttt{'))+'}\\\\',
+              file=fd_tex)
+
+    if 's' in line and a.mode=='all':
+      plot_fpfn_scatter(experiments,fd_tex,a)
+    if 't' in line:
+      plot_stopping_times(experiments,fd_tex,a.report_dir)
+    if 'l' in line:
+      plot_historical_statistics(experiments,fd_tex,a)
+    if 'x' in line:
+      print('Bye!')
+      exit()
+
+    if fd_tex:
+      print('\\end{document}',file=fd_tex,flush=True)
+      fd_tex.close()
+  except Exception as e:
+    print('Error reporting on progress:')
+    print(e)
 
 def save_ensemble(a,experiments,global_key):
   with open(a.out_dir+'/ensemble.pkl','wb') as fd:
@@ -1582,8 +1636,10 @@ def preproc_rbd24(df,split_test_train=True,rm_redundant=True,plot_xvals=False,
   if rm_redundant:
     df=df.drop(redundant_cols,axis=1)
   if rescale_log:
-    if max([npl10(1+m) for m in maximums])>rescale_log:
+    max_logs=max([npl10(1+m) for m in maximums])
+    if max_logs>rescale_log:
       print('Note that rescale factor will not map values to be <=1')
+      print('Largest value:',max_logs)
     for c in large_cols:
       df[c]=npl10(1+df[c].__array__())/rescale_log
   if plot_xvals:

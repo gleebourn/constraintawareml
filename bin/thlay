@@ -4,7 +4,7 @@ from numpy import sum as nsm,min as nmn,max as nmx
 from jax.numpy import exp,sin,inf,array
 from jax.lax import dot_general
 from jax.random import key,split
-from jax import jit
+from jax import jit,value_and_grad
 from sys import path,stdin
 from os import mkdir,environ
 #environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
@@ -17,7 +17,7 @@ path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import init_ensemble,init_experiments,activations,f_to_str,save_ensemble,\
                       exp_to_str,fpfnp_lab,f,get_xy,report_progress,update_lrs,losses,\
                       evaluate_fp_fn,update_history,compute_U_V,update_weights,resnet,\
-                      read_input_if_ready,fm,implementation
+                      read_input_if_ready,fm,implementation,TimeStepper,upd_adam,upd_grad
 
 a=init_ensemble()
 
@@ -67,6 +67,7 @@ else:
 
 act=activations[a.activation] if a.activation else None
 imp=implementation(a.implementation,act)
+imp_bin=jit(lambda w,x:imp(w,x).flatten()>0)
 
 if a.initialisation=='casewise_linear':
   cat_mask=[]
@@ -79,26 +80,44 @@ if a.initialisation=='casewise_linear':
   for e in experiments:
     e.w_model=cat_mask.copy(),[0.]*a.in_dim
 
-loss,dloss=losses[a.loss](imp)
+n_active_experiments=len(experiments)
+
+loss=losses[a.loss](act,imp)
+dloss=jit(value_and_grad(loss))
 a.ts=TimeStepper(a.clock_avg_rate)
+jit_get=a.mode=='rmd24' and a.epochs and not a.rbd24_no_shuffle
 while True:
-  tl=perf_counter()
   a.ts.get_timestep('Start_step')
-  xy=get_xy(a,a.imbalances,a.bs,emit_key())
-  a.lr_phase+=a.lr_momentum
+  if jit_get:
+    (a.x_train,a.y_train),(x,y_t),\
+    a.offset,new_epoch=get_xy_jit(a.x_train,a.y_train,a.offset,a.bs,
+                                  emit_key(),a.offset+a.bs>len(a.y_train))
+    if new_epoch:
+      a.epoch_num+=1
+      print('Start epoch',a.epoch_num)
+  else:
+    xy=get_xy(a,a.bs,emit_key(),a.imbalances)
   a.ts.get_timestep('get_xy')
   for e in experiments:
     a.ts.get_timestep('start_loop')
     if a.stop_on_target and e.steps_to_target:
+      if e.report_done:
+        n_active_experiments-=1
+        e.report_done=False
       continue
-    x,y_t=xy[float(e.p)]
-    e.lr=a.lr*exp(a.lr_amplitude*sin(a.lr_phase))
+    if not jit_get:
+      x,y_t=xy[float(e.p)]
     e.bs=len(y_t)
     a.ts.get_timestep('access_xy')
-    y_p=imp(e.w_model,x).flatten()>0
-
+    #y_p=imp(e.w_model,x).flatten()>0
+    y_p=imp_bin(e.w_model,x)
     a.ts.get_timestep('threshold')
-    evaluate_fp_fn(e,y_p,y_t,trad_avg=a.trad_avg)
+    e.FP,e.FN,e.cost,e.fp,e.fn=evaluate_fp_fn(e.bs,e.avg_rate,
+                                              e.target_fp,e.target_fn,
+                                              y_p,y_t,e.fp,e.fn)
+    e.FPs[e.step]=e.FP
+    e.FNs[e.step]=e.FN
+    
     a.ts.get_timestep('evaluate_fp_fn')
 
     if a.no_U_V:
@@ -109,19 +128,23 @@ while True:
                           scale_before_sm=a.scale_before_sm)
     a.ts.get_timestep('U,V')
     e.loss_val,upd=dloss(e.w_model,x,y_t,e.U,e.V,eps=e.eps)#,act=act,
-    #print(y_t,nsm(x**2)**.5,
-    #      sum([nsm(u**2) for u in upd[0]]),sum([nsm(u**2) for u in upd[1]]))
     a.ts.get_timestep('dloss')
     if e.loss_val==inf:
+      adj=2.
       print('nan encountered, increasing loss epsilon for experiment')
-      e.eps*=2
+      e.eps*=adj
+      print('e.eps*=',adj)
+      print('e.eps<-',e.eps)
       upd=[(0.,0.) for u in upd]
-
     e.loss_vals[e.step]=float(e.loss_val)
-    update_weights(a,e,upd)
-    if a.initialisation=='casewise_linear' and a.reproduce_llpal:
-      e.w_model=e.w_model[0]*cat_mask,e.w_model[1]
-    a.ts.get_timestep('update_weights')
+    a.ts.get_timestep('record_loss')
+
+    if a.adam:
+      e.w_model,e.adam_V,e.adam_M,e.w_l2,e.dw_l2=upd_adam(e.w_model,e.adam_V,
+                                                          e.adam_M,upd,a.beta1,
+                                                          a.beta2,e.lr)
+    else:
+      e.w_model,e.w_l2,e.dw_l2=upd_grad(e.w_model,upd,e.lr)
 
     update_history(e)
     a.ts.get_timestep('update_history')
@@ -140,8 +163,12 @@ while True:
     print('step',a.step)
   if not a.step%a.saving_interval:
     save_ensemble(a,experiments,global_key)
+    if not n_active_experiments:
+      print('All experiments complete, exiting')
+      line='erx'
   if line or not a.step%a.reporting_interval:
     if not line:
       line=read_input_if_ready()
     report_progress(a,experiments,line,imp,emit_key(report=True))
   a.step+=1
+  a.ts.get_timestep('saving_reporting')
