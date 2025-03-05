@@ -1,0 +1,107 @@
+#!/usr/bin/env python
+from pickle import load
+from numpy import sum as nsm,min as nmn,max as nmx
+from jax.numpy import exp,sin,inf,array,array_split
+from jax.lax import dot_general
+from jax.random import key,split
+from jax import jit,grad
+from sys import path,stdin
+from os import mkdir,environ
+#environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
+#environ["XLA_PYTHON_CLIENT_MEM_FRACTION"]=".99"
+#environ["XLA_PYTHON_CLIENT_ALLOCATOR"]="platform"
+
+from os.path import dirname,abspath
+from sys import path
+path.append(dirname(dirname(abspath(__file__))))
+from cal.thlay import init_ensemble,init_experiments,activations,f_to_str,save_ensemble,\
+                      exp_to_str,fpfnp_lab,f,get_xy,report_progress,update_lrs,losses,\
+                      evaluate_fp_fn,update_history,compute_U_V,update_weights,resnet,\
+                      read_input_if_ready,fm,implementation,TimeStepper,\
+                      upd_adam,upd_grad,KeyEmitter,shuffle_xy,fp_fn_nl
+
+a=init_ensemble()
+try:
+  mkdir(a.out_dir)
+  new=True
+except FileExistsError:
+  print('Already seems to be something there... [O]verwrite, [L]oad or [A]bort?')
+  ln=stdin.readline()[0].lower()
+  if ln[0]=='l':
+    new=False
+  elif ln[0]=='o':
+    new=True
+    print('Overwriting any existing ensembles...')
+  else:
+    print('Abort!')
+    exit()
+if not new:
+  try:
+    with open(a.out_dir+'/ensemble.pkl','rb') as fd:
+      print('Opening experiment ensemble',a.outf,'...')
+      od=a.out_dir #Correct the actual directory if opened somewhere else
+      a,experiments=load(fd)
+      ke=KeyEmitter(a.seed,a.parent_keys)
+      ts=TimeStepper(a.clock_avg_rate,a.time_avgs)
+      a.out_dir=od
+      new=False
+      print('Restored',a.outf+'.pkl','from disk')
+  except FileNotFoundError:
+    print('No pkl in directory...')
+    new=True
+else:
+  print('Generating new experiments...')
+  ke=KeyEmitter(a.seed)
+  ts=TimeStepper(a.clock_avg_rate)
+  experiments=init_experiments(a,ke)
+
+act=activations[a.activation] if a.activation else None
+imp=implementation(a.implementation,act)
+imp_bin=jit(lambda w,x:imp(w,x).flatten()>0)
+
+loss=losses[a.loss](act,imp)
+#dloss=jit(value_and_grad(loss))
+gloss=jit(grad(loss))
+
+@jit
+def run_epoch(X_batched,Y_batched,w,ad_v,ad_m,lr,reg,bs,eps,
+              beta1,beta2,avg_rate,target_fp,target_fn,fp,fn):
+  for x,y in zip(X_batched,Y_batched):
+    y_p=imp_bin(e.w_model,x)
+    fp_b=(y_p^(~y)).sum()
+    fn_b=((~y_p)^y).sum()
+    fp,fn=fp_fn_nl(bs,avg_rate,fp,fn,fp_b,fn_b)
+    U,V=U_V_scale(fp,fn,target_fp,target_fn,pp)
+    dw=gloss(w,x,y,U,V,eps,reg)
+    w,ad_v,ad_m=upd_adam(w,ad_v,ad_m,dw,beta1,beta2,lr,eps)
+  return w,ad_v,ad_m,fp,fn
+
+a.epoch_num=0
+X,Y=a.x_train,a.y_train
+while True:
+  print('Starting epoch...')
+  ts.get_timestep('start')
+  n_batches=a.n_rows_train//a.bs
+  X,Y=shuffle_xy(ke.emit_key(),X,Y)
+  X_batched,Y_batched=array_split(X,n_batches),array_split(Y,n_batches)
+  for e in experiments:
+    e.w_model,e.adam_V,e.adam_M,e.fp,e.fn=run_epoch(X_batched,Y_batched,
+                                                    e.w_model,e.adam_V,e.adam_M,
+                                                    e.lr,e.reg,e.bs,e.eps,
+                                                    a.beta1,a.beta2,e.avg_rate,
+                                                    e.target_fp,e.target_fn,
+                                                    e.fp,e.fn)
+    ts.get_timestep('epoch_experiment')
+    print('Experiment epoch complete...')
+  a.epoch_num+=1
+  print('end epoch',a.epoch_num)
+  save_ensemble(a,experiments,ke,ts)
+  ts.get_timestep('save_ensemble')
+  if not a.n_active_experiments:
+    print('All experiments complete, exiting')
+    line='erx'
+  else:
+    line=''
+  line+=read_input_if_ready()
+  report_progress(a,experiments,line,imp,ke.emit_key(report=True))
+  ts.get_timestep('reporting')

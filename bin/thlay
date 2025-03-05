@@ -44,7 +44,7 @@ if not new:
       print('Opening experiment ensemble',a.outf,'...')
       od=a.out_dir #Correct the actual directory if opened somewhere else
       a,experiments=load(fd)
-      ke=KeyEmitter(a.parent_keys)
+      ke=KeyEmitter(a.seed,a.parent_keys)
       a.out_dir=od
       new=False
       print('Restored',a.outf+'.pkl','from disk')
@@ -132,9 +132,9 @@ while True:
     a.ts.get_timestep('record_loss')
 
     if a.adam:
-      e.w_model,e.adam_V,e.adam_M,e.w_l2,e.dw_l2=upd_adam(e.w_model,e.adam_V,
-                                                          e.adam_M,upd,a.beta1,
-                                                          a.beta2,e.lr)
+      e.w_model,e.adam_V,e.adam_M,e.w_l2,e.dw_l2=upd_adam_getl2(e.w_model,e.adam_V,
+                                                                e.adam_M,upd,a.beta1,
+                                                                a.beta2,e.lr)
     else:
       e.w_model,e.w_l2,e.dw_l2=upd_grad(e.w_model,upd,e.lr)
 

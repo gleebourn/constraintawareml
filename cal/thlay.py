@@ -41,13 +41,14 @@ def set_jax_cache():
 
 class KeyEmitter:
   def __init__(self,seed=1729,parents=['main','vis']):
-    k=key(seed)
-    if isinstance(parents,list):
-      self.parents={a:k for a,k in zip(parents,split(k,len(parents)))}
-    elif isinstance(parents,str):
-      self.parents={parents:k}
-    else:
+    if isinstance(parents,dict):
       self.parents=parents
+    else:
+      k=key(seed)
+      if isinstance(parents,list):
+        self.parents={a:k for a,k in zip(parents,split(k,len(parents)))}
+      elif isinstance(parents,str):
+        self.parents={parents:k}
   def emit_key(self,n=1,parent='main',vis=False,report=False):
     if vis or report:
       parent='vis'
@@ -56,10 +57,10 @@ class KeyEmitter:
     return keys[1:] if n>1 else keys[1]
 
 class TimeStepper:
-  def __init__(self,clock_avg_rate=.01):
+  def __init__(self,clock_avg_rate=.01,time_avgs={}):
     self.clock_avg_rate=clock_avg_rate
     self.tl=perf_counter()
-    self.time_avgs={}
+    self.time_avgs=time_avgs
   def get_timestep(self,label):
     t=perf_counter()
     try:
@@ -81,6 +82,16 @@ class TimeStepper:
                     f_to_str(log10(v))+'\\\\\n' for k,v in tai])
     tsrx+='\\end{tabular}'
     return tsr,tsrx
+
+@jit
+def fp_fn_nl(bs,avg_rate,fp,fn,fp_b,fn_b):
+  fp_amnt=avg_rate*min(1,bs*fp)
+  fn_amnt=avg_rate*min(1,bs*fn)
+  fp*=(1-fp_amnt)
+  fn*=(1-fn_amnt)
+  fp+=fp_amnt*fp_b
+  fn+=fn_amnt*fn_b
+  return fp,fn
 
 class OTFBinWeights:
   def __init__(self,avg_rate,target_fp,target_fn,adaptive_thresh_rate,
@@ -104,18 +115,14 @@ class OTFBinWeights:
     self.p_scale=p_scale
 
   def upd(self,y,yp):
-    n_samps=len(y)
-    tp_b=jsm(yp&y)/n_samps
-    tn_b=jsm(~(yp|y))/n_samps
-    fp_b=jsm(yp&~y)/n_samps
+    bs=len(y)
+    tp_b=jsm(yp&y)/bs
+    tn_b=jsm(~(yp|y))/bs
+    fp_b=jsm(yp&~y)/bs
     fn_b=1.-tp_b-tn_b-fp_b
     if self.nl_avg:
-      fp_amnt=self.avg_rate*min(1,n_samps*self.fp)
-      fn_amnt=self.avg_rate*min(1,n_samps*self.fn)
-      self.fp*=(1-fp_amnt)
-      self.fn*=(1-fn_amnt)
-      self.fp+=fp_amnt*fp_b
-      self.fn+=fn_amnt*fn_b
+      self.fp,self.fn=fp_fn_nl(self.fp,self.fn,fp_b,fn_b,
+                               self.avg_rate,bs)
     else:
       self.tp*=self.om_avg_rate
       self.tn*=self.om_avg_rate
@@ -264,7 +271,7 @@ def init_ensemble():
   ap.add_argument('-activation',choices=list(activations),default='tanh')
   ap.add_argument('-implementation',type=str,
                   choices=list(implementations),default='mlp')
-  ap.add_argument('--seed',default=20255202,type=int)
+  ap.add_argument('--seed',default=1729,type=int)
   ap.add_argument('-n_splits_img',default=100,type=int)
   ap.add_argument('-rbd24_single_dataset',default='',type=str)
   ap.add_argument('-rbd24_no_categorical',action='store_true')
@@ -784,6 +791,7 @@ def mk_experiment(p,thresh,target_fp,target_fn,lr,a,reg=0.,eps=1e-8):
   e.eps=eps
   e.reg=reg
   e.bs=a.bs
+  e.p_test=a.p_test
   e.target_tolerance=a.target_tolerance
   e.steps_to_target=False
   e.avg_rate=a.avg_rate
@@ -824,7 +832,7 @@ def mk_experiment(p,thresh,target_fp,target_fn,lr,a,reg=0.,eps=1e-8):
 
 def init_experiments(a,ke):
   k1,k2,k3,k4,k5,k6=ke.emit_key(6)
-  a.time_avgs=dict()
+  a.time_avgs={}
   if a.mode=='rbd24':
     (a.x_train,a.y_train),\
     (a.x_test,a.y_test),\
@@ -858,13 +866,15 @@ def init_experiments(a,ke):
   if a.mode=='unsw':
     df_train=read_csv(a.unsw_train)
     df_test=read_csv(a.unsw_test)
-    a.x_test=array(df_test[df_test.columns[(df_test.dtypes==int)|\
-                                           (df_test.dtypes==float)]]).T[1:].T
     a.x_train=array(df_test[df_train.columns[(df_train.dtypes==int)|\
                                              (df_train.dtypes==float)]]).T[1:].T
     a.y_train=df_train['attack_cat']
+    a.x_test=array(df_test[df_test.columns[(df_test.dtypes==int)|\
+                                           (df_test.dtypes==float)]]).T[1:].T
     a.y_test=df_test['attack_cat']
     a.in_dim=len(a.x_train[0])
+
+  a.n_rows_train,a.n_rows_test=len(a.y_train),len(a.y_test)
 
   #elif a.mode=='all':
   #  a.target_mult_a=.75
@@ -924,6 +934,7 @@ def init_experiments(a,ke):
     a.imbalances=None
     experiments=[mk_experiment(a.p,0.,t_fp,t_fn,lr,a,reg=reg)\
                  for t_fp,t_fn in a.target_fpfns for lr in a.lrs for reg in a.regs]
+  a.n_active_experiments=len(experiments)
   #elif a.mode in ['imbalances']:
   #  experiments=[mk_experiment(float(p),float(a.thresholds[float(p)]),fpfn_ratio,
   #                             float(p*target_fn),a.lr,a)\
@@ -980,7 +991,7 @@ def get_xy(a,bs,k,imbs=None):
       if next_offset>len(a.y_train): #new epoch
         a.epoch_num+=1
         print('Start of epoch',a.epoch_num)
-        print('Number of rows in training data:',len(a.y_train))
+        print('Number of rows in training data:',a.n_rows_train)
         if a.rbd24_no_shuffle:
           if a.epoch_num>1:
             print('END OF TIME')
@@ -1068,6 +1079,12 @@ def update_history(e):
        e.steps_to_target=e.step
        e.report_done=True
     
+@jit
+def U_V_scale(fp,fn,target_fp,target_fn,pp):
+  U,V=pp*fp/target_fp,fn/target_fn
+  UpV=U+V
+  return U/UpV,VUpV
+ 
 
 def compute_U_V(fp,fn,target_fp,target_fn,p,sm=False,p_scale=.5,scale_before_sm=True):
   pp=p**p_scale
@@ -1132,6 +1149,24 @@ def upd_adam(w,adam_V,adam_M,upd,beta1,beta2,lr,eps=1e-8):
     adva[i]+=(1-beta1)*u
     advb[i]+=(1-beta1)*v
     adam_M+=(1-beta2)*(nsm(u**2)+nsm(v**2))
+  for i,(s,t) in enumerate(zip(*adam_V)):
+    delta_u=lr*s/(adam_M**.5+eps)
+    delta_v=lr*t/(adam_M**.5+eps)
+    wa[i]-=delta_u
+    wb[i]-=delta_v
+  return w,adam_V,adam_M
+
+@jit
+def upd_adam_getl2(w,adam_V,adam_M,upd,beta1,beta2,lr,eps=1e-8):
+  adva,advb=adam_V
+  wa,wb=w
+  adam_M*=beta2
+  for i,(u,v) in enumerate(zip(*upd)):
+    adva[i]*=beta1
+    advb[i]*=beta1
+    adva[i]+=(1-beta1)*u
+    advb[i]+=(1-beta1)*v
+    adam_M+=(1-beta2)*(nsm(u**2)+nsm(v**2))
   w_l2=0
   dw_l2=0
   for i,(s,t) in enumerate(zip(adva,advb)):
@@ -1159,8 +1194,8 @@ def update_weights(a,e,upd):#,start=None,end=None):
   else:
     wm=e.w_model
   if a.adam:
-    wm,e.adam_V,e.adam_M,e.w_l2,e.dw_l2=upd_adam(wm,e.adam_V,e.adam_M,upd,
-                                                 a.beta1,a.beta2,e.lr)
+    wm,e.adam_V,e.adam_M,e.w_l2,e.dw_l2=upd_adam_getl2(wm,e.adam_V,e.adam_M,upd,
+                                                       a.beta1,a.beta2,e.lr)
   else:
     wm,e.w_l2,e.dw_l2=upd_grad(wm,upd,e.lr)
 
@@ -1402,43 +1437,27 @@ def report_progress(a,experiments,line,imp,k):
 
     fd_tex=False
     if 'e' in line and a.mode in ['mnist','rbd24']:
-      print('p_train:',a.p)
-      print('p_test:',a.p_test)
+      print('evaluating experiments...')
       for e in experiments:
-        if a.mode=='rbd24':
-          x_train_pos=a.x_train[a.y_train]
-          x_train_neg=a.x_train[~a.y_train]
-          x_test_pos=a.x_test[a.y_test]
-          x_test_neg=a.x_test[~a.y_test]
-          print()
-          print('mavg_fp_0,mavg_fn_0:',f_to_str(e.fp),f_to_str(e.fn))
-          print('target_fp_0,target_fn_0:',
-                f_to_str(e.target_fp),f_to_str(e.target_fn))
-          print('fp_train,fn_train:',
-                f_to_str(sum([nsm(f(e.w_model,x_train_neg[i:i+a.bs])>0) for\
-                              i in range(0,len(x_train_neg),a.bs)])/len(a.x_train)),
-                f_to_str(sum([nsm(f(e.w_model,x_train_pos[i:i+a.bs])<=0) for\
-                              i in range(0,len(x_train_pos),a.bs)])/len(a.x_train)))
-          print('fp_test,fn_test:',
-                f_to_str(sum([nsm(f(e.w_model,x_test_neg[i:i+a.bs])>0) for\
-                              i in range(0,len(x_test_neg),a.bs)])/len(a.x_test)),
-                f_to_str(sum([nsm(f(e.w_model,x_test_pos[i:i+a.bs])<=0) for\
-                              i in range(0,len(x_test_pos),a.bs)])/len(a.x_test)))
-        else:
-          x_train_pos=a.x_train_pos
-          x_train_neg=a.x_train_neg
-          x_test_pos=a.x_test_pos
-          x_test_neg=a.x_test_neg
-          print()
-          print('mavg_fp_0,mavg_fn_0:',f_to_str((1-.1)*e.fp/(1-e.p)),f_to_str(.1*e.fn/e.p))
-          print('target_fp_0,target_fn_0:',
-                f_to_str((1-.1)*e.target_fp/(1-e.p)),f_to_str(.1*e.target_fn/e.p))
-          print('fp_train_0,fn_train_0:',
-                f_to_str(nsm(f(e.w_model,x_train_neg)>0)/len(a.x_train)),
-                f_to_str(nsm(f(e.w_model,x_train_pos)<=0)/len(a.x_train)))
-          print('fp_test_0,fn_test_0:',
-                f_to_str(nsm(f(e.w_model,x_test_neg)>0)/len(a.x_test)),
-                f_to_str(nsm(f(e.w_model,x_test_pos)<=0)/len(a.x_test)))
+        x_train_pos=a.x_train[a.y_train]
+        x_train_neg=a.x_train[~a.y_train]
+        x_test_pos=a.x_test[a.y_test]
+        x_test_neg=a.x_test[~a.y_test]
+        print()
+        print('lr,reg,P_train(+),P_test(+):',e.lr,e.reg,e.p,e.p_test)
+        print('fp_otf,fn_otf:',f_to_str(e.fp),f_to_str(e.fn))
+        print('target_fp,target_fn:',
+              f_to_str(e.target_fp),f_to_str(e.target_fn))
+        print('fp_train,fn_train:',
+              f_to_str(sum([nsm(f(e.w_model,x_train_neg[i:i+a.bs])>0) for\
+                            i in range(0,len(x_train_neg),a.bs)])/len(a.x_train)),
+              f_to_str(sum([nsm(f(e.w_model,x_train_pos[i:i+a.bs])<=0) for\
+                            i in range(0,len(x_train_pos),a.bs)])/len(a.x_train)))
+        print('fp_test,fn_test:',
+              f_to_str(sum([nsm(f(e.w_model,x_test_neg[i:i+a.bs])>0) for\
+                            i in range(0,len(x_test_neg),a.bs)])/len(a.x_test)),
+              f_to_str(sum([nsm(f(e.w_model,x_test_pos[i:i+a.bs])<=0) for\
+                            i in range(0,len(x_test_pos),a.bs)])/len(a.x_test)))
     if 'r' in line:
       line+='clist'
       a.report_dir=a.outf+'_report'
@@ -1552,11 +1571,12 @@ def report_progress(a,experiments,line,imp,k):
     print(e)
     print(format_exc())
 
-def save_ensemble(a,experiments,parent_keys):
+def save_ensemble(a,experiments,ke,ts):
   ens_file=Path(a.out_dir+'/ensemble.pkl')
   ens_file.rename(ens_file.with_suffix('.pkl.bak'))
   with open(ens_file,'wb') as fd:
-    a.parent_keys=parent_keys
+    a.parent_keys=ke.parents
+    a.time_averages=ts.time_avgs
     dump((a,experiments),fd)
 
 def dl_rbd24(data_dir=str(Path.home())+'/data',
