@@ -26,9 +26,10 @@ from jax.random import uniform,normal,split,key,choice,binomial,permutation
 from sklearn.utils.extmath import cartesian
 from pandas import read_csv
 from matplotlib.pyplot import imshow,legend,show,scatter,xlabel,ylabel,\
-                              gca,plot,title,savefig,close
+                              gca,plot,title,savefig,close,rcParams,yscale
 from matplotlib.patches import Patch
 from matplotlib.cm import jet
+rcParams['font.family'] = 'monospace'
 from pandas import read_pickle,read_parquet,concat,get_dummies
 from traceback import format_exc
 
@@ -61,23 +62,29 @@ class TimeStepper:
     self.clock_avg_rate=clock_avg_rate
     self.tl=perf_counter()
     self.time_avgs=time_avgs
-  def get_timestep(self,label):
+    self.lj=max([8]+[len(lab)+1 for lab in time_avgs])
+  def get_timestep(self,label=False,start_immed=False):
     t=perf_counter()
-    try:
-      self.time_avgs[label]+=(1+self.clock_avg_rate)*\
-                             self.clock_avg_rate*\
-                             float(t-self.tl)
-    except:
-      self.time_avgs[label]=(1+self.clock_avg_rate)*\
-                            float(t-self.tl)
+    if label:
+      try:
+        self.time_avgs[label]+=(1+self.clock_avg_rate)*\
+                               self.clock_avg_rate*\
+                               float(t-self.tl)
+      except:
+        print('New time waypoint',label)
+        self.time_avgs[label]=(1+self.clock_avg_rate)*\
+                              float(t-self.tl) if\
+                              start_immed else 1e-8
+        self.lj=max(len(label)+1,self.lj)
       self.time_avgs[label]*=(1-self.clock_avg_rate)
     self.tl=t
   def report(self,p=False):
     tai=self.time_avgs.items()
-    tsr='\n'.join([str(k)+':'+str(log10(v)) for k,v in tai])
+    #tsr='\n'.join([str(k)+':'+str(log10(v)) for k,v in tai])
+    tsr=f_to_str(self.time_avgs,lj=self.lj)+'\n'+\
+        f_to_str(self.time_avgs.values(),lj=self.lj)
     if p:
       print(tsr)
-      return
     tsrx='\n'.join(['\\texttt{'+k.replace('_','\\_')+'}&'+\
                     f_to_str(log10(v))+'\\\\\n' for k,v in tai])
     tsrx+='\\end{tabular}'
@@ -85,12 +92,20 @@ class TimeStepper:
 
 @jit
 def fp_fn_nl(bs,avg_rate,fp,fn,fp_b,fn_b):
-  fp_amnt=avg_rate*min(1,bs*fp)
-  fn_amnt=avg_rate*min(1,bs*fn)
+  fp_amnt=avg_rate*minimum(1,bs*fp)
+  fn_amnt=avg_rate*minimum(1,bs*fn)
   fp*=(1-fp_amnt)
   fn*=(1-fn_amnt)
   fp+=fp_amnt*fp_b
   fn+=fn_amnt*fn_b
+  return fp,fn
+
+@jit
+def fp_fn_ewma(bs,avg_rate,fp,fn,fp_b,fn_b):
+  fp*=(1-avg_rate)
+  fn*=(1-avg_rate)
+  fp+=avg_rate*fp_b
+  fn+=avg_rate*fn_b
   return fp,fn
 
 class OTFBinWeights:
@@ -253,7 +268,6 @@ def init_ensemble():
   ap.add_argument('-single_layer_upd',action='store_true')
   ap.add_argument('-p_scale',default=1.,type=float)#.5
   ap.add_argument('-scale_before_sm',action='store_true')
-  #ap.add_argument('-no_softmax_U_V',action='store_true')
   ap.add_argument('-softmax_U_V',action='store_true')
   ap.add_argument('-window_avg',action='store_true')
   ap.add_argument('-n_gaussians',default=4,type=int)
@@ -303,6 +317,9 @@ def init_ensemble():
   ap.add_argument('-unsw_test',default='~/data/UNSW_NB15_testing-set.csv')
   ap.add_argument('-unsw_train',default='~/data/UNSW_NB15_training-set.csv')
   ap.add_argument('-model_inner_dims',default=[],type=int,nargs='+')
+  ap.add_argument('-geomnet_start',default=False,type=int)
+  ap.add_argument('-geomnet_end',default=False,type=int)
+  ap.add_argument('-geomnet_n_layers',default=False,type=int)
   ap.add_argument('-bs',default=0,type=int)
   ap.add_argument('-res',default=1000,type=int)
   ap.add_argument('-outf',default='thlay')
@@ -377,6 +394,12 @@ def init_ensemble():
       a.bs=128
     else:
       a.bs=1
+  if a.geomnet_start and a.geomnet_end and a.geomnet_n_layers:
+    gs=a.geomnet_start**(1/a.geomnet_n_layers)
+    ge=a.geomnet_end**(1/a.geomnet_n_layers)
+    a.model_inner_dims=[round(gs**(a.geomnet_n_layers-i)*\
+                              ge**i)\
+                        for i in range(a.geomnet_n_layers+1)]
   if not a.model_inner_dims and not a.fm:
     if a.mode=='gmm':
       a.model_inner_dims=[32,16]
@@ -386,7 +409,15 @@ def init_ensemble():
       a.model_inner_dims=[64,32]
   return a
 
-f_to_str=lambda x,lj=9:f'{x:.3g}'.ljust(lj) if lj else f'{x:.3g}'
+def f_to_str(X,lj=8):
+  try:
+    if isinstance(float(X),float):
+      X=f'{X:.3g}'
+  except:
+    pass
+  if isinstance(X,str):
+    return X.ljust(lj) if lj else X
+  return ''.join((f_to_str(x,lj=lj) for x in X))
 
 exp_to_str=lambda e:'exp_p'+f_to_str(e.p,lj=False)+'fpt'+f_to_str(e.target_fp,lj=False)+\
                     'fnt'+f_to_str(e.target_fn,lj=False)+'lr'+f_to_str(e.lr,lj=False)
@@ -724,7 +755,7 @@ def nn_pca_loss(w_c,b_c,w_e,b_e,x,x_targ,eps=1e-8):
   l+=jsm((x_p-x_targ)**2)
   return l#log(jsm(w_c[-1]@w_c[-1].T)))
 
-losses={'loss':mk_cross_entropy,'l1':mk_l1,'cross_entropy':mk_cross_entropy,
+losses={'loss':mk_l1,'l1':mk_l1,'cross_entropy':mk_cross_entropy,
         'l2':mk_l2,'hinge':mk_hinge}
         #'l1_soft':dl1_soft,'cross_entropy_soft':dcross_entropy_soft,
         #'resnet_cost':dresnet_cost,'resnet_cost_layer':dresnet_cost_layer,
@@ -788,18 +819,21 @@ def colour_rescale(fpfn):
 def mk_experiment(p,thresh,target_fp,target_fn,lr,a,reg=0.,eps=1e-8):
   e=SimpleNamespace()
   e.report_done=False
+  e.fp_test='?'
+  e.fn_test='?'
+  e.fp_train='?'
+  e.fn_train='?'
   e.eps=eps
   e.reg=reg
   e.bs=a.bs
   e.p_test=a.p_test
+  e.beta1=a.beta1
+  e.beta2=a.beta2
   e.target_tolerance=a.target_tolerance
   e.steps_to_target=False
   e.avg_rate=a.avg_rate
   e.dw_l2=e.w_l2=0
-  if a.initialisation=='casewise_linear':
-    e.w_model=a.w_model_init[0].copy(),a.w_model_init[1].copy()
-  else:
-    e.w_model=[v.copy() for v in a.w_model_init[0]],[v.copy() for v in a.w_model_init[1]]
+  e.w_model=[v.copy() for v in a.w_model_init[0]],[v.copy() for v in a.w_model_init[1]]
   e.history_len=a.history_len
   e.step=0
 
@@ -808,6 +842,7 @@ def mk_experiment(p,thresh,target_fp,target_fn,lr,a,reg=0.,eps=1e-8):
 
   e.lr=float(lr)
   e.p=float(p) #"imbalance"
+  e.pp=e.p**a.p_scale
   #e.p_its=int(1/p) #if repeating minority class iterations
   e.target_fp=target_fp#target_fn*fpfn_ratio
   e.target_fn=target_fn
@@ -828,11 +863,56 @@ def mk_experiment(p,thresh,target_fp,target_fn,lr,a,reg=0.,eps=1e-8):
   e.thresh=thresh
   e.history=SimpleNamespace(FP=[],FN=[],lr=[],cost=[],w=[],dw=[],loss_vals=[],
                             resolution=1,l=0)
+  e.epochs=SimpleNamespace(fp_otf=[],fn_otf=[],fpfn_otf=[],
+                           fp_train=[],fn_train=[],fpfn_train=[],
+                           fp_test=[],fn_test=[],fpfn_test=[],w_l2=[])
   return e
+
+def desc_e(stats,e):
+  return f_to_str((stats,e.lr,e.reg,e.target_fp,e.target_fn))
+
+def update_epochs(e):
+  #if not e.steps_to_target: #only update if still going
+  e.w_l2=l2(e.w_model)
+  e.fp_otf=e.fp
+  e.fn_otf=e.fn
+  e.fpfn_otf=e.fp_otf/e.fn_otf
+  e.fpfn_train=e.fp_train/e.fn_train
+  e.fpfn_test=e.fp_test/e.fn_test
+  e_v=vars(e)
+  ep_v=vars(e.epochs)
+  [v.append(e_v[k]) for k,v in ep_v.items()]
+  if e.fp_train<e.target_fp and e.fn_train<e.target_fn and\
+  not e.steps_to_target:
+    print('Experiment complete!')
+    e.steps_to_target=len(e.epochs.fp_otf)
+    e._w_model=e.w_model
+
+def plot_epochs(experiments,stats=None,scale_log=True,
+                by_experiment=False,see=True):
+  if stats is None:
+    stats=vars(experiments[0].epochs)
+
+  if by_experiment:
+    [plot_epochs([e],stats=stats,see=see,by_experiment=False)\
+     for e in experiments]
+  elif isinstance(stats,list|dict):
+    for stat in stats:
+      plot_epochs(experiments,stats=stat,see=see)
+  else:
+    if see:
+      plot([],label=f_to_str(('stat','lr','reg','tgt_fp','tgt_fn')))
+    for e in experiments:
+      plot(vars(e.epochs)[stats],label=desc_e(stats,e))
+    if see:
+      if scale_log:
+        yscale('log')
+      title(stats)
+      legend()
+      show()
 
 def init_experiments(a,ke):
   k1,k2,k3,k4,k5,k6=ke.emit_key(6)
-  a.time_avgs={}
   if a.mode=='rbd24':
     (a.x_train,a.y_train),\
     (a.x_test,a.y_test),\
@@ -1080,10 +1160,15 @@ def update_history(e):
        e.report_done=True
     
 @jit
-def U_V_scale(fp,fn,target_fp,target_fn,pp):
+def U_V_scale(fp,fn,target_fp,target_fn,pp): #only update if still going
   U,V=pp*fp/target_fp,fn/target_fn
   UpV=U+V
-  return U/UpV,VUpV
+  return U/UpV,V/UpV
+
+@jit
+def U_V_sm(fp,fn,target_fp,target_fn,pp): #only update if still going
+  return softmax(array([fp/target_fp,fn/(pp*target_fn)]))
+  return U/UpV,V/UpV
  
 
 def compute_U_V(fp,fn,target_fp,target_fn,p,sm=False,p_scale=.5,scale_before_sm=True):
@@ -1383,21 +1468,92 @@ def plot_fpfn_scatter(experiments,fd_tex,a):
   else:
     show()
 
-def report_progress(a,experiments,line,imp,k):
+def report_epochs(a,experiments,ts,line,imp,k):
+  k1,k2=split(k)
+  print(f_to_str(['lr','reg','p','p_test','tgt_fp','tgt_fn','fp_otf','fn_otf',
+                  'fp_trn','fn_trn','fp_tst','fn_tst','w_l2','done']))
+  for e in experiments:
+    print(f_to_str([e.lr,e.reg,e.p,e.p_test,e.target_fp,e.target_fn,e.fp,e.fn,
+                    e.fp_train,e.fn_train,e.fp_test,e.fn_test,e.w_l2,
+                    (e.steps_to_target) if e.steps_to_target else ' no']))
+
+  ts.report(p=True)
+  if ':' in line:
+    l=line.split(':')
+    if len(l)<3:
+      print('Invalid command')
+      return
+    if l[0]=='f':
+      ty=float
+    elif line[0]=='i':
+      ty=int
+    vars(a)[l[1]]=ty(l[2])
+    print('a.'+line[1]+'->'+str(ty(l[2])))
+    return
+  elif '?' in line:
+    query_var=line.split('?')[0]
+    va=vars(a)
+    if query_var in va:
+      print('a.'+query_var,':',va[query_var])
+    else:
+      print('"',line.split('?')[0],'" not in a')
+    return
+  elif '!' in line:
+    query_var=line.split('!')[0]
+    found=False
+    for i,e in enumerate(experiments):
+      ve=vars(e)
+      if query_var in ve:
+        found=True
+        print('experiment_'+str(i)+'.'+query_var,':',ve[query_var])
+    if not found:
+      print('"',line.split('?')[0],'" not in any experiment')
+    return
+  elif '*' in line:
+    print('a variables:')
+    [print(v) for v in vars(a).keys()]
+    return
+  if 'p' in line:
+    plot_epochs(experiments)
+    for e in experiments:
+      e.epochs.div_from_tgt=[max(a/e.target_fp.b/target_fn) for a,b in\
+                             zip(e.epochs.fp_test,e.epochs.fn_test)]
+      plot(e.epochs.fp_test,e.epochs.fn_test)
+    title('fp_test vs fn_test by epoch')
+    show()
+  if 'c' in line:#Completed tasks
+    for e in [ee.epochs for ee in experiments if ee.steps_to_target]:
+      stt=e.steps_to_target
+      print(f_to_str([e.lr,e.reg,e.p,e.p_test,e.target_fp,e.target_fn,
+                      e.fp[stt],e.fn[stt],e.fp_train[stt],e.fn_train[stt],
+                      e.fp_test[stt],e.fn_test[stt],e.w_l2[stt],stt]))
+
+  if 'x' in line:
+    print('Bye!')
+    exit()
+  if 'i' in line:
+    print(mod_desc(a))
+
+def mod_desc(a):
+  return\
+  '- Model shape:\n'+('->'.join([str(l) for l in a.model_shape]))+\
+  '\n- Activation: '+a.activation+'\n'+\
+  '- Implementation: '+a.implementation+'\n'+\
+  '- Model initialisation: '+str(a.initialisation)+'\n'\
+  '- Matrix weight multiplier: '+str(a.mult_a)+'\n'\
+  '- Sqrt variance correction:'+str(a.sqrt_normalise_a)+'\n'\
+  '- Batch size:'+str(a.bs)+'\n'\
+  '- learning rate(s):'+f_to_str(a.lrs)
+
+def report_progress(a,experiments,ts,line,imp,k):
   try:
     k1,k2=split(k)
-    print('|'.join([t.ljust(8) for t in ['p','tgt_fp','tgt_fn','lr',
-                                         'fp','fn','w','dw','reg','U','V','done']]))
+    print(f_to_str(['lr','reg','p','tgt_fp','tgt_fn','fp_otf','fn_otf',
+                    'fp_train','fn_train','fp_test','fn_test','done']))
     for e in experiments:
-      print('|'.join([f_to_str(t,lj=8) for t in [e.p,e.target_fp,e.target_fn,e.lr,e.fp,e.fn,
-                                                 e.w_l2,e.dw_l2,e.reg,e.U,e.V]])+'|'+\
-            (f_to_str(e.steps_to_target) if e.steps_to_target else 'no'))
-    for e in experiments:
-      print('Recent FPs:',
-            ','.join([str(t) for t in e.FPs[e.step-5:e.step]]))
-      print('Recent FNs:',
-            ','.join([str(t) for t in e.FNs[e.step-5:e.step]]))
-      print('Losses:',e.loss_vals[e.step-5:e.step])
+      print(f_to_str([e.lr,e.reg,e.p,e.target_fp,e.target_fn,e.fp,e.fn,
+                      e.fp_train,e.fn_train,e.fp_test,e.fn_test,
+                      (e.steps_to_target if e.steps_to_target else 'no')]))
 
     if ':' in line:
       l=line.split(':')
@@ -1530,7 +1686,7 @@ def report_progress(a,experiments,line,imp,k):
             'step&$\\log(\\overline{\\texttt{T}_\\texttt{step}})$\\\\\n',file=fd_tex)
 
     print('Timing:')
-    tsr,tsrx=a.ts.report()
+    tsr,tsrx=ts.report()
     print(tsr)
     if fd_tex:print(tsrx,file=fd_tex)
 
@@ -1538,14 +1694,7 @@ def report_progress(a,experiments,line,imp,k):
       plot_2d(experiments,fd_tex,a,imp,line,k1)
 
     if 'i' in line:
-      model_desc='- Model shape:\n'+('->'.join([str(l) for l in a.model_shape]))+\
-                 '\n- Activation: '+a.activation+'\n'+\
-                 '- Implementation: '+a.implementation+'\n'+\
-                 '- Model initialisation: '+str(a.initialisation)+'\n'\
-                 '- Matrix weight multiplier: '+str(a.mult_a)+'\n'\
-                 '- Sqrt variance correction:'+str(a.sqrt_normalise_a)+'\n'\
-                 '- Batch size:'+str(a.bs)+'\n'\
-                 '- learning rate:'+str(a.lr)
+      model_desc=mod_desc(a)
       print(model_desc)
       if fd_tex:
         print('\\subsection{Model parameters}',file=fd_tex)
@@ -1559,13 +1708,12 @@ def report_progress(a,experiments,line,imp,k):
       plot_stopping_times(experiments,fd_tex,a.report_dir)
     if 'l' in line:
       plot_historical_statistics(experiments,fd_tex,a)
-    if 'x' in line:
-      print('Bye!')
-      exit()
-
     if fd_tex:
       print('\\end{document}',file=fd_tex,flush=True)
       fd_tex.close()
+    if 'x' in line:
+      print('Bye!')
+      exit()
   except Exception as e:
     print('Error reporting on progress:')
     print(e)
@@ -1573,10 +1721,11 @@ def report_progress(a,experiments,line,imp,k):
 
 def save_ensemble(a,experiments,ke,ts):
   ens_file=Path(a.out_dir+'/ensemble.pkl')
-  ens_file.rename(ens_file.with_suffix('.pkl.bak'))
+  if ens_file.is_file():
+    ens_file.rename(ens_file.with_suffix('.pkl.bak'))
   with open(ens_file,'wb') as fd:
     a.parent_keys=ke.parents
-    a.time_averages=ts.time_avgs
+    a.time_avgs=ts.time_avgs
     dump((a,experiments),fd)
 
 def dl_rbd24(data_dir=str(Path.home())+'/data',
