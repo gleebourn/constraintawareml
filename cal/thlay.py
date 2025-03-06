@@ -874,8 +874,8 @@ def desc_e(stats,e):
 def update_epochs(e):
   #if not e.steps_to_target: #only update if still going
   e.w_l2=l2(e.w_model)
-  e.fp_otf=e.fp
-  e.fn_otf=e.fn
+  e.fp_tf=e.fp
+  e.fn_tf=e.fn
   e.fpfn_otf=e.fp_otf/e.fn_otf
   e.fpfn_train=e.fp_train/e.fn_train
   e.fpfn_test=e.fp_test/e.fn_test
@@ -1472,7 +1472,7 @@ def report_epochs(a,experiments,ts,line,imp,k):
   k1,k2=split(k)
   print(f_to_str(['lr','reg','p','p_test','tgt_fp','tgt_fn','fp_otf','fn_otf',
                   'fp_trn','fn_trn','fp_tst','fn_tst','w_l2','done']))
-  for e in experiments:
+  for e in sorted(experiments,key=lambda o:o.reg):
     print(f_to_str([e.lr,e.reg,e.p,e.p_test,e.target_fp,e.target_fn,e.fp,e.fn,
                     e.fp_train,e.fn_train,e.fp_test,e.fn_test,e.w_l2,
                     (e.steps_to_target) if e.steps_to_target else ' no']))
@@ -1516,17 +1516,25 @@ def report_epochs(a,experiments,ts,line,imp,k):
   if 'p' in line:
     plot_epochs(experiments)
     for e in experiments:
-      e.epochs.div_from_tgt=[max(a/e.target_fp.b/target_fn) for a,b in\
+      e.epochs.div_from_tgt=[max(a/e.target_fp,b/e.target_fn) for a,b in\
                              zip(e.epochs.fp_test,e.epochs.fn_test)]
       plot(e.epochs.fp_test,e.epochs.fn_test)
     title('fp_test vs fn_test by epoch')
     show()
   if 'c' in line:#Completed tasks
-    for e in [ee.epochs for ee in experiments if ee.steps_to_target]:
-      stt=e.steps_to_target
+    print(f_to_str(['lr','reg','p','p_test','tgt_fp','tgt_fn','fp_otf','fn_otf',
+                    'fp_trn','fn_trn','fp_tst','fn_tst','w_l2','done']))
+    for e in sorted([eee for eee in experiments if eee.steps_to_target],
+                    key=lambda o:o.reg):
+      stt=e.steps_to_target-1
+      ee=e.epochs
       print(f_to_str([e.lr,e.reg,e.p,e.p_test,e.target_fp,e.target_fn,
-                      e.fp[stt],e.fn[stt],e.fp_train[stt],e.fn_train[stt],
-                      e.fp_test[stt],e.fn_test[stt],e.w_l2[stt],stt]))
+                      ee.fp_otf[stt],ee.fn_otf[stt],ee.fp_train[stt],ee.fn_train[stt],
+                      ee.fp_test[stt],ee.fn_test[stt],ee.w_l2[stt],stt]))
+    for e in sorted([ee for ee in experiments if not ee.steps_to_target],
+                    key=lambda o:o.reg):
+      print(f_to_str([e.lr,e.reg,e.p,e.p_test,e.target_fp,e.target_fn,e.fp,e.fn,
+                      e.fp_train,e.fn_train,e.fp_test,e.fn_test,e.w_l2,' no']))
 
   if 'x' in line:
     print('Bye!')

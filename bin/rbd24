@@ -86,8 +86,8 @@ def all_step(states,xy):
 get_consts=lambda e:(e.lr,e.reg,e.bs,e.eps,e.pp,e.beta1,e.beta2,
                     e.avg_rate,e.target_fp,e.target_fn)
 def set_state(e,s):
-  if not e.steps_to_target:
-    (e.w_model,e.adam_V,e.adam_M,e.fp,e.fn)=s
+  #if not e.steps_to_target:
+  (e.w_model,e.adam_V,e.adam_M,e.fp,e.fn)=s
 get_state=lambda e:(e.w_model,e.adam_V,e.adam_M,e.fp,e.fn)
 
 def check_completed(experiments,states):
@@ -154,7 +154,6 @@ def all_predict(X,Y,states,n_batches,bs):
 
 a.n_batches=a.n_rows_train//a.bs
 
-a.epoch_num=0
 experiment_states=[get_state(e) for e in experiments]
 ts.get_timestep()
 while True:

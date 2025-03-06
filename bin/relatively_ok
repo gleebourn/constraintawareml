@@ -1,2 +1,6 @@
 #!/usr/bin/env bash
 rbd24 rbd24 -outf rbd24_jit -target_fps .5 .4 .3 -target_fns .03 .04 .05 -lrs 1e-3 -regs 1e-3 -stop_on_target -loss l1 -geomnet_start 128 -geomnet_end 8 -geomnet_n_layers 2 -bs 1 -rbd24_single_dataset P2P_smartphone -act relu -avg_rate .2
+
+#bd24 rbd24 -outf rbd24 -target_fps .5 .4 .3 .2 -target_fns .03 .035 .04 .05 -lrs 1e-3 1e-4 -regs 1e-4 -stop_on_target -loss l1 -geomnet_start 128 -geomnet_end 32 -geomnet_n_layers 2 -bs 1 -rbd24_single_dataset P2P_smartphone -act relu -avg_rate .2
+
+#rbd24 rbd24 -outf rbd24 -target_fps .5 .4 .3 -target_fns .03 .04 .05 -lrs 1e-3 -regs 1e-4 1e-6 -stop_on_target -loss l1 -geomnet_start 128 -geomnet_end 32 -geomnet_n_layers 3 -bs 1 -rbd24_single_dataset P2P_smartphone -act relu -avg_rate .2
