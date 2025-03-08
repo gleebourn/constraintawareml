@@ -3,7 +3,7 @@ from pickle import load,dump
 from types import SimpleNamespace
 from csv import writer
 from os.path import isdir,isfile
-from os import mkdir,listdir
+from os import mkdir,listdir,get_terminal_size
 from io import BytesIO
 from urllib.request import urlopen
 from zipfile import ZipFile
@@ -11,6 +11,7 @@ from pathlib import Path
 from select import select
 from sys import stdin
 from time import perf_counter
+from itertools import accumulate
 from numpy import inf,unique as npunique,array as nparr,min as nmn,\
                   max as nmx,sum as nsm,log10 as npl10,round as rnd
 from numpy.random import default_rng #Only used for deterministic routines
@@ -21,8 +22,9 @@ from jax.numpy import array,vectorize,zeros,log,log10,flip,maximum,minimum,pad,\
 from jax.numpy.linalg import svdvals
 from jax.scipy.signal import convolve
 from jax.nn import tanh,softmax
-from jax import grad,value_and_grad,jit,config
 from jax.random import uniform,normal,split,key,choice,binomial,permutation
+from jax.tree import map as jma
+from jax import grad,value_and_grad,jit,config
 from sklearn.utils.extmath import cartesian
 from pandas import read_csv
 from matplotlib.pyplot import imshow,legend,show,scatter,xlabel,ylabel,\
@@ -62,7 +64,7 @@ class TimeStepper:
     self.clock_avg_rate=clock_avg_rate
     self.tl=perf_counter()
     self.time_avgs=time_avgs
-    self.lj=max([8]+[len(lab)+1 for lab in time_avgs])
+    self.lab_len=max([0]+[len(lab) for lab in time_avgs])
   def get_timestep(self,label=False,start_immed=False):
     t=perf_counter()
     if label:
@@ -75,14 +77,15 @@ class TimeStepper:
         self.time_avgs[label]=(1+self.clock_avg_rate)*\
                               float(t-self.tl) if\
                               start_immed else 1e-8
-        self.lj=max(len(label)+1,self.lj)
+        self.lab_len=max(len(label),self.lab_len)
       self.time_avgs[label]*=(1-self.clock_avg_rate)
     self.tl=t
-  def report(self,p=False):
+  def report(self,p=False,prec=3):
     tai=self.time_avgs.items()
+    lj=max(self.lab_len,prec+5)+1
     #tsr='\n'.join([str(k)+':'+str(log10(v)) for k,v in tai])
-    tsr=f_to_str(self.time_avgs,lj=self.lj)+'\n'+\
-        f_to_str(self.time_avgs.values(),lj=self.lj)
+    tsr=f_to_str(self.time_avgs,lj=lj,prec=prec)+'\n'+\
+        f_to_str(self.time_avgs.values(),lj=lj,prec=prec)
     if p:
       print(tsr)
     tsrx='\n'.join(['\\texttt{'+k.replace('_','\\_')+'}&'+\
@@ -247,115 +250,124 @@ def select_initialisation(imp,act):
         print('Initialising weights to glorot uniform!')
         return 'glorot_uniform'
 
-def init_ensemble():
-  ap=ArgumentParser()
-  n_exps=5
-  target_fps=[int(50*10**(1-i/n_exps))/1000 for i in range(n_exps+1)]
-  target_fns=[int(10*10**(i/n_exps))/1000 for i in range(n_exps+1)]
-  ap.add_argument('mode',default='all',
-                  choices=['all','adaptive_lr','imbalances',
-                           'unsw','gmm','mnist','rbd24'])
-  ap.add_argument('-no_U_V',action='store_true')
-  ap.add_argument('-no_epochs',action='store_true')
+def rbd24_opts(ap):
   ap.add_argument('-rbd24_no_rescale_log',action='store_true')
   ap.add_argument('-rbd24_no_shuffle',action='store_true') #Very easy - sorted by label!!!!!!
   ap.add_argument('-rbd24_sort_timestamp',action='store_true')
-  ap.add_argument('-trad_avg',action='store_true')
-  ap.add_argument('-resnet',default=0,type=int)
-  ap.add_argument('-resnet_dim',default=64,type=int)
-  ap.add_argument('-fm',default=0,type=int)
-  ap.add_argument('-nnpca',action='store_true')
-  ap.add_argument('-single_layer_upd',action='store_true')
-  ap.add_argument('-p_scale',default=1.,type=float)#.5
-  ap.add_argument('-scale_before_sm',action='store_true')
-  ap.add_argument('-softmax_U_V',action='store_true')
-  ap.add_argument('-window_avg',action='store_true')
-  ap.add_argument('-n_gaussians',default=4,type=int)
-  ap.add_argument('-loss',default='loss',choices=list(losses))
-  ap.add_argument('-reporting_interval',default=1000,type=int)
-  ap.add_argument('-print_step_interval',default=100,type=int)
-  ap.add_argument('-gmm_spread',default=.05,type=float)
-  ap.add_argument('-gmm_scatter_samples',default=10000,type=int)
-  ap.add_argument('-no_gmm_compensate_variances',action='store_true')
-  ap.add_argument('-gmm_min_dist',default=4,type=float)
-  ap.add_argument('-force_batch_cost',default=0.,type=float)
-  ap.add_argument('-adam',action='store_true')
-  ap.add_argument('-no_adam',action='store_true')
-  ap.add_argument('-adaptive_threshold',action='store_true')
-  ap.add_argument('-activation',choices=list(activations),default='tanh')
-  ap.add_argument('-implementation',type=str,
-                  choices=list(implementations),default='mlp')
-  ap.add_argument('--seed',default=1729,type=int)
-  ap.add_argument('-n_splits_img',default=100,type=int)
   ap.add_argument('-rbd24_single_dataset',default='',type=str)
   ap.add_argument('-rbd24_no_categorical',action='store_true')
   ap.add_argument('-rbd24_no_preproc',action='store_true')
-  ap.add_argument('-imbalances',type=float,
-                  default=[0.1,0.06812921,0.04641589,0.03162278,0.02154435,
-                           0.01467799,0.01,0.00681292,0.00464159,0.00316228,
-                           0.00215443,0.0014678,0.001],nargs='+')
-  ap.add_argument('-in_dim',default=2,type=int)
-  ap.add_argument('-unsw_cat_thresh',default=.1,type=int)
-  ap.add_argument('-lr_resolution',default=16,type=int)
-  ap.add_argument('-all_resolution',default=5,type=int)
-  ap.add_argument('-history_len',default=16384,type=int)
-  ap.add_argument('-weight_normalisation',default=0.,type=float)
-  ap.add_argument('-no_bias',action='store_true')
-  ap.add_argument('-orthonormalise',action='store_true')
-  ap.add_argument('-saving_interval',default=1000,type=int)
-  ap.add_argument('-lr_init_min',default=1e-4,type=float)
-  ap.add_argument('-lr_init_max',default=1e-2,type=float)
-  ap.add_argument('-lr_min',default=1e-5,type=float)
-  ap.add_argument('-lr_max',default=1e-1,type=float)
+
+n_exps=5
+target_fps=[int(50*10**(1-i/n_exps))/1000 for i in range(n_exps+1)]
+target_fns=[int(10*10**(i/n_exps))/1000 for i in range(n_exps+1)]
+def init_ensemble(script=None):
+  ap=ArgumentParser()
+  ap.add_argument('--seed',default=1729,type=int)
+  rbd24_opts(ap)
+  ap.add_argument('-activation',choices=list(activations),default='tanh')
+  ap.add_argument('-implementation',type=str,
+                  choices=list(implementations),default='mlp')
   ap.add_argument('-lrs',default=[1e-2],type=float,nargs='+')
   ap.add_argument('-regs',default=[1e-1],type=float,nargs='+')
-  ap.add_argument('-lr_update_interval',default=1000,type=int)
-  ap.add_argument('-recent_memory_len',default=1000,type=int)
   ap.add_argument('-beta1',default=.9,type=float) #1- beta1 in adam
   ap.add_argument('-beta2',default=.999,type=float)
   ap.add_argument('-avg_rate',default=.1,type=float)#binom avg parameter
-  ap.add_argument('-unsw_test',default='~/data/UNSW_NB15_testing-set.csv')
-  ap.add_argument('-unsw_train',default='~/data/UNSW_NB15_training-set.csv')
-  ap.add_argument('-model_inner_dims',default=[],type=int,nargs='+')
-  ap.add_argument('-geomnet_start',default=False,type=int)
-  ap.add_argument('-geomnet_end',default=False,type=int)
-  ap.add_argument('-geomnet_n_layers',default=False,type=int)
   ap.add_argument('-bs',default=0,type=int)
   ap.add_argument('-res',default=1000,type=int)
   ap.add_argument('-outf',default='thlay')
-  ap.add_argument('-model_resid',default=False,type=bool)
-  ap.add_argument('-p',default=.1,type=float)
-  ap.add_argument('-target_fp',default=.01,type=float)
-  ap.add_argument('-target_fn',default=.01,type=float)
-  ap.add_argument('-clock_avg_rate',default=.1,type=float) #Track timings
-  ap.add_argument('-threshold_accuracy_tolerance',default=.1,type=float)
-  ap.add_argument('-fpfn_ratios',default=[],nargs='+',type=float)
   ap.add_argument('-target_fps',default=target_fps,nargs='+',type=float)
   ap.add_argument('-target_fns',default=target_fns,nargs='+',type=float)
-  ap.add_argument('-target_tolerance',default=.5,type=float)
+  ap.add_argument('-target_tolerance',default=1.,type=float)
   ap.add_argument('-stop_on_target',action='store_true')
-  #Silly
-  ap.add_argument('-x_max',default=10.,type=float)
-  ap.add_argument('-sqrt_normalise_a',action='store_true')
+  ap.add_argument('-geomnet_start',default=False,type=int)
+  ap.add_argument('-geomnet_end',default=False,type=int)
+  ap.add_argument('-geomnet_n_layers',default=False,type=int)
+  ap.add_argument('-model_inner_dims',default=[],type=int,nargs='+')
   ap.add_argument('-initialisation',type=str,
                   choices=['glorot_uniform','glorot_normal','eye',
                            'ones','zeros','resnet','casewise_linear'],default='')
-  ap.add_argument('-reproduce_llpal',action='store_true')
+  ap.add_argument('-clock_avg_rate',default=.1,type=float) #Track timings
+  ap.add_argument('-no_bias',action='store_true')
+  ap.add_argument('-orthonormalise',action='store_true')
+  ap.add_argument('-sqrt_normalise_a',action='store_true')
   ap.add_argument('-mult_a',default=1.,type=float)
+  ap.add_argument('-fpfn_targets',default=[],nargs='+',type=float)
+  if script in ['rbd24','thlay']:
+    ap.add_argument('mode',default='all',
+                    choices=['all','adaptive_lr','imbalances','rbd24j',
+                             'unsw','gmm','mnist','rbd24'])
+    ap.add_argument('-no_U_V',action='store_true')
+    ap.add_argument('-no_epochs',action='store_true')
+    ap.add_argument('-trad_avg',action='store_true')
+    ap.add_argument('-resnet',default=0,type=int)
+    ap.add_argument('-resnet_dim',default=64,type=int)
+    ap.add_argument('-fm',default=0,type=int)
+    ap.add_argument('-nnpca',action='store_true')
+    ap.add_argument('-single_layer_upd',action='store_true')
+    ap.add_argument('-p_scale',default=1.,type=float)#.5
+    ap.add_argument('-scale_before_sm',action='store_true')
+    ap.add_argument('-softmax_U_V',action='store_true')
+    ap.add_argument('-window_avg',action='store_true')
+    ap.add_argument('-n_gaussians',default=4,type=int)
+    ap.add_argument('-loss',default='loss',choices=list(losses))
+    ap.add_argument('-reporting_interval',default=1000,type=int)
+    ap.add_argument('-print_step_interval',default=100,type=int)
+    ap.add_argument('-gmm_spread',default=.05,type=float)
+    ap.add_argument('-gmm_scatter_samples',default=10000,type=int)
+    ap.add_argument('-no_gmm_compensate_variances',action='store_true')
+    ap.add_argument('-gmm_min_dist',default=4,type=float)
+    ap.add_argument('-force_batch_cost',default=0.,type=float)
+    ap.add_argument('-adam',action='store_true')
+    ap.add_argument('-no_adam',action='store_true')
+    ap.add_argument('-adaptive_threshold',action='store_true')
+    ap.add_argument('-n_splits_img',default=100,type=int)
+    ap.add_argument('-imbalances',type=float,
+                    default=[0.1,0.06812921,0.04641589,0.03162278,0.02154435,
+                             0.01467799,0.01,0.00681292,0.00464159,0.00316228,
+                             0.00215443,0.0014678,0.001],nargs='+')
+    ap.add_argument('-in_dim',default=2,type=int)
+    ap.add_argument('-unsw_cat_thresh',default=.1,type=int)
+    ap.add_argument('-lr_resolution',default=16,type=int)
+    ap.add_argument('-all_resolution',default=5,type=int)
+    ap.add_argument('-history_len',default=16384,type=int)
+    ap.add_argument('-weight_normalisation',default=0.,type=float)
+    ap.add_argument('-saving_interval',default=1000,type=int)
+    ap.add_argument('-lr_init_min',default=1e-4,type=float)
+    ap.add_argument('-lr_init_max',default=1e-2,type=float)
+    ap.add_argument('-lr_min',default=1e-5,type=float)
+    ap.add_argument('-lr_max',default=1e-1,type=float)
+    ap.add_argument('-lr_update_interval',default=1000,type=int)
+    ap.add_argument('-recent_memory_len',default=1000,type=int)
+    ap.add_argument('-unsw_test',default='~/data/UNSW_NB15_testing-set.csv')
+    ap.add_argument('-unsw_train',default='~/data/UNSW_NB15_training-set.csv')
+    ap.add_argument('-model_resid',default=False,type=bool)
+    ap.add_argument('-p',default=.1,type=float)
+    ap.add_argument('-threshold_accuracy_tolerance',default=.1,type=float)
+    #Silly
+    ap.add_argument('-x_max',default=10.,type=float)
+    ap.add_argument('-reproduce_llpal',action='store_true')
   
   a=ap.parse_args()
-  a.epochs=not a.no_epochs
-  ##a.softmax_U_V=not a.no_softmax_U_V
+
   if not isdir('reports'):
     mkdir('reports')
   a.outf='reports/'+a.outf
   a.report_dir=a.outf+'_report'
-  a.n_imb=len(a.imbalances)
-  if a.nnpca:
-    a.loss='nn_pca_loss'
-  elif a.loss=='distribution_flow_cost':
-    a.w_init=1.
-    a.target_increment=.9
+
+  if script in ['thlay','rbd24']:
+    a.epochs=not a.no_epochs
+    a.n_imb=len(a.imbalances)
+    a.gmm_compensate_variances=not a.no_gmm_compensate_variances
+    if a.adam and a.no_adam:
+      print('Cannot have adam and no_adam!')
+      exit(1)
+
+    if a.nnpca:
+      a.loss='nn_pca_loss'
+    elif a.loss=='distribution_flow_cost':
+      a.w_init=1.
+      a.target_increment=.9
 
   if not a.implementation:
     if a.resnet:
@@ -371,16 +383,12 @@ def init_ensemble():
   if not a.initialisation:
     a.initialisation=select_initialisation(a.implementation,a.activation)
 
-  a.gmm_compensate_variances=not a.no_gmm_compensate_variances
-  if a.adam and a.no_adam:
-    print('Cannot have adam and no_adam!')
-    exit(1)
   elif not a.adam and not a.no_adam:
     if a.implementation=='casewise_linear' or a.activation=='linear':
       a.no_adam=True
     else:
       a.adam=True
-  if a.fpfn_ratios:
+  if a.fpfn_targets:
     a.target_fpfns=array([[a*b,a] for a,b in zip(a.target_fns,a.target_fpfns)])
   else:
     a.target_fpfns=array(list(zip(a.target_fps,a.target_fns)))
@@ -394,6 +402,7 @@ def init_ensemble():
       a.bs=128
     else:
       a.bs=1
+
   if a.geomnet_start and a.geomnet_end and a.geomnet_n_layers:
     gs=a.geomnet_start**(1/a.geomnet_n_layers)
     ge=a.geomnet_end**(1/a.geomnet_n_layers)
@@ -403,21 +412,63 @@ def init_ensemble():
   if not a.model_inner_dims and not a.fm:
     if a.mode=='gmm':
       a.model_inner_dims=[32,16]
-    elif a.mode==['mnist','rbd24'] and a.act not in ['linear','relu']:
+    elif a.mode==['mnist','rbd24','rbd24j'] and a.act not in ['linear','relu']:
       a.model_inner_dims=[64,32,16]
     else:
       a.model_inner_dims=[64,32]
-  return a
+  try:
+    mkdir(a.out_dir)
+    new=True
+  except FileExistsError:
+    print('Already seems to be something there... [O]verwrite, [L]oad or [A]bort?')
+    ln=stdin.readline()[0].lower()
+    if ln[0]=='l':
+      new=False
+    elif ln[0]=='o':
+      new=True
+      print('Overwriting any existing ensembles...')
+    else:
+      print('Abort!')
+      exit()
+  if not new:
+    try:
+      with open(a.out_dir+'/ensemble.pkl','rb') as fd:
+        print('Opening experiment ensemble',a.outf,'...')
+        od=a.out_dir #Correct the actual directory if opened somewhere else
+        a,experiments=load(fd)
+        ke=KeyEmitter(a.seed,a.parent_keys)
+        print(a.time_avgs)
+        ts=TimeStepper(a.clock_avg_rate,a.time_avgs)
+        a.out_dir=od
+        new=False
+        print('Restored',a.outf+'.pkl','from disk')
+    except FileNotFoundError:
+      print('No pkl in directory...')
+      new=True
+  if new:
+    print('Generating new experiments...')
+    ke=KeyEmitter(a.seed)
+    ts=TimeStepper(a.clock_avg_rate)
+    experiments=init_experiments(a,ke,mode='rbd24j' if script=='rbd24j' else a.mode,
+                                 epochs=True if script=='rbd24j' else a.epochs)
 
-def f_to_str(X,lj=8):
+  return a,ke,ts,experiments
+
+def f_to_str(X,lj=8,prec=2,p=False):
   try:
     if isinstance(float(X),float):
-      X=f'{X:.3g}'
+      #X=f'{X:.3g}'
+      X='{0:.{1}g}'.format(X,prec)
   except:
     pass
   if isinstance(X,str):
-    return X.ljust(lj) if lj else X
-  return ''.join((f_to_str(x,lj=lj) for x in X))
+    if lj:
+      X=X.ljust(lj)
+  else:
+    X=''.join((f_to_str(x,lj=lj,prec=prec) for x in X))
+  if p:
+    print(X)
+  return X
 
 exp_to_str=lambda e:'exp_p'+f_to_str(e.p,lj=False)+'fpt'+f_to_str(e.target_fp,lj=False)+\
                     'fnt'+f_to_str(e.target_fn,lj=False)+'lr'+f_to_str(e.lr,lj=False)
@@ -816,7 +867,7 @@ def colour_rescale(fpfn):
   l/=log(a.fpfn_max)-log(a.fpfn_min)
   return jet(l)
 
-def mk_experiment(p,thresh,target_fp,target_fn,lr,a,reg=0.,eps=1e-8):
+def mk_experiment(p,thresh,target_fp,target_fn,lr,a,mode,reg=0.,eps=1e-8,adfpfn=False):
   e=SimpleNamespace()
   e.report_done=False
   e.fp_test='?'
@@ -831,57 +882,75 @@ def mk_experiment(p,thresh,target_fp,target_fn,lr,a,reg=0.,eps=1e-8):
   e.beta2=a.beta2
   e.target_tolerance=a.target_tolerance
   e.steps_to_target=False
+  e.stop_to_target=a.stop_on_target
   e.avg_rate=a.avg_rate
   e.dw_l2=e.w_l2=0
   e.w_model=[v.copy() for v in a.w_model_init[0]],[v.copy() for v in a.w_model_init[1]]
-  e.history_len=a.history_len
-  e.step=0
-
-  e.adam_V=[u*0. for u in e.w_model[0]],[u*0. for u in e.w_model[1]]
-  e.adam_M=0.
-
-  e.lr=float(lr)
   e.p=float(p) #"imbalance"
-  e.pp=e.p**a.p_scale
-  #e.p_its=int(1/p) #if repeating minority class iterations
   e.target_fp=target_fp#target_fn*fpfn_ratio
   e.target_fn=target_fn
-  e.fpfn_ratio=e.target_fp/e.target_fn
-  e.recent_memory_len=int((1/a.avg_rate)*max(1,1/(e.bs*min(e.target_fp,e.target_fn))))
+  if mode!='rbd24j':
+    e.history_len=a.history_len
+    e.pn=e.p**a.p_scale
+    e.recent_memory_len=int((1/a.avg_rate)*max(1,1/(e.bs*min(e.target_fp,e.target_fn))))
+    e.FPs=cyc(e.recent_memory_len)
+    e.FNs=cyc(e.recent_memory_len)
+    e.loss_vals=cyc(e.recent_memory_len)#a.bs)
+    e.U=e.V=1
+    e.thresh=thresh
+    e.history=SimpleNamespace(FP=[],FN=[],lr=[],cost=[],w=[],dw=[],loss_vals=[],
+                              resolution=1,l=0)
+    if a.loss=='distribution_flow_cost':
+      e.w_init=1.
+      e.loss_target=inf
+      e.loss_val=a.bs**2*a.model_inner_dims[-1]
+  else:
+    e.pn=1.
 
-  e.FPs=cyc(e.recent_memory_len)
-  e.FNs=cyc(e.recent_memory_len)
-  e.loss_vals=cyc(e.recent_memory_len)#a.bs)
-  if a.loss=='distribution_flow_cost':
-    e.w_init=1.
-    e.loss_target=inf
-    e.loss_val=a.bs**2*a.model_inner_dims[-1]
-  e.fp=(e.target_fp*.5)**.5
-  e.fn=(target_fn*.5)**.5#.25 #softer start if a priori assume doing well
+    e.epochs=SimpleNamespace(fp_otf=[],fn_otf=[],fpfn_otf=[],
+                             div_otf=[],div_train=[],div_test=[],
+                             fp_train=[],fn_train=[],fpfn_train=[],
+                             fp_test=[],fn_test=[],fpfn_test=[],w_l2=[])
+  e.step=0
 
-  e.U=e.V=1
-  e.thresh=thresh
-  e.history=SimpleNamespace(FP=[],FN=[],lr=[],cost=[],w=[],dw=[],loss_vals=[],
-                            resolution=1,l=0)
-  e.epochs=SimpleNamespace(fp_otf=[],fn_otf=[],fpfn_otf=[],
-                           fp_train=[],fn_train=[],fpfn_train=[],
-                           fp_test=[],fn_test=[],fpfn_test=[],w_l2=[])
+  if adfpfn:
+    e.ad_m_fp=jma(lambda x:0.*x,e.w_model)
+    e.ad_v_fp=jma(exp,e.ad_m_fp)
+    e.ad_m_fn=jma(lambda x:x*0.,e.ad_m_fp)
+    e.ad_v_fn=jma(exp,e.ad_m_fn)
+    jma(lambda x:f_to_str(x.sum()),e.ad_m_fp)
+    jma(lambda x:f_to_str(x.sum()),e.ad_v_fp)
+  else:
+    e.ad_m=jma(lambda x:0.*x,e.w_model)
+    e.ad_v=jma(exp,e.ad_m_fp)
+
+
+  e.lr=float(lr)
+  #e.p_its=int(1/p) #if repeating minority class iterations
+  e.fpfn_target=e.target_fp/e.target_fn
+
+  e.fp=e.fp_otf=(e.target_fp*.5)**.5
+  e.fn=e.fn_otf=(target_fn*.5)**.5#.25 #softer start if a priori assume doing well
   return e
 
 def desc_e(stats,e):
   return f_to_str((stats,e.lr,e.reg,e.target_fp,e.target_fn))
 
-def update_epochs(e):
-  #if not e.steps_to_target: #only update if still going
-  e.w_l2=l2(e.w_model)
-  e.fp_tf=e.fp
-  e.fn_tf=e.fn
-  e.fpfn_otf=e.fp_otf/e.fn_otf
-  e.fpfn_train=e.fp_train/e.fn_train
-  e.fpfn_test=e.fp_test/e.fn_test
+def update_epoch_history(e):
   e_v=vars(e)
   ep_v=vars(e.epochs)
   [v.append(e_v[k]) for k,v in ep_v.items()]
+
+def update_epochs(e):
+  #if not e.steps_to_target: #only update if still going
+  e.w_l2=l2(e.w_model)
+  e.fp_otf=e.fp
+  e.fn_otf=e.fn
+  e.div_from_tgt=max(e.fp_train/e.target_fp,e.fn_train/e.target_fn)
+  e.fpfn_otf=e.fp_otf/e.fn_otf
+  e.fpfn_train=e.fp_train/e.fn_train
+  e.fpfn_test=e.fp_test/e.fn_test
+  update_epoch_history(e)
   if e.fp_train<e.target_fp and e.fn_train<e.target_fn and\
   not e.steps_to_target:
     print('Experiment complete!')
@@ -911,9 +980,9 @@ def plot_epochs(experiments,stats=None,scale_log=True,
       legend()
       show()
 
-def init_experiments(a,ke):
+def init_experiments(a,ke,mode,epochs,imp='mlp'):
   k1,k2,k3,k4,k5,k6=ke.emit_key(6)
-  if a.mode=='rbd24':
+  if mode in['rbd24','rbd24j']:
     (a.x_train,a.y_train),\
     (a.x_test,a.y_test),\
     (_,a.x_columns)=rbd24(rescale_log=not a.rbd24_no_rescale_log,
@@ -923,12 +992,12 @@ def init_experiments(a,ke):
     a.p=sum(a.y_train)/len(a.y_train)
     a.p_test=sum(a.y_test)/len(a.y_test)
     a.in_dim=len(a.x_train[0])
-    if a.epochs:
+    if epochs:
       a.epoch_num=0
       a.offset=inf
       #a.x_train,a.y_train=shuffle_xy(k1,a.x_train,a.y_train)
 
-  if a.mode=='mnist':
+  if mode=='mnist':
     from tensorflow.keras.datasets import mnist
     (a.x_train,a.y_train),(a.x_test,a.y_test)=mnist.load_data()
     y_ones_train=a.y_train==1 #1 detector
@@ -940,10 +1009,10 @@ def init_experiments(a,ke):
     a.x_test_pos=reshape(a.x_test[y_ones_test],(-1,a.in_dim))
     a.x_test_neg=reshape(a.x_test[~y_ones_test],(-1,a.in_dim))
 
-  if a.mode=='all':
+  if mode=='all':
     a.target_shape=[2]+[16]*8+[1]
 
-  if a.mode=='unsw':
+  elif mode=='unsw':
     df_train=read_csv(a.unsw_train)
     df_test=read_csv(a.unsw_test)
     a.x_train=array(df_test[df_train.columns[(df_train.dtypes==int)|\
@@ -965,9 +1034,11 @@ def init_experiments(a,ke):
   if a.implementation=='linear':
     a.model_shape=[a.in_dim,1]
 
+  '''
   if a.fm:
     a.model_shape=[a.in_dim]*a.fm#+[1]
-  elif a.resnet:
+  '''
+  if imp=='resnet':
     a.model_shape=[a.in_dim]+([a.resnet_dim]*a.resnet)
   else:
     a.model_shape=[a.in_dim]+a.model_inner_dims+[1]
@@ -976,28 +1047,28 @@ def init_experiments(a,ke):
                              sqrt_normalise=a.sqrt_normalise_a,
                              orthonormalise=a.orthonormalise)
 
-  if a.mode=='unsw':
+  if mode=='unsw':
     a.imbalances=(a.y_train.value_counts()+a.y_test.value_counts())/\
                   (len(df_train)+len(df_test))
     a.cats={float(p):s for p,s in zip(a.imbalances,a.y_train.value_counts().index)}
     a.imbalances=a.imbalances[a.imbalances>a.unsw_cat_thresh]
   
-  if a.mode in ['unsw','gmm','mnist','rbd24']:
+  if mode in ['unsw','gmm','mnist','rbd24']:
     a.thresholds={float(p):0. for p in a.imbalances}
-  else:
-    print('Finding thresholds...')
-    
-    thresholding_sample_size=int(1/(a.threshold_accuracy_tolerance**2*\
-                                    a.imbalance_min))
-    x_thresholding=sample_x(thresholding_sample_size,k3)
-    
-    y_t_cts=f(a.w_target[0],a.w_target[1],x_thresholding).flatten()
-    y_t_cts_sorted=y_t_cts.sort()
-    a.thresholds={float(p):y_t_cts_sorted[-int(p*len(y_t_cts_sorted))]\
-                  for p in a.imbalances}
-    
-    print('Imbalances and thresholds')
-    for i,t in a.thresholds.items(): print(i,t)
+  #else:
+  #  print('Finding thresholds...')
+  #  
+  #  thresholding_sample_size=int(1/(a.threshold_accuracy_tolerance**2*\
+  #                                  a.imbalance_min))
+  #  x_thresholding=sample_x(thresholding_sample_size,k3)
+  #  
+  #  y_t_cts=f(a.w_target[0],a.w_target[1],x_thresholding).flatten()
+  #  y_t_cts_sorted=y_t_cts.sort()
+  #  a.thresholds={float(p):y_t_cts_sorted[-int(p*len(y_t_cts_sorted))]\
+  #                for p in a.imbalances}
+  #  
+  #  print('Imbalances and thresholds')
+  #  for i,t in a.thresholds.items(): print(i,t)
   
   a.loop_master_key=k4
   a.step=0
@@ -1010,9 +1081,13 @@ def init_experiments(a,ke):
   #elif a.mode=='adaptive_lr':
   #  experiments=[mk_experiment(.1,a.thresholds[.1],1.,.01,lr,a) for\
   #               lr in a.lrs]
-  if a.mode in ['unsw','gmm','mnist','rbd24']:
+  if mode in ['unsw','gmm','mnist','rbd24']:
     a.imbalances=None
-    experiments=[mk_experiment(a.p,0.,t_fp,t_fn,lr,a,reg=reg)\
+    experiments=[mk_experiment(a.p,0.,t_fp,t_fn,lr,a,a.mode,reg=reg)\
+                 for t_fp,t_fn in a.target_fpfns for lr in a.lrs for reg in a.regs]
+  elif mode=='rbd24j':
+    a.imbalances=None
+    experiments=[mk_experiment(a.p,0.,t_fp,t_fn,lr,a,'rbd24j',reg=reg,adfpfn=True)\
                  for t_fp,t_fn in a.target_fpfns for lr in a.lrs for reg in a.regs]
   a.n_active_experiments=len(experiments)
   #elif a.mode in ['imbalances']:
@@ -1021,7 +1096,7 @@ def init_experiments(a,ke):
   #               for p in a.imbalances for fpfn_ratio in a.fpfn_ratios\
   #               for target_fn in a.target_fns]
 
-  if a.mode=='gmm':
+  if mode=='gmm':
     min_dist=0
     while min_dist<a.gmm_min_dist:
       a.means=2*a.x_max*uniform(k5,(2*a.n_gaussians,a.in_dim))-a.x_max
@@ -1029,6 +1104,7 @@ def init_experiments(a,ke):
     a.variances=2*a.x_max*uniform(k6,2*a.n_gaussians)*a.gmm_spread #hmm
   return experiments
 
+@jit
 def shuffle_xy(k,x,y):
   shuff=permutation(k,len(y))
   x,y=x[shuff],y[shuff]
@@ -1160,27 +1236,33 @@ def update_history(e):
        e.report_done=True
     
 @jit
-def U_V_scale(fp,fn,target_fp,target_fn,pp): #only update if still going
-  U,V=pp*fp/target_fp,fn/target_fn
-  UpV=U+V
+def U_V_scale(fp,fn,target_fp,target_fn,pn): #only update if still going
+  U,V=pn*fp/target_fp,fn/target_fn
+  return U,V
+  #UpV=(U+V)**2
+  #return U/UpV,V/UpV
+    
+@jit
+def U_V_l2(fp,fn,target_fp,target_fn,pn): #only update if still going
+  U,V=(pn*fp)**2/target_fp,(fn/target_fn)**2
+  UpV=(U+V)**.5
   return U/UpV,V/UpV
 
 @jit
-def U_V_sm(fp,fn,target_fp,target_fn,pp): #only update if still going
-  return softmax(array([fp/target_fp,fn/(pp*target_fn)]))
-  return U/UpV,V/UpV
+def U_V_sm(fp,fn,target_fp,target_fn,pn): #only update if still going
+  return softmax(array([fp/target_fp,fn/(pn*target_fn)]))
  
 
 def compute_U_V(fp,fn,target_fp,target_fn,p,sm=False,p_scale=.5,scale_before_sm=True):
-  pp=p**p_scale
+  pn=p**p_scale
   U=fp/target_fp
   V=fn/target_fn
   if sm:
     if scale_before_sm:
-      return softmax(array([U,V/pp]))
+      return softmax(array([U,V/pn]))
     else:
       U,V=softmax(array([U,V]))
-  V/=pp
+  V/=pn
   UpV=U+V
   #if UpV>0:#Should be fine, moving average never hits 0
   U/=UpV
@@ -1216,52 +1298,66 @@ def update_lrs(a,experiments,k):
     print('Weight copying')
     e.w_model=([v.copy() for v in parent.w_model[0]],
                [v.copy() for v in parent.w_model[1]])
-    e.adam_M=parent.adam_M.copy()
-    e.adam_V=parent.adam_V.copy()
+    e.ad_m=parent.ad_m.copy()
+    e.ad_v=parent.ad_v.copy()
     e.fp=float(parent.fp)
     e.fn=float(parent.fn)
   a.lrs=array([e.lr for e in experiments])
   return experiments
 
-@jit
-def upd_adam(w,adam_V,adam_M,upd,beta1,beta2,lr,eps=1e-8):
-  adva,advb=adam_V
-  wa,wb=w
-  adam_M*=beta2
-  for i,(u,v) in enumerate(zip(*upd)):
-    adva[i]*=beta1
-    advb[i]*=beta1
-    adva[i]+=(1-beta1)*u
-    advb[i]+=(1-beta1)*v
-    adam_M+=(1-beta2)*(nsm(u**2)+nsm(v**2))
-  for i,(s,t) in enumerate(zip(*adam_V)):
-    delta_u=lr*s/(adam_M**.5+eps)
-    delta_v=lr*t/(adam_M**.5+eps)
-    wa[i]-=delta_u
-    wb[i]-=delta_v
-  return w,adam_V,adam_M
+def ewma(a,b,rate):return (1-rate)*a+rate*b
+
+def ad_diff(m,v,eps):return m/(v**.5+eps)
+
+def ad_fpfn(w,mp,vp,mn,vn,eps,lr,pn):
+  return  w-lr*(ad_diff(mp,vp,eps)/pn+ad_diff(mn,vn,eps)*pn)
 
 @jit
-def upd_adam_getl2(w,adam_V,adam_M,upd,beta1,beta2,lr,eps=1e-8):
-  adva,advb=adam_V
+def upd_ad_fpfn_pyt(w,mp,vp,mn,vn,dfp,dfn,beta1,beta2,lr,pn,reg,eps):
+  #dfp,dfn=jma(lambda x,d1,d2:(d1+reg*x,d2+reg*x),w,dfp,dfn)
+  #reg_rn=reg/(lr*(pn+1/pn))
+  #reg_rn=lr*reg#/(lr*(pn+1/pn))
+  #dfp=jma(lambda x,d:d/pn+reg_rn*x,w,dfp)
+  #dfn=jma(lambda x,d:d*pn+reg_rn*x,w,dfn)
+  mp=jma(lambda old,upd:ewma(upd,old,beta1),mp,dfp)
+  vp=jma(lambda old,upd:ewma(upd**2,old,beta2),vp,dfp)
+  mn=jma(lambda old,upd:ewma(upd,old,beta1),mn,dfn)
+  vn=jma(lambda old,upd:ewma(upd**2,old,beta2),vn,dfn)
+  #vp,vn=jma(lambda old,upd:ewma(upd,old,beta1),(vp,vn),(dfp,dfn))
+  #mp,mn=jma(lambda old,upd:ewma(upd**2,old,beta2),(mp,mn),(dfp,dfn))
+  w=jma(lambda x,mP,vP,mN,vN:(1-reg)*ad_fpfn(x,mP,vP,mN,vN,eps,lr,pn),w,mp,vp,mn,vn)
+  return w,mp,vp,mn,vn
+
+@jit
+def upd_adam(w,m,v,dw,beta1,beta2,lr,reg,eps):
+  m=jma(lambda old,upd:ewma(upd,old,beta1),m,dw)
+  v=jma(lambda old,upd:ewma(upd**2,old,beta2),v,dw)
+  #vp,vn=jma(lambda old,upd:ewma(upd,old,beta1),(vp,vn),(dfp,dfn))
+  #mp,mn=jma(lambda old,upd:ewma(upd**2,old,beta2),(mp,mn),(dfp,dfn))
+  w=jma(lambda x,mP,vP,mN,vN:(1-reg)*ad_fpfn(x,mP,vP,mN,vN,eps,lr,pn),w,mp,vp,mn,vn)
+  return w,m,vp
+
+@jit
+def upd_adam_getl2(w,ad_v,ad_m,upd,beta1,beta2,lr,eps=1e-8):
+  adva,advb=ad_v
   wa,wb=w
-  adam_M*=beta2
+  ad_m*=beta2
   for i,(u,v) in enumerate(zip(*upd)):
     adva[i]*=beta1
     advb[i]*=beta1
     adva[i]+=(1-beta1)*u
     advb[i]+=(1-beta1)*v
-    adam_M+=(1-beta2)*(nsm(u**2)+nsm(v**2))
+    ad_m+=(1-beta2)*(nsm(u**2)+nsm(v**2))
   w_l2=0
   dw_l2=0
   for i,(s,t) in enumerate(zip(adva,advb)):
-    delta_u=lr*s/(adam_M**.5+eps)
-    delta_v=lr*t/(adam_M**.5+eps)
+    delta_u=lr*s/(ad_m**.5+eps)
+    delta_v=lr*t/(ad_m**.5+eps)
     wa[i]-=delta_u
     wb[i]-=delta_v
     w_l2+=jsm(wa[i]**2)+jsm(wb[i]**2)
     dw_l2+=jsm(delta_u**2)+jsm(delta_v**2)
-  return (wa,wb),(adva,advb),adam_M,w_l2,dw_l2
+  return (wa,wb),(adva,advb),ad_m,w_l2,dw_l2
 
 @jit
 def upd_grad(w,upd,lr):
@@ -1279,7 +1375,7 @@ def update_weights(a,e,upd):#,start=None,end=None):
   else:
     wm=e.w_model
   if a.adam:
-    wm,e.adam_V,e.adam_M,e.w_l2,e.dw_l2=upd_adam_getl2(wm,e.adam_V,e.adam_M,upd,
+    wm,e.ad_v,e.ad_m,e.w_l2,e.dw_l2=upd_adam_getl2(wm,e.ad_v,e.ad_m,upd,
                                                        a.beta1,a.beta2,e.lr)
   else:
     wm,e.w_l2,e.dw_l2=upd_grad(wm,upd,e.lr)
@@ -1293,14 +1389,14 @@ def update_weights(a,e,upd):#,start=None,end=None):
     e.w_model=wm
 
 def plot_stopping_times(experiments,fd_tex,report_dir):
-  for e in experiments: e.fpfn_ratio=float(e.fpfn_ratio)
+  for e in experiments: e.fpfn_target=float(e.fpfn_target)
   completed_experiments=[e for e in experiments if e.steps_to_target]
   try:
-    fpfn_ratios=list(set([e.fpfn_ratio for e in experiments]))
-    for rat in fpfn_ratios:
-      x=[log10(e.p) for e in completed_experiments if e.fpfn_ratio==rat]
+    fpfn_targets=list(set([e.fpfn_targets for e in experiments]))
+    for rat in fpfn_targets:
+      x=[log10(e.p) for e in completed_experiments if e.fpfn_target==rat]
       y=[log10(e.steps_to_target) for e in completed_experiments if\
-         e.fpfn_ratio==rat]
+         e.fpfn_target==rat]
       plot(x,y)
       title('Stopping times for target fp/fn='+f_to_str(rat))
       xlabel('log(imbalance)')
@@ -1468,14 +1564,47 @@ def plot_fpfn_scatter(experiments,fd_tex,a):
   else:
     show()
 
-def report_epochs(a,experiments,ts,line,imp,k):
+def epoch_stats(e):
+  return {'done':e.steps_to_target if e.steps_to_target else ' no',
+          'p_trn':e.p,'p_test':e.p_test,'fpn_tg':e.fpfn_target,
+          'fpn_trn':e.fpfn_train,'fpn_tst':e.fpfn_test,'fpn_otf':e.fpfn_otf,
+          'div_trn':e.div_train,'div_tst':e.div_test,'div_otf':e.div_otf,
+          'fp_tg':e.target_fp,'fn_tg':e.target_fn,
+          'fp_trn': e.fp_train,'fn_trn':e.fn_train,
+          'fp_otf':e.fp_otf,'fn_otf':e.fn_otf,
+          'w_l2':e.w_l2,'log(pn)':log10(e.pn),
+          'lr':e.lr,'reg':e.reg,'bs':e.bs}
+
+def rm_unique_stats(stats):
+  unique_stats={}
+  for k in stats[0]:
+    st=(s[k] for s in stats)
+    if hasattr(stats[0][k],'item'):
+      st=(s.item() for s in st)
+    vs=list(set(st))
+    if len(vs)==1:
+      unique_stats[k]=vs[0]
+  [s.pop(k) for k in unique_stats for s in stats]
+  return unique_stats
+    
+  
+def report_epochs(a,experiments,ts,line,imp,k,prec=3,by='div_trn',
+                  trunc=True,div_only=None,col_space=1):
   k1,k2=split(k)
-  print(f_to_str(['lr','reg','p','p_test','tgt_fp','tgt_fn','fp_otf','fn_otf',
-                  'fp_trn','fn_trn','fp_tst','fn_tst','w_l2','done']))
-  for e in sorted(experiments,key=lambda o:o.reg):
-    print(f_to_str([e.lr,e.reg,e.p,e.p_test,e.target_fp,e.target_fn,e.fp,e.fn,
-                    e.fp_train,e.fn_train,e.fp_test,e.fn_test,e.w_l2,
-                    (e.steps_to_target) if e.steps_to_target else ' no']))
+  stats=[epoch_stats(e) for e in experiments]
+  unique_stats=rm_unique_stats(stats) if len(stats)>1 else False
+  if unique_stats:
+    print('Unique stats:',
+          ', '.join([k+':'+f_to_str(v,prec=prec,lj=False) for k,v in unique_stats.items()]))
+  labs=sorted(list(stats[0]),key=lambda a:a!=by)
+  col_width=max(prec+5,max([len(l) for l in labs]))+col_space #.e-bc is 5 chars
+  n_stats=len(labs)
+  n_max=get_terminal_size().columns//col_width if trunc else n_stats
+  if div_only or (n_max<n_stats and div_only is None):
+    labs=[l for l in labs if not(l[0]=='f' and l[2]=='_')]
+  f_to_str(labs[:n_max],prec=prec,lj=col_width,p=True)
+  [f_to_str(s,prec=prec,lj=col_width,p=True) for s in\
+   sorted([[t[l] for l in labs] for t in stats])]
 
   ts.report(p=True)
   if ':' in line:
@@ -1516,8 +1645,6 @@ def report_epochs(a,experiments,ts,line,imp,k):
   if 'p' in line:
     plot_epochs(experiments)
     for e in experiments:
-      e.epochs.div_from_tgt=[max(a/e.target_fp,b/e.target_fn) for a,b in\
-                             zip(e.epochs.fp_test,e.epochs.fn_test)]
       plot(e.epochs.fp_test,e.epochs.fn_test)
     title('fp_test vs fn_test by epoch')
     show()
@@ -1645,7 +1772,7 @@ def report_progress(a,experiments,ts,line,imp,k):
       
       with open(a.out_dir+'/performance.csv','w') as fd_csv:
         w=writer(fd_csv)
-        n_fps=len(a.fpfn_ratios)
+        n_fps=len(a.fpfn_targets)
         row=['imbalance','target_fps']+['']*(n_fps-1)+['target_fn','fp']+\
             ['']*(n_fps-1)+['fn']+['']*(n_fps-1)+['steps_to_target']
         if a.mode=='unsw':

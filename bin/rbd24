@@ -8,9 +8,6 @@ from jax import jit,grad
 from jaxlib.xla_extension import XlaRuntimeError
 from sys import path,stdin
 from os import mkdir,environ
-#environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
-#environ["XLA_PYTHON_CLIENT_MEM_FRACTION"]=".99"
-#environ["XLA_PYTHON_CLIENT_ALLOCATOR"]="platform"
 
 from os.path import dirname,abspath
 from sys import path
@@ -19,88 +16,52 @@ from cal.thlay import init_ensemble,init_experiments,activations,f_to_str,\
                       save_ensemble,exp_to_str,fpfnp_lab,f,get_xy,report_progress,\
                       update_lrs,losses,evaluate_fp_fn,update_history,compute_U_V,\
                       update_weights,resnet,read_input_if_ready,fm,implementation,\
-                      TimeStepper,U_V_scale,U_V_sm,upd_adam,upd_grad,KeyEmitter,\
+                      TimeStepper,U_V_scale,U_V_sm,U_V_l2,upd_adam,upd_grad,KeyEmitter,\
                       shuffle_xy,fp_fn_nl,fp_fn_ewma,report_epochs,plot_epochs,update_epochs
 
-a=init_ensemble()
-try:
-  mkdir(a.out_dir)
-  new=True
-except FileExistsError:
-  print('Already seems to be something there... [O]verwrite, [L]oad or [A]bort?')
-  ln=stdin.readline()[0].lower()
-  if ln[0]=='l':
-    new=False
-  elif ln[0]=='o':
-    new=True
-    print('Overwriting any existing ensembles...')
-  else:
-    print('Abort!')
-    exit()
-if not new:
-  try:
-    with open(a.out_dir+'/ensemble.pkl','rb') as fd:
-      print('Opening experiment ensemble',a.outf,'...')
-      od=a.out_dir #Correct the actual directory if opened somewhere else
-      a,experiments=load(fd)
-      ke=KeyEmitter(a.seed,a.parent_keys)
-      print(a.time_avgs)
-      ts=TimeStepper(a.clock_avg_rate,a.time_avgs)
-      a.out_dir=od
-      new=False
-      print('Restored',a.outf+'.pkl','from disk')
-  except FileNotFoundError:
-    print('No pkl in directory...')
-    new=True
-if new:
-  print('Generating new experiments...')
-  ke=KeyEmitter(a.seed)
-  ts=TimeStepper(a.clock_avg_rate)
-  experiments=init_experiments(a,ke)
+a,ke,ts,experiments=init_ensemble()
 
 act=activations[a.activation] if a.activation else None
 imp=implementation(a.implementation,act)
+_dimp=value_and_grad(imp)
+dimp=vmap(_dimp,in_axes=[None,0])
 imp_bin=jit(lambda w,x:imp(w,x).flatten()>0)
 
-U_V=U_V_sm if a.softmax_U_V else U_V_scale
-fp_fn=fp_fn_ewma if a.trad_avg else fp_fn_nl
+#U_V=U_V_sm if a.softmax_U_V else U_V_l2#U_V_scale
+#fp_fn=fp_fn_ewma if a.trad_avg else fp_fn_nl
+def U_V(s,fp,fn):
+  u=fp/s['target_fp']
+  v=s['pp']*fn/s['target_fn']
+  l=(u**2+v**2)**.5
+  return u/,v/l
 
 loss=losses[a.loss](act,imp)
 gloss=jit(grad(loss))
 emptarr=array([])
-def all_step(states,xy):
-  x,y=xy
+def all_step(states,targets,x,y):
   ret=[]
-  for e,s in zip(experiments,states):
-    w,ad_v,ad_m,fp,fn=s
-    y_p=imp_bin(w,x)
-    fp_b=(y_p&(~y)).sum()/e.bs
-    fn_b=((~y_p)&y).sum()/e.bs
-    fp,fn=fp_fn_nl(e.bs,e.avg_rate,fp,fn,fp_b,fn_b)
-    U,V=U_V_scale(fp,fn,e.target_fp,e.target_fn,e.pp)
+  for s in zip(states,targets):
+    y_p=imp_bin(s['w'],x)
+    fp_batch=(y_p&(~y)).mean()
+    fn_batch=((~y_p)&y).mean()
+    fp=(1-s['avg_rate'])*s['fp']+s['avg_rate']*fp_b
+    fn=(1-s['avg_rate'])*s['fn']+s['avg_rate']*fn_b
+    U,V=U_V(s,fp,fn)
     dw=gloss(w,x,y,U,V,e.eps,e.reg)
     w,ad_v,ad_m=upd_adam(w,ad_v,ad_m,dw,e.beta1,e.beta2,e.lr,e.eps)
     ret.append((w,ad_v,ad_m,fp,fn))
-  return ret,0.
+  return ret
 
-get_consts=lambda e:(e.lr,e.reg,e.bs,e.eps,e.pp,e.beta1,e.beta2,
-                    e.avg_rate,e.target_fp,e.target_fn)
-def set_state(e,s):
-  #if not e.steps_to_target:
-  (e.w_model,e.adam_V,e.adam_M,e.fp,e.fn)=s
-get_state=lambda e:(e.w_model,e.adam_V,e.adam_M,e.fp,e.fn)
+_all_step=lambda vs,xy:all_step(*vs,*xy)
 
-def check_completed(experiments,states):
-  completed_experiments=[e for e in experiments if e.steps_to_target]
-  #for i in [j for j,e in enumerate(experiments) if\
-  #          e in completed_experiments]:
-  #  states[i][0]=([0.*a for a in states[i][0][0]],
-  #                [0.*b for b in states[i][0][1]])#force grad=0
+get targets=lambda e:e.target_fp,target_fn
+get_state=lambda e:{'w':e.w_model,'ad_v':e.ad_v,'ad_m':e.ad_m,'fp':e.fp,'fn':e.fn}
+set_state=lambda e,s:(e.w_model,e.ad_v,e.ad_m,e.fp,e.fn)=s
 
-def _all_epoch(X,Y,init_states,n_batches,bs):
+def _all_epoch(X,Y,states,hypers,target_fps,target_fns,n_batches,bs):
   X_b=X[:n_batches*bs].reshape((n_batches,bs,-1))
   Y_b=Y[:n_batches*bs].reshape((n_batches,bs))
-  return scan(all_step,init_states,(X_b,Y_b))[0]
+  return scan(_all_step,zip(states,hypers,target_fps,target_fns),(X_b,Y_b))[0]
 all_epoch=jit(_all_epoch,static_argnames=['n_batches','bs'])
 
 def __all_predict(X,Y,states,n_batches,bs):

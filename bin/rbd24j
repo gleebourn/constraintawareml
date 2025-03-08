@@ -1,0 +1,158 @@
+#!/usr/bin/env python
+from pickle import load
+from jax.numpy import inf,array,array_split,zeros,sum as jsm,exp
+from numpy import array as nparr
+from jax.lax import dot_general,scan
+from jax.random import key,split
+from jax import jit,value_and_grad,vmap
+from jaxlib.xla_extension import XlaRuntimeError
+from jax.tree import map as jma
+from jax.nn import tanh
+from sys import path,stdin
+from os import mkdir,environ
+
+from os.path import dirname,abspath
+from sys import path
+path.append(dirname(dirname(abspath(__file__))))
+from cal.thlay import init_ensemble,activations,f_to_str,l2,ewma,save_ensemble,\
+                      losses,read_input_if_ready,upd_ad_fpfn_pyt,shuffle_xy,\
+                      report_epochs,plot_epochs,update_epoch_history,implementation
+
+a,ke,ts,experiments=init_ensemble('rbd24j')
+
+act=activations[a.activation] if a.activation else None
+_imp=implementation(a.implementation,act)
+_dimp=value_and_grad(lambda w,x:_imp(w,x)[0])
+_dfp=value_and_grad(lambda w,x,y:(~y)*_imp(w,x)[0])
+_dfn=value_and_grad(lambda w,x,y:-(y*_imp(w,x)[0]))
+dimp=vmap(_dimp,in_axes=[None,0])
+dyfp=vmap(_dfp,in_axes=[None,0,0])
+dyfn=vmap(_dfn,in_axes=[None,0,0])
+
+log_loss_p=lambda d,y:jsm(d/(1e-8+1-y))
+log_loss_n=lambda d,y:jsm(d/(1e-8+1-y))
+
+@jit
+def fpfnd(w,X,Y):#,U,V):
+  #Yp,dYp=dimp(w,X)
+  yfp,dfp=dyfp(w,X,Y)
+  yfn,dfn=dyfn(w,X,Y)
+  #Y_target=2*Y-1
+  #diffs=1-Yp*Y_target
+  #diff=Yp*(V-(U+V)*Y)+V+U*Y
+  #dw=((U+V)*Y-U).dot(dYp)
+  #dfp=jma(jsm,dYp[~Y])
+  #dfn=jma(jsm,dYp[Y])
+  dfp=jma(jsm,dfp)
+  dfn=jma(jsm,dfn)
+  return (yfp>0).mean(),(yfn>0).mean(),dfp,dfn#Y_target*dYp#diff.sum()
+
+imp=vmap(_imp,in_axes=[None,0])
+@jit
+def fp_fn_bin(w,X,Y):#,U,V):
+  Yp=imp(w,X)>0
+  return (Yp&(~Y)).mean(),(Y&~Yp).mean()
+
+def exp_update(s,xy):
+  x,y=xy
+  (w,ad_m_fp,ad_v_fp,ad_m_fn,ad_v_fn,fp,fn,pn,
+   avg_rate,lr,beta1,beta2,fpfn_target,eps,reg)=s
+  fp_b,fn_b,dfp,dfn=fpfnd(w,x,y)
+  fp=ewma(fp,fp_b,avg_rate)
+  fn=ewma(fn,fn_b,avg_rate)
+  bet=fpfn_target**.5
+  #pn*=1+lr*tanh(fpfn_target-fp/fn)
+  #pn*=1+lr*tanh(bet*fn-fp/bet)
+  #pn+=lr*tanh(bet*fn-fp/bet)
+  pn*=1+lr*(bet*fn-fp/bet)*exp(-1/((pn-lr)*(1/pn-lr)))
+  #pn+=lr*tanh(fpfn_target-fp/fn)
+  w,ad_m_fp,ad_v_fp,ad_m_fn,ad_v_fn=upd_ad_fpfn_pyt(w,ad_m_fp,ad_v_fp,ad_m_fn,ad_v_fn,
+                                                    dfp,dfn,beta1,beta2,lr,pn,reg,eps)
+  return (w,ad_m_fp,ad_v_fp,ad_m_fn,ad_v_fn,fp,fn,pn,
+          avg_rate,lr,beta1,beta2,fpfn_target,eps,reg)
+
+#exps_update=vmap(exp_update,in_axes=[0,None])
+exps_update=lambda states,xy:([exp_update(s,xy) for s in states],0.)
+
+exps_updates=jit(lambda states,X_b,Y_b:scan(exps_update,states,(X_b,Y_b))[0])
+
+def __batchify(X,Y,n_batches,bs):
+  return (X.reshape((n_batches,bs,-1)),
+          Y.reshape((n_batches,bs)))
+_batchify=jit(__batchify,static_argnames=['n_batches','bs'])
+
+def batchify(X,Y,bs):
+  n_batches=len(Y)//bs
+  return _batchify(X[:n_batches*bs],Y[:n_batches*bs],n_batches,bs)
+
+@jit
+def exp_predict(w,X,Y):
+  Yp=imp_bin(w,X)
+  return (jma(lambda a,b:a&~b,Yp,Y).mean(),
+          jma(lambda a,b:b&~a,Yp,Y).mean())
+
+def get_state(e):
+  return (e.w_model,e.ad_m_fp,e.ad_v_fp,e.ad_m_fn,e.ad_v_fn,e.fp,e.fn,e.pn,
+          e.avg_rate,e.lr,e.beta1,e.beta2,e.target_fp/e.target_fn,e.eps,e.reg)
+
+def update_results_post_epoch(exps,states,benches,targets,epoch_num):
+  for i,(e,s,b) in enumerate(list(zip(exps,states,benches))):
+    ts.get_timestep('start_upd')
+    e.w_model,e.ad_v_fp,e.ad_v_fn,e.ad_v_fn,e.ad_m_fn,e.fp_otf,e.fn_otf,e.pn=s[:8]
+    e.fp_train,e.fn_train,e.fp_test,e.fn_test,w_l2=b
+    e.div_otf=max(e.fp_otf/e.target_fp,e.fn_otf/e.target_fn)
+    e.div_train=max(e.fp_train/e.target_fp,e.fn_train/e.target_fn)
+    e.div_test=max(e.fp_test/e.target_fp,e.fn_test/e.target_fn)
+    e.fpfn_otf=e.fp_otf/e.fn_otf
+    e.fpfn_train=e.fp_train/e.fn_train
+    e.fpfn_test=e.fp_test/e.fn_test
+    ts.get_timestep('upd_stats')
+    e.w_l2=w_l2
+    ts.get_timestep('upd_w')
+    update_epoch_history(e)
+    ts.get_timestep('upd_hist')
+    if e.div_train<1:
+      e.steps_to_target=epoch_num
+      print('Experiment complete:')
+      f_to_str(('fp_train','fn_train','fp_test','fn_test','steps_to_target'))
+      f_to_str(b)
+      if e.stop_on_target:
+        [l.pop(i) for l in [exps,states,benches,targets]]
+
+@jit
+def bench_states(ws,targets,X,Y,X_test,Y_test):
+  ret=[]
+  for w,(target_fp,target_fn) in zip(ws,targets):
+    ret.append(fp_fn_bin(w,X,Y)+fp_fn_bin(w,X_test,Y_test)+(l2(w),))
+  return ret
+
+#bench_states=vmap(bench_state)
+
+X_test_b,Y_test_b=batchify(a.x_test,a.y_test,a.bs)
+active_exps=[e for e in experiments]
+states=[get_state(e) for e in active_exps]
+targets=[(e.target_fp,e.target_fn) for e in active_exps]
+while True:
+  ts.get_timestep('start')
+  X_b,Y_b=batchify(*shuffle_xy(ke.emit_key(),a.x_train,a.y_train),a.bs)
+  ts.get_timestep('shuffle')
+  print('Starting epoch...')
+  f_to_str([[l2(v) for v in s[:5]] for s in states],p=True)
+  states=exps_updates(states,X_b,Y_b)
+  ts.get_timestep('epoch')
+  benches=bench_states([s[0] for s in states],targets,
+                        a.x_train,a.y_train,a.x_test,a.y_test)
+  ts.get_timestep('bench')
+  update_results_post_epoch(active_exps,states,benches,targets,a.epoch_num)
+  ts.get_timestep('upd_res')
+  save_ensemble(a,experiments,ke,ts)
+  ts.get_timestep('saving')
+  if not active_exps:
+    print('All experiments complete, exiting')
+    line='erx'
+  else:
+    line=read_input_if_ready()
+  report_epochs(a,experiments,ts,line,imp,ke.emit_key(report=True))
+  ts.get_timestep('report')
+  a.epoch_num+=1
+  print('end epoch',a.epoch_num)
