@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
 from pickle import load,dump
 from types import SimpleNamespace
+from itertools import count
 from csv import writer
 from os.path import isdir,isfile
 from os import mkdir,listdir,get_terminal_size
@@ -13,7 +14,7 @@ from sys import stdin
 from time import perf_counter
 from itertools import accumulate
 from numpy import inf,unique as npunique,array as nparr,min as nmn,\
-                  max as nmx,sum as nsm,log10 as npl10,round as rnd
+                  max as nmx,sum as nsm,log10 as npl10,round as rnd,geomspace
 from numpy.random import default_rng #Only used for deterministic routines
 from jax.numpy import array,vectorize,zeros,log,log10,flip,maximum,minimum,pad,\
                       concat,exp,ones,linspace,array_split,reshape,corrcoef,eye,\
@@ -23,8 +24,9 @@ from jax.numpy.linalg import svdvals
 from jax.scipy.signal import convolve
 from jax.nn import tanh,softmax
 from jax.random import uniform,normal,split,key,choice,binomial,permutation
-from jax.tree import map as jma
+from jax.tree import map as jma,reduce as jrd
 from jax import grad,value_and_grad,jit,config
+from jax.lax import scan
 from sklearn.utils.extmath import cartesian
 from pandas import read_csv
 from matplotlib.pyplot import imshow,legend,show,scatter,xlabel,ylabel,\
@@ -52,12 +54,12 @@ class KeyEmitter:
         self.parents={a:k for a,k in zip(parents,split(k,len(parents)))}
       elif isinstance(parents,str):
         self.parents={parents:k}
-  def emit_key(self,n=1,parent='main',vis=False,report=False):
+  def emit_key(self,n=None,parent='main',vis=False,report=False):
     if vis or report:
       parent='vis'
-    keys=split(self.parents[parent],n+1)
+    keys=split(self.parents[parent]) if n is None else split(self.parents[parent],n+1)
     self.parents[parent]=keys[0]
-    return keys[1:] if n>1 else keys[1]
+    return keys[1] if n is None else keys[1:]
 
 class TimeStepper:
   def __init__(self,clock_avg_rate=.01,time_avgs={}):
@@ -454,7 +456,9 @@ def init_ensemble(script=None):
 
   return a,ke,ts,experiments
 
-def f_to_str(X,lj=8,prec=2,p=False):
+def f_to_str(X,lj=None,prec=2,p=False):
+  if lj is None:
+    lj=prec+6
   try:
     if isinstance(float(X),float):
       #X=f'{X:.3g}'
@@ -668,58 +672,55 @@ def resnet_cost_layer(*w,i,c,d,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
     x+=dx
   return ret-jsm(UmV*x.T)
 
-@jit
-def l2(w):
-  return sum(jsm(a**2) for a in w[0])+\
-         sum(jsm(a**2) for a in w[1])
+l2=jit(lambda w:jrd(lambda x,y:x+(y**2).sum(),w,initializer=0.))
+
 dl2=jit(value_and_grad(l2))
 
-'''
-def mk_l1_fm(imp=f):
-  @jit
-  def l1(w,x,y,U,V,eps=.1):
-    y_smooth=imp(w,x)
-    y_diffs=1-y_smooth*(2*y-1)
-    l=(x*(x@A[0]))**2
-    sparsity=jsm(l)-jmx(l) #Foce layer 1 to be typically dominated by 1 term
-    return jsm(((V-U)*y+U)*y_diffs)+sparsity #U*cts_fp+V*cts_fn
-  return l1,value_and_grad(l1)
+#def mk_l1_fm(imp=f):
+#  @jit
+#  def l1(w,x,y,U,V,eps=.1):
+#    y_smooth=imp(w,x)
+#    y_diffs=1-y_smooth*(2*y-1)
+#    l=(x*(x@A[0]))**2
+#    sparsity=jsm(l)-jmx(l) #Foce layer 1 to be typically dominated by 1 term
+#    return jsm(((V-U)*y+U)*y_diffs)+sparsity #U*cts_fp+V*cts_fn
+#  return l1,value_and_grad(l1)
+#
+#def mk_l1_orth(act=tanh,imp=f):
+#  @jit
+#  def l1(w,x,y,U,V,eps=.1):
+#    y_smooth=imp(w,x,act=act)
+#    y_diffs=1-y_smooth*(2*y-1)
+#    #non_orthog=sum([jsm(((a.T@a)**2)[triu_indices(a.shape[1],k=1)]) for a in A])
+#    non_orthog=[jsm(((a.T@a)**2)[triu_indices(a.shape[1],k=1)]) for a in A]
+#    noth=0
+#    for a in non_orthog:
+#      noth+=a
+#
+#    #a_p,a_n=y_smooth[y],y_smooth[~y]
+#    #cts_fp=jsm(1.+a_n)
+#    #cts_fn=jsm(1.-a_p)
+#    return jsm(((V-U)*y+U)*y_diffs)+noth#non_orthog #U*cts_fp+V*cts_fn
+#  return l1,value_and_grad(l1)
+#
+#def mk_waqas(imp,eps=1e-5):
+#  @jit
+#  def waqas(w,x,y,U,V,eps=eps):
+#    y_smooth=imp(w,x)
+#    y_diffs=maximum(0,-y_smooth*(2*y-1)/(jsm(x**2,axis=1)**.5+eps))
+#    return jsm(y_diffs) #U*cts_fp+V*cts_fn
+#  dwaqas=value_and_grad(waqas)
+#  return waqas,dwaqas
+#
+#def mk_waqas_consaw(imp,eps=1e-5):
+#  @jit
+#  def waqas(w,x,y,U,V,eps=eps):
+#    y_smooth=imp(w,x)
+#    y_diffs=maximum(0,-y_smooth*(2*y-1)/(jsm(x**2,axis=1)**.5+eps))
+#    return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
+#  dwaqas=value_and_grad(waqas)
+#  return waqas,dwaqas
 
-def mk_l1_orth(act=tanh,imp=f):
-  @jit
-  def l1(w,x,y,U,V,eps=.1):
-    y_smooth=imp(w,x,act=act)
-    y_diffs=1-y_smooth*(2*y-1)
-    #non_orthog=sum([jsm(((a.T@a)**2)[triu_indices(a.shape[1],k=1)]) for a in A])
-    non_orthog=[jsm(((a.T@a)**2)[triu_indices(a.shape[1],k=1)]) for a in A]
-    noth=0
-    for a in non_orthog:
-      noth+=a
-
-    #a_p,a_n=y_smooth[y],y_smooth[~y]
-    #cts_fp=jsm(1.+a_n)
-    #cts_fn=jsm(1.-a_p)
-    return jsm(((V-U)*y+U)*y_diffs)+noth#non_orthog #U*cts_fp+V*cts_fn
-  return l1,value_and_grad(l1)
-
-def mk_waqas(imp,eps=1e-5):
-  @jit
-  def waqas(w,x,y,U,V,eps=eps):
-    y_smooth=imp(w,x)
-    y_diffs=maximum(0,-y_smooth*(2*y-1)/(jsm(x**2,axis=1)**.5+eps))
-    return jsm(y_diffs) #U*cts_fp+V*cts_fn
-  dwaqas=value_and_grad(waqas)
-  return waqas,dwaqas
-
-def mk_waqas_consaw(imp,eps=1e-5):
-  @jit
-  def waqas(w,x,y,U,V,eps=eps):
-    y_smooth=imp(w,x)
-    y_diffs=maximum(0,-y_smooth*(2*y-1)/(jsm(x**2,axis=1)**.5+eps))
-    return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
-  dwaqas=value_and_grad(waqas)
-  return waqas,dwaqas
-'''
 
 def mk_hinge(imp,eps=1e-5):
   @jit
@@ -769,7 +770,7 @@ def mk_cross_entropy(act=tanh,imp=f,reg=True):
   def cross_entropy(w,x,y,U,V,eps=1e-8):
     y_smooth=imp(w,x)#,act=act)
     y_winnings=y_smooth*(2*y-1) #+ if same sign, - if different sign
-    #return -jsm(((V-U)*y+U)*log(1+eps+y_preloss))
+    #return jsm(((V-U)*y+U)*log(1+eps-y_winnings))
     return -jsm(((V-U)*y+U)*log(1+eps+y_winnings))
   if reg:
     def ret(w,x,y,U,V,eps=1e-8,reg=1.):
@@ -814,13 +815,16 @@ losses={'loss':mk_l1,'l1':mk_l1,'cross_entropy':mk_cross_entropy,
         #'coalescence_cost':dcoalescence_cost,'cross_entropy_rn':dcross_entropy_rn,
         #'coalescence_res_cost':dcoalescence_res_cost}
 
-def init_layers(k,layer_dimensions,initialisation,mult_a=1.,
+def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,
                 sqrt_normalise=False,orthonormalise=False):
-  k1,k2=split(k)
-  wb=[]
   n_steps=len(layer_dimensions)-1
-  w_k=split(k1,n_steps)
-  b_k=split(k2,n_steps)
+  if initialisation in ['ones','zeros']:
+    w_k,b_k=count(),count()
+  else:
+    k1,k2=split(k)
+    w_k=split(k1,n_steps)
+    b_k=split(k2,n_steps)
+  wb=[]
   A=[]
   B=[]
   for i,(k,l,d_i,d_o) in enumerate(zip(w_k,b_k,layer_dimensions,layer_dimensions[1:])):
@@ -866,6 +870,39 @@ def colour_rescale(fpfn):
   l=log(array(fpfn))-log(a.fpfn_min)
   l/=log(a.fpfn_max)-log(a.fpfn_min)
   return jet(l)
+
+def mk_exp_j(lr,reg,in_dim,start_dim,end_dim,n_layers,target_fpfn,tfp,tfn,beta1,beta2,initialisation,k):
+  sh=[in_dim]+list(geomspace(start_dim,end_dim,n_layers+1,dtype=int))+[1]
+  return {'state':{'w':init_layers(sh,initialisation,k=k),
+                   'm':init_layers(sh,'zeros'),
+                   'v':init_layers(sh,'ones')},
+          'const':{'bet':target_fpfn,'tfp':tfp,'tfn':tfn,'beta1':beta1,'beta2':beta2,
+                   'lr':lr,'reg':reg*lr,'eps':1e-8},
+          'shape':sh}
+
+def mk_exps(targ_fpfns,in_dim,initialisation,k,tfpfns=[(.1,.01)],lrs=[1e-3],regs=[.1],
+            start_dims=[128],end_dims=[8],depths=[2],beta1s=[.9],beta2s=[.999]):
+  params=[(lr,reg,in_dim,start_dim,end_dim,depth,tfp/tfn,tfp,tfn,beta1,beta2,initialisation) for\
+           lr in lrs for reg in regs for start_dim in start_dims for\
+           end_dim in end_dims for depth in depths for tfp,tfn in tfpfns for\
+           beta1 in beta1s for beta2 in beta2s]
+  return [mk_exp_j(*param,l) for param,l in zip(params,split(k,len(params)))]
+
+def change_worst_j(states,consts,benches,shapes,n_to_change,k):
+  ks=split(k,n_to_change)
+  ranked=[x[0] for x in sorted(enumerate(benches),key=lambda x:-x[1]['div'])]
+  worst=ranked[:n_to_change]
+  best=ranked[n_to_change:]
+  for i,j,l in zip(best,worst,ks):
+    c=consts[i]
+    l0,l=split(l)
+    z=normal(l,2)
+    consts[j]={'bet':c['bet'],'tfp':c['tfp'],'tfn':c['tfn'],'beta1':c['beta1'],'beta2':c['beta2'],
+                'lr':c['lr']*exp(z[0]),'reg':c['reg']*exp(z[1]),'eps':1e-8}  
+    #states[j]=states[i]
+    states[j]={'w':init_layers(shapes[i],init_dist,k=l0),
+               'm':init_layers(shapes[i],'zeros'),
+               'v':init_layers(shapes[i],'ones')}
 
 def mk_experiment(p,thresh,target_fp,target_fn,lr,a,mode,reg=0.,eps=1e-8,adfpfn=False):
   e=SimpleNamespace()
@@ -1313,60 +1350,38 @@ def ad_fpfn(w,mp,vp,mn,vn,eps,lr,pn):
   return  w-lr*(ad_diff(mp,vp,eps)/pn+ad_diff(mn,vn,eps)*pn)
 
 @jit
-def upd_ad_fpfn_pyt(w,mp,vp,mn,vn,dfp,dfn,beta1,beta2,lr,pn,reg,eps):
-  #dfp,dfn=jma(lambda x,d1,d2:(d1+reg*x,d2+reg*x),w,dfp,dfn)
-  #reg_rn=reg/(lr*(pn+1/pn))
-  #reg_rn=lr*reg#/(lr*(pn+1/pn))
-  #dfp=jma(lambda x,d:d/pn+reg_rn*x,w,dfp)
-  #dfn=jma(lambda x,d:d*pn+reg_rn*x,w,dfn)
+def upd_ad_fpfn(w,mp,vp,mn,vn,dfp,dfn,beta1,beta2,lr,pn,reg,eps):
   mp=jma(lambda old,upd:ewma(upd,old,beta1),mp,dfp)
   vp=jma(lambda old,upd:ewma(upd**2,old,beta2),vp,dfp)
   mn=jma(lambda old,upd:ewma(upd,old,beta1),mn,dfn)
   vn=jma(lambda old,upd:ewma(upd**2,old,beta2),vn,dfn)
-  #vp,vn=jma(lambda old,upd:ewma(upd,old,beta1),(vp,vn),(dfp,dfn))
-  #mp,mn=jma(lambda old,upd:ewma(upd**2,old,beta2),(mp,mn),(dfp,dfn))
-  w=jma(lambda x,mP,vP,mN,vN:(1-reg)*ad_fpfn(x,mP,vP,mN,vN,eps,lr,pn),w,mp,vp,mn,vn)
+  w=jma(lambda x,mP,vP,mN,vN:(1-reg)*(x-ad_fpfn(x,mP,vP,mN,vN,eps,lr,pn)),w,mp,vp,mn,vn)
   return w,mp,vp,mn,vn
 
 @jit
 def upd_adam(w,m,v,dw,beta1,beta2,lr,reg,eps):
   m=jma(lambda old,upd:ewma(upd,old,beta1),m,dw)
   v=jma(lambda old,upd:ewma(upd**2,old,beta2),v,dw)
-  #vp,vn=jma(lambda old,upd:ewma(upd,old,beta1),(vp,vn),(dfp,dfn))
-  #mp,mn=jma(lambda old,upd:ewma(upd**2,old,beta2),(mp,mn),(dfp,dfn))
-  w=jma(lambda x,mP,vP,mN,vN:(1-reg)*ad_fpfn(x,mP,vP,mN,vN,eps,lr,pn),w,mp,vp,mn,vn)
-  return w,m,vp
+  w=jma(lambda W,M,V:(1-reg)*(W-lr*ad_diff(M,V,eps)),w,m,v)
+  return w,m,v
 
 @jit
-def upd_adam_getl2(w,ad_v,ad_m,upd,beta1,beta2,lr,eps=1e-8):
-  adva,advb=ad_v
-  wa,wb=w
-  ad_m*=beta2
-  for i,(u,v) in enumerate(zip(*upd)):
-    adva[i]*=beta1
-    advb[i]*=beta1
-    adva[i]+=(1-beta1)*u
-    advb[i]+=(1-beta1)*v
-    ad_m+=(1-beta2)*(nsm(u**2)+nsm(v**2))
-  w_l2=0
-  dw_l2=0
-  for i,(s,t) in enumerate(zip(adva,advb)):
-    delta_u=lr*s/(ad_m**.5+eps)
-    delta_v=lr*t/(ad_m**.5+eps)
-    wa[i]-=delta_u
-    wb[i]-=delta_v
-    w_l2+=jsm(wa[i]**2)+jsm(wb[i]**2)
-    dw_l2+=jsm(delta_u**2)+jsm(delta_v**2)
-  return (wa,wb),(adva,advb),ad_m,w_l2,dw_l2
+def upd_adam_no_bias(w,m,v,dw,beta1,beta2,lr,reg,eps,t):
+  m=jma(lambda old,upd:ewma(upd,old,beta1),m,dw)
+  v=jma(lambda old,upd:ewma(upd**2,old,beta2),v,dw)
+  w=jma(lambda W,M,V:(1-reg)*(W-lr*ad_diff(M/(1-beta1**t),V/(1-beta2**t),eps)),w,m,v)
+  return w,m,v
 
 @jit
-def upd_grad(w,upd,lr):
-  w=([a-lr*da for a,da in zip(w[0],upd[0])],
-     [b-lr*db for b,db in zip(w[1],upd[1])])
-  dw_lw=(lr**2)*sum([jsm(da**2)+jsm(db**2) for da,db in zip(*upd)])
-  w_l2=sum([jsm(a**2)+jsm(b**2) for a,b in zip(*w)])
+def upd_grad(w,dw,lr,reg):
+  w=jma(lambda W,D:(1-reg)*(W-lr*D),w,dw)
+  return w
+  #w=([a-lr*da for a,da in zip(w[0],upd[0])],
+  #   [b-lr*db for b,db in zip(w[1],upd[1])])
+  #dw_lw=(lr**2)*sum([jsm(da**2)+jsm(db**2) for da,db in zip(*upd)])
+  #w_l2=sum([jsm(a**2)+jsm(b**2) for a,b in zip(*w)])
 
-  return w,w_l2,dw_l2
+  #return w,w_l2,dw_l2
 
 #@jit
 def update_weights(a,e,upd):#,start=None,end=None):
@@ -1376,7 +1391,7 @@ def update_weights(a,e,upd):#,start=None,end=None):
     wm=e.w_model
   if a.adam:
     wm,e.ad_v,e.ad_m,e.w_l2,e.dw_l2=upd_adam_getl2(wm,e.ad_v,e.ad_m,upd,
-                                                       a.beta1,a.beta2,e.lr)
+                                                   a.beta1,a.beta2,e.lr)
   else:
     wm,e.w_l2,e.dw_l2=upd_grad(wm,upd,e.lr)
 
@@ -1586,26 +1601,40 @@ def rm_unique_stats(stats):
       unique_stats[k]=vs[0]
   [s.pop(k) for k in unique_stats for s in stats]
   return unique_stats
-    
+
+def gts():
+  try:
+    return get_terminal_size().columns
+  except:
+    return 10000
+
+def show_unique_stats(stats,trunc=True,ess_only=False,by='',ts=SimpleNamespace(get_timestep=lambda x:None),
+                      prec=3,essential=lambda l:True,term_size=gts()):
+  unique_stats=rm_unique_stats(stats) if len(stats)>1 else False
+  ts.get_timestep('rmunique')
+  ret=''
+  if unique_stats:
+    ret='Unique stats:'+'\n'+\
+         (', '.join([k+':'+f_to_str(v,prec=prec,lj=False) for k,v in unique_stats.items()]))
+  labs=sorted(list(stats[0]),key=lambda a:a!=by)
+  ts.get_timestep('sort')
+  col_width=max(prec+5,max([len(l) for l in labs]))+1 #.e-bc is 5 chars
+  n_stats=len(labs)
+  n_max=term_size//col_width if trunc else n_stats
+  if ess_only or (n_max<n_stats and ess_only is None):
+    labs=[l for l in labs if not(essential(l))]
+  labs=labs[:n_max]
+  ts.get_timestep('labs')
+  return ret+'\n'+f_to_str(labs,prec=prec,lj=col_width)+'\n'+\
+         '\n'.join([f_to_str(s,prec=prec,lj=col_width) for s in\
+                    sorted([[t[l] for l in labs] for t in stats])])
   
 def report_epochs(a,experiments,ts,line,imp,k,prec=3,by='div_trn',
-                  trunc=True,div_only=None,col_space=1):
+                  trunc=True,div_only=None):
   k1,k2=split(k)
   stats=[epoch_stats(e) for e in experiments]
-  unique_stats=rm_unique_stats(stats) if len(stats)>1 else False
-  if unique_stats:
-    print('Unique stats:',
-          ', '.join([k+':'+f_to_str(v,prec=prec,lj=False) for k,v in unique_stats.items()]))
-  labs=sorted(list(stats[0]),key=lambda a:a!=by)
-  col_width=max(prec+5,max([len(l) for l in labs]))+col_space #.e-bc is 5 chars
-  n_stats=len(labs)
-  n_max=get_terminal_size().columns//col_width if trunc else n_stats
-  if div_only or (n_max<n_stats and div_only is None):
-    labs=[l for l in labs if not(l[0]=='f' and l[2]=='_')]
-  f_to_str(labs[:n_max],prec=prec,lj=col_width,p=True)
-  [f_to_str(s,prec=prec,lj=col_width,p=True) for s in\
-   sorted([[t[l] for l in labs] for t in stats])]
-
+  show_unique_stats(stats,trunc=trunc,ess_only=div_only,by=by,
+                    prec=prec,essential=lambda l:not((l[0]=='f')and(l[2]=='_')))
   ts.report(p=True)
   if ':' in line:
     l=line.split(':')
@@ -1886,13 +1915,14 @@ def dl_rbd24(data_dir=str(Path.home())+'/data',
 
 def rbd24(preproc=True,split_test_train=True,rescale_log=True,single_dataset=False,
           raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl',categorical=True,
-          processed_pickle_file=str(Path.home())+'/data/rbd24/rbd24_proc.pkl'):
-  if split_test_train and preproc and rescale_log and isfile(processed_pickle_file) and not single_dataset:
-    print('Loading processed log rescaled pickle...')
+          processed_pickle_file=str(Path.home())+'/data/rbd24/rbd24_proc.pkl',verbose=False):
+  if split_test_train and preproc and rescale_log and\
+  isfile(processed_pickle_file) and not single_dataset:
+    if verbose:print('Loading processed log rescaled pickle...')
     with open(processed_pickle_file,'rb') as fd:
       return load(fd)
   elif isfile(raw_pickle_file):
-    print('Loading raw pickle...')
+    if verbose:print('Loading raw pickle...')
     df=read_pickle(raw_pickle_file)
   else:
     rbd24_dir=dl_rbd24()
@@ -1901,7 +1931,7 @@ def rbd24(preproc=True,split_test_train=True,rescale_log=True,single_dataset=Fal
     for df,n in zip(dfs,categories):
       df['category']=n.split('.')[0]
     df=concat(dfs)
-    print('Writing raw pickle...')
+    if verbose:print('Writing raw pickle...')
     df.to_pickle(raw_pickle_file)
 
   if single_dataset:
@@ -1924,7 +1954,7 @@ def rbd24(preproc=True,split_test_train=True,rescale_log=True,single_dataset=Fal
   x_train,x_test=x[:split_point],x[split_point:]
   y_train,y_test=y[:split_point],y[split_point:]
   if split_test_train and preproc and rescale_log and not single_dataset:
-    print('Saving processed log rescaled pickle...')
+    if verbose:print('Saving processed log rescaled pickle...')
     with open(processed_pickle_file,'wb') as fd:
       dump(((x_train,y_train),(x_test,y_test),(df,x_cols)),fd)
   return (x_train,y_train),(x_test,y_test),(df,x_cols)
@@ -2097,3 +2127,56 @@ def min_dist(X,Y=None):
         if not m:
           return m,x,y
     return m,x,y
+
+def mk_epochs(imp,n_batches,bs,mk_loss=mk_l2,lrbet=0):
+  lo=mk_loss(imp=imp,reg=False)
+  #lo=mk_cross_entropy(act=act,imp=imp,reg=False)#lo=mk_l1(act=act,imp=imp,reg=False)
+  dlo=jit(grad(lo))
+
+  @jit
+  def fp_fn_bin(w,X,Y):
+    Yp=imp(w,X)>0
+    return [(Yp&~Y).mean(),(Y&~Yp).mean()]
+
+  fp_fn_bins=lambda ws,X,Y:[fp_fn_bin(w,X,Y) for w in ws]
+  @jit
+  def step(s,c,X,Y):
+    dw=dlo(s['w'],X,Y,c['bet']**2,1,eps=1e-4)
+    w,m,v=upd_adam(s['w'],s['m'],s['v'],dw,c['beta1'],c['beta2'],c['lr'],c['reg'],c['eps'])
+    return {'w':w,'m':m,'v':v}#,pn#Y_target*dYp#diff.sum()
+
+  exps_step=jit(lambda states,consts,X,Y:[step(s,c,X,Y) for s,c in zip(states,consts)])
+
+  @jit
+  def exps_steps(states,consts,X_b,Y_b):
+    return scan(lambda states,xy:(exps_step(states,consts,xy[0],xy[1]),0),
+                states,(X_b,Y_b))[0]
+
+  @jit
+  def bench_states(states,consts,X,Y,X_test,Y_test):
+    ws=[s['w'] for s in states]
+    return [{'div':maximum(a[0]/c['tfp'],a[1]/c['tfn']),
+             'fp_trn':a[0],'fn_trn':a[1],'fp_tst':b[0],'fn_tst':b[1]}for a,b,c in\
+            zip(fp_fn_bins(ws,X,Y),fp_fn_bins(ws,X_test,Y_test),consts)]
+
+  def epoch(states,consts,X,Y,k):
+    X,Y=shuffle_xy(k,X,Y)
+    X_b,Y_b=X[:n_batches*bs].reshape(n_batches,bs,-1),Y[:n_batches*bs].reshape(n_batches,bs)
+    return exps_steps(states,consts,X_b,Y_b)
+
+  @jit
+  def norms_states(states):
+    return [{'wl2':l2(s['w'])**.5,'vl2':l2(s['v'])**.5,'ml2':l2(s['m'])**.2} for s in states]
+
+  @jit
+  def epochs(states,consts,X_train,Y_train,X_test,Y_test,ks):
+    for l in ks:
+      states=epoch(states,consts,X_train,Y_train,l)
+      benches=bench_states(states,consts,X_train,Y_train,X_test,Y_test)
+      for b,c in zip(benches,consts):
+        bet2=c['tfp']/c['tfn']
+        c['bet']*=1-lrbet*tanh(b['fp_trn']-bet2*b['fn_trn'])
+    l2_states=norms_states(states)
+    return states,l2_states,consts,benches
+
+  return epochs

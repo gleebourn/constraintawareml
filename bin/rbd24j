@@ -16,12 +16,15 @@ from sys import path
 path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import init_ensemble,activations,f_to_str,l2,ewma,save_ensemble,\
                       losses,read_input_if_ready,upd_ad_fpfn_pyt,shuffle_xy,\
-                      report_epochs,plot_epochs,update_epoch_history,implementation
+                      report_epochs,plot_epochs,update_epoch_history,\
+                      implementation,mk_fp_fn_bin
+
 
 a,ke,ts,experiments=init_ensemble('rbd24j')
 
 act=activations[a.activation] if a.activation else None
 _imp=implementation(a.implementation,act)
+fp_fn_bin=mk_fp_fn_bin(_imp)
 _dimp=value_and_grad(lambda w,x:_imp(w,x)[0])
 _dfp=value_and_grad(lambda w,x,y:(~y)*_imp(w,x)[0])
 _dfn=value_and_grad(lambda w,x,y:-(y*_imp(w,x)[0]))
@@ -64,7 +67,7 @@ def exp_update(s,xy):
   #pn*=1+lr*tanh(fpfn_target-fp/fn)
   #pn*=1+lr*tanh(bet*fn-fp/bet)
   #pn+=lr*tanh(bet*fn-fp/bet)
-  pn*=1+lr*(bet*fn-fp/bet)*exp(-1/((pn-lr)*(1/pn-lr)))
+  pn*=1+.1*(bet*fn_b-fp_b/bet)*exp(-((pn-lr)*(1/pn-lr))**-2)/(4*(bet+1/bet))
   #pn+=lr*tanh(fpfn_target-fp/fn)
   w,ad_m_fp,ad_v_fp,ad_m_fn,ad_v_fn=upd_ad_fpfn_pyt(w,ad_m_fp,ad_v_fp,ad_m_fn,ad_v_fn,
                                                     dfp,dfn,beta1,beta2,lr,pn,reg,eps)
@@ -145,7 +148,8 @@ while True:
   ts.get_timestep('bench')
   update_results_post_epoch(active_exps,states,benches,targets,a.epoch_num)
   ts.get_timestep('upd_res')
-  save_ensemble(a,experiments,ke,ts)
+  if not a.epoch_num%10:
+    save_ensemble(a,experiments,ke,ts)
   ts.get_timestep('saving')
   if not active_exps:
     print('All experiments complete, exiting')
