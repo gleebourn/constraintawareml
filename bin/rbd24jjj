@@ -19,7 +19,7 @@ from sys import path
 path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import activations,f_to_str,shuffle_xy,init_layers,upd_adam,show_unique_stats,\
                       mk_epochs,mk_exps,rbd24,report_epochs,plot_epochs,update_epoch_history,\
-                      ewma,mk_cross_entropy,implementation,TimeStepper,KeyEmitter,l2,mk_l1,\
+                      ewma,mk_soft_cross_entropy,implementation,TimeStepper,KeyEmitter,l2,mk_l1,\
                       mk_l2,upd_grad,gts
 
 act_name='relu'#'tanh'
@@ -46,16 +46,20 @@ target_fpfns=[(.05,.025)]
 targ_fpfns=[a/b for a,b in target_fpfns]
 #start_dims=geomspace(32,64,n_starts)
 #end_dims=geomspace(4,16,n_ends)
-start_dims=[256]
+start_dims=[128]
 end_dims=[16]
 #lrs=[1e-4*(10**i) for i in range(3)]
 #regs=[1e-2*2**i for i in range(3)]
-lrs=[1e-4]
-regs=[1e-2]
+lrs=[1e-3]#,1e-4,1e-5]
+regs=[1e-2]#,1e-2]
 depths=[2]
+beta2s=[.999]
+#lrbets=[.2,.1,.05]#[.2,.5]
+#pids=[{'p':a,'i':b,'d':c} for a in geomspace(.001,.1,4) for b in geomspace(.001,.1,4) for\
+#      c in geomspace(.001,.1,4)]
 
-exps=mk_exps(targ_fpfns,in_dim,initialisation,ke.emit_key(),tfpfns=target_fpfns,
-             lrs=lrs,regs=regs,start_dims=start_dims,end_dims=end_dims,depths=depths)#[1e-2,1e-3,1e-4]]#
+exps=mk_exps(targ_fpfns,in_dim,initialisation,p_train,ke.emit_key(),tfpfns=target_fpfns,pids=pids,
+             beta2s=beta2s,lrs=lrs,regs=regs,start_dims=start_dims,end_dims=end_dims,depths=depths)
 states=[e['state'] for e in exps]
 consts=[e['const'] for e in exps]
 shapes=[e['shape'] for e in exps]
@@ -64,20 +68,23 @@ print('n experiments:',len(exps))
   
 outf=Path('jj.pkl')
 
-def mk_surrogate(imp,reg=None):
+def mk_surrogate(imp,reg=None,p=p_train):
+  imb=p_train/(1-p_train)
   @jit
   def surrogate(w,x,y,U,V,eps): #U=beta**2, V=1
-    yp=imp(w,x)
-    return (-(y*log((yp+1)/2+eps))+(~y)*log(U**2*(p_train/(1-p_train))+(yp+1)/2)).sum()
+    yp=(1+imp(w,x))/2
+    #return (-(y*log(eps+yp))+(~y)*log(U**2*(p_train/(1-p_train))+yp)).sum()
+    return ((-1)**y*log(eps+(~y)*imb*V/U+yp)).sum()
   return surrogate
 
-epochs=mk_epochs(imp,n_batches,bs,mk_surrogate,lrbet=.01)
+#epochs=mk_epochs(imp,n_batches,bs,mk_surrogate(imp),mk_beta=lambda p,tfp,tfn:1+(tfp-tfn)/p)
+epochs=mk_epochs(imp,n_batches,bs,mk_soft_cross_entropy(imp,reg=False),tune_pid=True)
 
 term_size=gts()
 epochs_per_report=10
 for step in count():
   ts.get_timestep('start')
-  states,l2_states,consts,benches=epochs(states,consts,X_train,Y_train,X_test,Y_test,
+  states,l2_states,consts,recent_benches=epochs(states,consts,X_train,Y_train,X_test,Y_test,
                                          ke.emit_key(epochs_per_report))
   ts.get_timestep('epochs')
   print('epoch',step*epochs_per_report)
