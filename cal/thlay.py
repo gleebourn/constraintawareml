@@ -13,9 +13,10 @@ from select import select
 from sys import stdin
 from time import perf_counter
 from itertools import accumulate
-from numpy import inf,unique as npunique,array as nparr,min as nmn,\
+from numpy import inf,unique as npunique,array as nparr,min as nmn,number,\
                   max as nmx,sum as nsm,log10 as npl10,round as rnd,geomspace
 from numpy.random import default_rng #Only used for deterministic routines
+from sklearn.preprocessing import StandardScaler
 from jax.numpy import array,vectorize,zeros,log,log10,flip,maximum,minimum,pad,\
                       concat,exp,ones,linspace,array_split,reshape,corrcoef,eye,\
                       concatenate,unique,cov,expand_dims,identity,\
@@ -212,14 +213,14 @@ def fm(w,x,act=tanh):
     x=act(x*(x@a)+b)
   return tanh(jsm(x,axis=1))
 
-def f_dropout_nollact(w,x,act,k,p=.4):
+def f_dropout_no_ll_act(w,x,act,k,p=.4):
   ks=split(k,len(w[0]))
   for a,b,ki in zip(*w,ks[1:]):
     x*=binomial(ki,1,p,shape=x.shape)
     x=act(x@a+b)
   return x
 
-def f_nollact(w,x,act):
+def f_no_ll_act(w,x,act):
   for a,b in zip(w[0][:-1],w[1][:-1]):
     x=act(x@a+b)
   return x@w[0][-1]+w[1][-1]
@@ -230,6 +231,62 @@ def f_dropout(w,x,act,k,p=.4):
     x*=binomial(ki,1,p,shape=x.shape)
     x=act(x@a+b)
   return x
+
+#def f_batchnorm(w,x,act):
+#  for a,b in zip(w[0][:-1],w[1][:-1]):
+#    x=act(x@a+b)
+#    x=(x-x.mean(axis=0))*(1e-4+x.var(axis=0))**-.5
+#  x=act(x@w[0][-1]+w[1][-1])
+#  return x
+
+def rescale_weights_zmean_uvar(w,x,act,get_transform=True):
+  if get_transform:
+    Ta=[]
+    Tb=[]
+  for a,b in zip(w[0][:-1],w[1][:-1]):
+    x=act(x@a+b)
+    ta=(1e-4+x.var(axis=0))**-.5
+    tb=x.mean(axis=0)*ta
+    if get_transform:
+      Ta.append(ta)
+      Tb.append(tb)
+    x=x*ta-tb
+  y=x@w[0][-1]+w[1][-1]
+  if get_transform:
+    return y,(w[0][:1]+[a*(ta.reshape(-1,1)) for a,ta in zip(w[0][1:],Ta)],
+              w[1][:1]+[b-Tb@a for a,b,Tb in zip(w[0][1:],w[1][1:],Tb)])
+  return y
+
+f_batchnorm=lambda w,x,act:rescale_weights_zmean_uvar(w,x,act,get_transform=False)
+
+#def rescale_weights_zmean_uvar(w,x,act,variance=1):#,inference_only=False):
+#  A,B=[],[]
+#  input_inv_sqrt_var=1.
+#  y=x@w[0][0]+w[1][0]
+#  for a,b in zip(w[0][:-1],w[1][:-1]):
+#    a*=input_inv_sqrt_var
+#    x=x@a+b
+#    b-=x.mean(axis=0)
+#    x=act(x)
+#    input_inv_sqrt_var=(1e-4+x.var(axis=0)/variance)**-.5
+#    A.append(a)
+#    B.append(b)
+#  y=x@a+b
+#  return y,(A+w[0][-1:],B+w[1][-1:])# if inference_only else y,(A,B)
+
+#def rescale_weights_zmean_uvar(w,x,act,variance=1,inference_only=False):
+#  a,b=w[0][0],w[1][0]
+#  A,B=[a],[b]
+#  Y=act(x@w[0][0]+w[1][0])
+#  for a,b in zip(w[0][1:],w[1][1:]):
+#    input_inv_sqrt_var=(1e-4+Y.var(axis=0)/variance)**-.5
+#    input_mean=Y.mean(axis=0)
+#    a*=input_inv_sqrt_var.reshape(-1,1)
+#    b-=input_mean@a
+#    A.append(a)
+#    B.append(b)
+#    Y=act(Y@a+b)
+#  return Y if inference_only else Y,(A,B)
 
 def f(w,x,act):
   for a,b in zip(*w):
@@ -251,8 +308,8 @@ def resnet(w,x,act=tanh,first_layer_no_skip=True):
 
 activations={'tanh':tanh,'softmax':softmax,'linear':jit(lambda x:x),
              'relu':jit(lambda x:minimum(1,maximum(-1,x)))}
-implementations={'mlp':f,'mlp_do':f_dropout,'mlp_nollact':f_nollact,
-                 'mlp_do_nollact':f_dropout_nollact,
+implementations={'mlp':f,'mlp_do':f_dropout,'mlp_no_ll_act':f_no_ll_act,
+                 'mlp_do_no_ll_act':f_dropout_no_ll_act,'mlp_batchnorm':f_batchnorm,
                  'resnet':resnet,'linear':lambda w,x,_:x@w[0]+w[1]}
 
 def implementation(imp,act=None):
@@ -678,20 +735,22 @@ def resnet_cost_layer(*w,i,c,d,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
     x+=dx
   return ret-jsm(UmV*x.T)
 
-l2=jit(lambda w:jrd(lambda x,y:x+(y**2).sum(),w,initializer=0.))
+@jit
+def l2(w):
+  return jrd(lambda x,y:x+(y**2).sum(),w,initializer=0.)
 
 dl2=jit(value_and_grad(l2))
 
 def mk_hinge(imp,eps=1e-5):
   def hinge(w,x,y,U,V,eps=eps):
     y_smooth=imp(w,x)
-    y_diffs=maximum(0,-y_smooth*(2*y-1))
+    y_diffs=maximum(0,y_smooth*(1-2*y))
     return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
   return hinge
 
-def mk_l1(act=None,imp=f,reg=True):
-  def l1(w,x,y,U,V,eps=None):
-    y_smooth=imp(w,x)
+def mk_l1(imp=f,reg=False):
+  def l1(w,x,y,U,V,eps=None,**kwa):
+    y_smooth=imp(w,x,**kwa)
     y_diffs=1-y_smooth*(2*y-1)
     return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
   if reg:
@@ -702,14 +761,14 @@ def mk_l1(act=None,imp=f,reg=True):
   return jit(ret)
 
 def mk_mk_lp(p=2.):
-  def mk_l(imp=f,reg=True):
+  def mk_l(imp=f,reg=False):
     def lp(w,x,y,U,V,eps=None,**kwa):
       y_smooth=imp(w,x,**kwa)
       y_diffs=((2*y-1)-y_smooth)**p
       #a_p,a_n=y_smooth[y],y_smooth[~y]
       #cts_fp=jsm(1.+a_n)
       #cts_fn=jsm(1.-a_p)
-      return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
+      return jsm((U*(~y)+V*y)*y_diffs) #U*cts_fp+V*cts_fn
     if reg:
       def ret(w,x,y,U,V,eps=None,reg=.1):
         return lp(w,x,y,U,V)+reg*l2(w)
@@ -739,9 +798,9 @@ def mk_soft_cross_entropy(act=tanh,imp=f,reg=True):
     ret=soft_cross_entropy
   return jit(ret)
 
-def mk_cross_entropy(act=None,imp=f,reg=True):
-  def cross_entropy(w,x,y,U,V,eps=1e-8):
-    y_smooth=imp(w,x)#,act=act)
+def mk_cross_entropy(imp=f,reg=False,eps=1e-8):
+  def cross_entropy(w,x,y,U,V,eps=eps,**kwa):
+    y_smooth=imp(w,x,**kwa)#,act=act)
     return -jsm(((~y)*U+y*V)*log(eps+1+y_smooth*(2*y-1)))
   if reg:
     def ret(w,x,y,U,V,eps=1e-8,reg=1.):
@@ -750,14 +809,24 @@ def mk_cross_entropy(act=None,imp=f,reg=True):
     ret=cross_entropy
   return jit(ret)
 
-def mk_l2_svd(act=None,k=1):#,reg=1.):
-  def l1_svd(w,x,y,U,V,eps=None):
+def mk_l2_do(act=None,k=1):#,reg=1.):
+  def l2_svd_do(w,x,y,U,V,k,eps=None):
     ret=0.
     for a,b in zip(*w):
       ret-=svd(x,compute_uv=False)[k]
-      x=act(x@a+b)
+
     return ret+jsm(((~y*U)+y*V)*((2*y-1)-x)**2)
-  return l1_svd
+  return l2_svd
+
+def mk_l2_svd_do(act,i=1,reg=1):#,reg=1.):
+  def l2_svd_do(w,x,y,U,V,k,reg=reg,eps=None,p=.4,i=i):
+    ks=split(k,len(w[0])-1)
+    for a,b,ki in zip(w[0][:-1],w[1][:-1],ks):
+      x=act(x@a+b)
+      x*=binomial(ki,1,p,shape=b.shape)
+    yp=act(x@w[0][-1]+w[1][-1])
+    return -reg*svd(x,compute_uv=False)[i]+jsm(((~y*U)+y*V)*((2*y-1)-yp)**2)
+  return l2_svd_do
 
 @jit
 def cross_entropy_rn(w,x,y,U,V,act=tanh,eps=1e-8):
@@ -796,7 +865,7 @@ losses={'loss':mk_l1,'l1':mk_l1,'cross_entropy':mk_cross_entropy,
         #'coalescence_res_cost':dcoalescence_res_cost}
 
 def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,
-                sqrt_normalise=False,orthonormalise=False):
+                sqrt_normalise=False,orthonormalise=False,transpose=False):
   n_steps=len(layer_dimensions)-1
   if initialisation in ['ones','zeros']:
     w_k,b_k=count(),count()
@@ -841,7 +910,10 @@ def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,
   if sqrt_normalise:
     for i,d_i in enumerate(layer_dimensions[1:]):
       A[i]/=d_i**.5
-  return A,B
+  if transpose:
+    return list(zip(A,B))
+  else:
+    return A,B
 
 def sample_x(bs,key):
   return 2*a.x_max*uniform(shape=(bs,2),key=key)-a.x_max
@@ -1322,11 +1394,12 @@ def upd_adam(w,m,v,dw,beta1,beta2,lr,reg,eps):
   return w,m,v
 
 @jit
-def upd_adam_no_bias(w,m,v,dw,beta1,beta2,lr,reg,eps,t):
+def upd_adam_no_bias(w,m,v,t,dw,beta1,beta2,lr,reg,eps):
   m=jma(lambda old,upd:ewma(upd,old,beta1),m,dw)
   v=jma(lambda old,upd:ewma(upd**2,old,beta2),v,dw)
+  t+=1
   w=jma(lambda W,M,V:(1-reg)*(W-lr*ad_diff(M/(1-beta1**t),V/(1-beta2**t),eps)),w,m,v)
-  return w,m,v
+  return w,m,v,t
 
 @jit
 def upd_grad(w,dw,lr,reg):
@@ -1546,9 +1619,9 @@ def epoch_stats(e):
           'w_l2':e.w_l2,'log(pn)':log10(e.pn),
           'lr':e.lr,'reg':e.reg,'bs':e.bs}
 
-def rm_unique_stats(stats):
+def rm_unique_stats(stats,by):
   unique_stats={}
-  for k in stats[0]:
+  for k in [l for l in stats[0] if not(l in by)]:
     st=(s[k] for s in stats)
     if hasattr(stats[0][k],'item'):
       st=(s.item() for s in st)
@@ -1564,17 +1637,17 @@ def gts():
   except:
     return 10000
 
-def show_unique_stats(stats,trunc=True,ess_only=False,by='',ts=SimpleNamespace(get_timestep=lambda x:None),
+def show_unique_stats(stats,trunc=True,ess_only=False,by=[],ts=SimpleNamespace(get_timestep=lambda x:None),
                       prec=3,essential=lambda l:True,term_size=gts(),flatten_pid=True):
   if flatten_pid:
     stats=[{**s['pid'],**{k:v for k,v in s.items() if k!='pid'}} for s in stats]
-  unique_stats=rm_unique_stats(stats) if len(stats)>1 else False
+  unique_stats=rm_unique_stats(stats,by) if len(stats)>1 else False
   ts.get_timestep('rmunique')
   ret=''
   if unique_stats:
     ret='Unique stats:'+'\n'+\
          (', '.join([k+':'+f_to_str(v,prec=prec,lj=False) for k,v in unique_stats.items()]))
-  labs=sorted(list(stats[0]),key=lambda a:a!=by)
+  labs=by+[s for s in list(stats[0]) if not(s in by)]
   ts.get_timestep('sort')
   col_width=max(prec+5,max([len(l) for l in labs]))+1 #.e-bc is 5 chars
   n_stats=len(labs)
@@ -1872,7 +1945,8 @@ def dl_rbd24(data_dir=str(Path.home())+'/data',
   return rbd24_dir
 
 def unsw(csv_train=Path.home()/'data'/'UNSW_NB15_training-set.csv',
-         csv_test=Path.home()/'data'/'UNSW_NB15_testing-set.csv'):
+         csv_test=Path.home()/'data'/'UNSW_NB15_testing-set.csv',
+         rescale='log',numeric_only=False):
   df_train=read_csv(csv_train)
   df_test=read_csv(csv_test)
   print('unsw proto vals:')
@@ -1885,18 +1959,35 @@ def unsw(csv_train=Path.home()/'data'/'UNSW_NB15_training-set.csv',
   print('train:',list(set(df_train.state)))
   print('test:',list(set(df_test.state)))
 
-  x_train=get_dummies(df_train.drop(['label','attack_cat'],axis=1))#.__array__().astype(float)
-  x_test=get_dummies(df_test.drop(['label','attack_cat'],axis=1))#.__array__().astype(float)
+  if numeric_only:
+    x_train=df_train.drop(['label','attack_cat'],axis=1).select_dtypes(include=number)
+    x_test=df_train.drop(['label','attack_cat'],axis=1).select_dtypes(include=number)
+  else:
+    x_train=get_dummies(df_train.drop(['label','attack_cat'],axis=1))#.__array__().astype(float)
+    x_test=get_dummies(df_test.drop(['label','attack_cat'],axis=1))#.__array__().astype(float)
   train_cols=set(x_train.columns)
   test_cols=set(x_test.columns)
   diff_cols=train_cols^test_cols
   common_cols=list(train_cols&test_cols)
   x_test=x_test[common_cols].__array__().astype(float)
   x_train=x_train[common_cols].__array__().astype(float)
+  print('x_train.min(),x_test.min():',x_train.min(),x_test.min())
+  print('x_train.max(),x_test.max():',x_train.max(),x_test.max())
+  print('rescaling x<-log(1+x)')
+  if rescale=='log':
+    x_test=log(1+x_test)
+    x_train=log(1+x_train)
+  elif rescale=='standard':
+    sc=StandardScaler()
+    sc.fit(x_train)
+    x_train=sc.transform(x_train)
+    x_test=sc.transform(x_test)
+  print('New x_train.min(),x_test.min():',x_train.min(),x_test.min())
+  print('New x_train.max(),x_test.max():',x_train.max(),x_test.max())
   print(diff_cols)
   y_test=df_test['label'].__array__().astype(bool)
   y_train=df_train['label'].__array__().astype(bool)
-  return (x_train,y_train),(x_test,y_test),(df_train,df_test)
+  return (x_train,y_train),(x_test,y_test),(df_train,df_test),sc if rescale=='standard' else rescale
 
 def rbd24(preproc=True,split_test_train=True,rescale_log=True,single_dataset=False,
           raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl',categorical=True,
@@ -2121,7 +2212,7 @@ def mk_exp(lr,reg,in_dim,start_dim,end_dim,depth,tfp,tfn,p,beta1,beta2,
   print('Initial beta:',beta)
   return {'state':{'w':init_layers(sh,initialisation,k=k),
                    'm':init_layers(sh,'zeros'),
-                   'v':init_layers(sh,'ones')},
+                   'v':init_layers(sh,'zeros'),'t':0},
           'const':{'beta':beta,'tfpfn':(tfp/tfn)**.5,#'vbeta':0,#**.5,#target_fpfn,
                    'tfp':tfp,'tfn':tfn,'beta1':beta1,'beta2':beta2,
                    'lr':lr,'reg':reg*lr,'eps':1e-8,'p_train':p,
@@ -2138,108 +2229,105 @@ def mk_exps(targ_fpfns,in_dim,initialisation,p,k,tfpfns=[(.1,.01)],lrs=[1e-3],
            beta1 in beta1s for beta2 in beta2s for pid in pids]
   return [mk_exp(*param,l,mk_beta0=mk_beta0) for param,l in zip(params,split(k,len(params)))]
 
-def mk_epochs(imp,n_batches,bs,lo,imp_bench=None,thresh_tol=1e-2,do=True):
+def binsearch_step(r,tfpfn,y,yp_smooth):
+  a,b=r
+  mid=(a+b)/2
+  yp=yp_smooth-mid>0
+  excess_fps=(yp&~y).mean()/(y&~yp).mean()>tfpfn
+  return (a*(~excess_fps)+excess_fps*mid,b*(excess_fps)+(~excess_fps)*mid)
+
+def fp_fn_bin(y,yp):
+  return [(yp&~y).mean(),(y&~yp).mean()]
+
+def find_thresh(y,yp_smooth,tfpfn,thresh_tol):
+  thresh_range=while_loop(lambda r:r[1]-r[0]>thresh_tol,
+                          lambda r:binsearch_step(r,tfpfn,y,yp_smooth),
+                          (yp_smooth.min(),yp_smooth.max()))
+  return (thresh_range[0]+thresh_range[1])/2
+
+def bench_state(s,c,x,y,x_test,y_test,imp_bench,adapthresh_tol,batchnorm_rs_act=None):
+  b={}
+  if batchnorm_rs_act:
+    yp_smooth,w=rescale_weights_zmean_uvar(s['w'],x,batchnorm_rs_act)
+  else:
+    w=s['w']
+    yp_smooth=imp_bench(w,x)
+  b['fp_trn'],b['fn_trn']=fp_fn_bin(yp_smooth>0,y)
+  b['fpfn']=b['fp_trn']/b['fn_trn']
+  if adapthresh_tol:
+    b['dbl']=find_thresh(y,yp_smooth,c['tfpfn'],adapthresh_tol)
+  b['fp_test'],b['fn_test']=fp_fn_bin(imp_bench(w,x_test)>0,y_test)
+  b['fp_tfp']=b['fp_trn']/c['tfp']
+  b['fn_tfn']=b['fn_trn']/c['tfn']
+  return b,w
+
+def bench_states(states,consts,x,y,x_test,y_test,imp_bench,adapthresh_tol,batchnorm_rs_act=None):
+  return tuple(zip(*[bench_state(s,c,x,y,x_test,y_test,imp_bench,adapthresh_tol,batchnorm_rs_act) for\
+                    s,c in zip(states,consts)]))
+
+def norms_state(s,prefix=''):
+  ret={prefix+'al2':l2(s['w'][0])**.5,prefix+'bl2':l2(s['w'][1])**.5}
+  if 'v' in s:
+    ret[prefix+'vl2']=l2(s['v'])**.5
+    ret[prefix+'ml2']=l2(s['m'])**.2
+  return ret
+
+def norms_states(states,rs_ws=None):
+  ret=[norms_state(s) for s in states]
+  return [{**r,**norms_state({'w':s},prefix='rs_')} for r,s in zip(ret,rs_ws)] if rs_ws else ret
+  
+def exp_step(s,c,dlo,x,y,*k):
+  dw=dlo(s['w'],x,y,1/c['beta'],c['beta'],*k)
+  w,m,v,t=upd_adam_no_bias(s['w'],s['m'],s['v'],s['t'],dw,
+                           c['beta1'],c['beta2'],c['lr'],c['reg'],c['eps'])
+  return {'w':w,'m':m,'v':v,'t':t}
+
+exps_step=lambda states,consts,dlo,x,y,*k:[exp_step(*sck[:2],dlo,x,y,*sck[2:])\
+                                           for sck in zip(states,consts,*k)]
+
+def exps_steps(states,consts,dlo,X_b,Y_b,*ks):
+  return scan(lambda states,xyk:(exps_step(states,consts,dlo,*xyk),0),
+              states,(X_b,Y_b)+ks)[0]
+
+def epoch(states,consts,dlo,X,Y,n_batches,bs,k0,*k1):
+  X,Y=shuffle_xy(k0,X,Y)
+  X_b,Y_b=X[:n_batches*bs].reshape(n_batches,bs,-1),Y[:n_batches*bs].reshape(n_batches,bs)
+  return exps_steps(states,consts,dlo,X_b,Y_b,*(split(k,(n_batches,len(states))) for k in k1))
+
+def mk_epochs(imp,n_batches,bs,lo,batchnorm_rs_act=None,imp_bench=None,
+              dropout=False,adapthresh_tol=1e-3):
   if imp_bench is None:
     imp_bench=imp
   dlo=grad(lo)
-  
-  def bin_step(r,tfpfn,y,yp_smooth):
-    a,b=r
-    mid=(a+b)/2
-    yp=yp_smooth>mid
-    excess_fps=(yp&~y).mean()/(y&~yp).mean()>tfpfn
-    return (a*(~excess_fps)+excess_fps*mid,b*(excess_fps)+(~excess_fps)*mid)
-
-  def fp_fn_bin(w,x,y):
-    yp=imp_bench(w,x)>0
-    return [(yp&~y).mean(),(y&~yp).mean()]
-
-  def fp_fn_thresh_bin(w,x,y,tfpfn):
-    yp_smooth=imp_bench(w,x)
-    yp=yp_smooth>0
-    thresh_range=(yp_smooth.min(),yp_smooth.max())
-    thresh_range=while_loop(lambda r:r[1]-r[0]>thresh_tol,
-                            lambda r:bin_step(r,tfpfn,y,yp_smooth),thresh_range)
-    return [(yp&~y).mean(),(y&~yp).mean(),(thresh_range[0]+thresh_range[1])/2]
-
-  fp_fn_bins=lambda ws,x,y:[fp_fn_bin(w,x,y) for w in ws]
-  fp_fn_thresh_bins=lambda ws,x,y,tfpfns:[fp_fn_thresh_bin(w,x,y,tfpfn) for w,tfpfn in zip(ws,tfpfns)]
-  
-  def step(s,c,x,y):
-    dw=dlo(s['w'],x,y,1/c['beta'],c['beta'],eps=1e-8)
-    w,m,v=upd_adam(s['w'],s['m'],s['v'],dw,c['beta1'],c['beta2'],c['lr'],c['reg'],c['eps'])
-    return {'w':w,'m':m,'v':v}
-  
-  def step_do(s,c,x,y,k):
-    dw=dlo(s['w'],x,y,1/c['beta'],c['beta'],eps=1e-8,k=k)
-    w,m,v=upd_adam(s['w'],s['m'],s['v'],dw,c['beta1'],c['beta2'],c['lr'],c['reg'],c['eps'])
-    return {'w':w,'m':m,'v':v}
-
-  exps_step=lambda states,consts,x,y:[step(s,c,x,y) for s,c in zip(states,consts)]
-  exps_step_do=lambda states,consts,x,y,k:[step_do(s,c,x,y,k) for s,c in zip(states,consts)]
-
-  def exps_steps_do(states,consts,X_b,Y_b,ks):
-    return scan(lambda states,xyk:(exps_step_do(states,consts,xyk[0],xyk[1],xyk[2]),0),
-                states,(X_b,Y_b,ks))[0]
-
-  def exps_steps(states,consts,X_b,Y_b):
-    return scan(lambda states,xy:(exps_step(states,consts,xy[0],xy[1]),0),
-                states,(X_b,Y_b))[0]
-
-  def bench_states_do(states,consts,x,y,x_test,y_test):
-    ws=[s['w'] for s in states]
-    tfpfns=[c['tfpfn'] for c in consts]
-    return [{'div':maximum(a[0]/c['tfp'],a[1]/c['tfn']),'fpfn_err':a[0]/c['tfp']-a[1]/c['tfn'],
-             'fp_trn':a[0],'fn_trn':a[1],'fp_tst':b[0],'fn_tst':b[1],'dbl':a[2]}for a,b,c in\
-            zip(fp_fn_thresh_bins(ws,x,y,tfpfns),fp_fn_bins(ws,x_test,y_test),consts)]
-
-  def bench_states(states,consts,x,y,x_test,y_test):
-    ws=[s['w'] for s in states]
-    tfpfns=[c['tfpfn'] for c in consts]
-    return [{'div':maximum(a[0]/c['tfp'],a[1]/c['tfn']),'fpfn_err':a[0]/c['tfp']-a[1]/c['tfn'],
-             'fp_trn':a[0],'fn_trn':a[1],'fp_tst':b[0],'fn_tst':b[1]}for a,b,c in\
-            zip(fp_fn_bins(ws,x,y),fp_fn_bins(ws,x_test,y_test),consts)]
-
-  def epoch_do(states,consts,X,Y,k):
-    k0,k1=split(k)
-    X,Y=shuffle_xy(k0,X,Y)
-    ks=split(k1,n_batches)
-    X_b,Y_b=X[:n_batches*bs].reshape(n_batches,bs,-1),Y[:n_batches*bs].reshape(n_batches,bs)
-    return exps_steps_do(states,consts,X_b,Y_b,ks)
-
-  def epoch(states,consts,X,Y,k):
-    X,Y=shuffle_xy(k,X,Y)
-    X_b,Y_b=X[:n_batches*bs].reshape(n_batches,bs,-1),Y[:n_batches*bs].reshape(n_batches,bs)
-    return exps_steps(states,consts,X_b,Y_b)
-
-  def norms_states(states):
-    return [{'wl2':l2(s['w'])**.5,'vl2':l2(s['v'])**.5,'ml2':l2(s['m'])**.2} for s in states]
-
-  _epoch=epoch_do if do else epoch
-  _bench_states=bench_states_do if do else bench_states
-  upd_dbl=lambda b:b['dbl'] if do else lambda b:0
 
   @jit
   def epochs(states,consts,X_train,Y_train,X_test,Y_test,ks):
     benches_all=[]
     for l in ks:
-      states=_epoch(states,consts,X_train,Y_train,l)
-      benches=_bench_states(states,consts,X_train,Y_train,X_test,Y_test)
+      if dropout:
+        ll=split(l)
+      else:
+        ll=(l,)
+      states=epoch(states,consts,dlo,X_train,Y_train,n_batches,bs,*ll)
+      benches,rs_ws=bench_states(states,consts,X_train,Y_train,X_test,Y_test,imp_bench,
+                                 adapthresh_tol,batchnorm_rs_act=batchnorm_rs_act)
       for s,b,c in  zip(states,benches,consts):
-        s['w'][1][-1]-=upd_dbl(b)
-        miss_fp=b['fp_trn']/c['tfpfn']
-        miss_fn=b['fn_trn']*c['tfpfn']
+        if adapthresh_tol:
+          s['w'][1][-1]-=b['dbl'] 
+        miss_fp=b['fp_trn']*c['tfpfn']**-.5
+        miss_fn=b['fn_trn']*c['tfpfn']**.5
         #fpfn_err=miss_fp-miss_fn
         #fpfn_err=tanh(b['fp_trn']/b['fn_trn']-c['tfpfn'])
-        fpfn_err=tanh(log(miss_fp))-tanh(log(miss_fn))
+        #fpfn_err=log(1+miss_fp)-log(1+miss_fn)
         #fpfn_err/=(miss_fp**2+miss_fn**2)**.5
+        fpfn_err=tanh(b['fp_trn']/c['tfp'])-tanh(b['fn_trn']/c['tfn'])
         pid=c['pid']
         pid['idiv']+=fpfn_err
         pid['ddiv']=fpfn_err-pid['pdiv']
         pid['pdiv']=fpfn_err
         c['beta']*=exp(-(pid['i']*pid['idiv']+pid['p']*fpfn_err+pid['d']*pid['ddiv']))
       benches_all.append(benches)
-    l2_states=norms_states(states)
+    l2_states=norms_states(states,rs_ws)
     return states,l2_states,consts,benches_all
 
-  return epochs
+  return epochs,dlo
