@@ -1,0 +1,132 @@
+#!/usr/bin/env python
+from pickle import dump
+from numpy import geomspace
+from jax.numpy import inf,array,array_split,zeros,sum as jsm,\
+                      exp,zeros,ones,asarray,maximum,minimum,log
+from jax.lax import dot_general,scan
+from jax.random import key,split,normal,binomial
+from jax import jit,value_and_grad,grad,vmap,devices
+from jaxlib.xla_extension import XlaRuntimeError
+from jax.tree import map as jma,reduce as jrd
+from jax.nn import tanh
+from sys import path,stdin
+from os import mkdir,environ,get_terminal_size
+from itertools import count
+from pathlib import Path
+from collections import namedtuple
+from os.path import dirname,abspath
+from sys import path
+path.append(dirname(dirname(abspath(__file__))))
+from cal.thlay import activations,f_to_str,shuffle_xy,init_layers_adam,dict_adam_no_bias,\
+                      rbd24,mk_cross_entropy,implementation,TimeStepper,KeyEmitter,l2,mk_l1,\
+                      mk_l2,dict_grad,mk_hinge,unsw
+
+act_name='relu'#'tanh'
+act=activations[act_name]
+init='glorot_normal' if act_name=='relu' else 'glorot_uniform'
+ts=TimeStepper(clock_avg_rate=.1)
+ke=KeyEmitter(1729)
+act=activations[act_name]
+bs=128
+sds='P2P_smartphone' #sds=''
+
+(X_trn,Y_trn),(X_tst,Y_tst),_,sc=unsw(numeric_only=True,rescale='standard',verbose=False)
+#(X_trn,Y_trn),(X_tst,Y_tst),(_,X_columns)=rbd24(rescale_log=True,preproc=True,
+#                                                      categorical=True,single_dataset=sds)
+
+
+n_batches=len(Y_trn)//bs
+last=n_batches*bs#-(len(Y_trn)%bs)
+last=n_batches*bs
+p_trn=Y_trn.mean()
+p_tst=Y_tst.mean()
+in_dim=len(X_trn[0])
+t=0
+
+def _forward(w,x):
+  for a,b in w:
+    x=act(x@a+b)
+  return x
+
+def _loss(w,x,y,bet):
+  yp=_forward(w,x)
+  return -jsm((bet*y+(1-y)/bet)*log(1+1e-4+(2*y-1)*yp))
+  #return jsm((bet*y+(1-y)/bet)*(1-2*y)*yp)
+
+_dl=grad(_loss)
+
+n_par=16
+consts_adam=dict(beta1=array([.9]*n_par),beta2=array([.999]*n_par),lr=array([.0001]*n_par),
+                 reg=array([.00001]*n_par),eps=array([1e-8]*n_par))
+consts_bet=dict(lrfpfn=geomspace(.001,.1,n_par),tfp=array([.1]*n_par),tfn=array([.1]*n_par))
+bets=array([1.]*n_par)
+def _upd(x,y,s,ca,b):
+  return dict_adam_no_bias(_dl(s['w'],x,y,b),s,ca)
+  #return dict_grad(_dl(s['w'],x,y,bet),s,c)
+
+def _set_bet(bet,cb,pred):
+  return bet*(1-cb['lrfpfn']*(pred['fp_trn']/cb['tfp']-pred['fn_trn']/cb['tfn']))
+
+forward=vmap(_forward,(0,None),0)
+loss=vmap(_loss,(0,None,None,0),0)
+dl=vmap(_dl,(0,None,None,0),0)
+upd=vmap(_upd,(None,None,0,0,0),0)
+set_bet=vmap(_set_bet,(0,0,0),0)
+
+tfp=.1
+tfn=.1
+
+@jit
+def steps(states0,consts_adam,X,Y,bets):
+  return scan(lambda states,xy:(upd(xy[0],xy[1],states,consts_adam,bets),0),states0,(X,Y))[0]
+
+@jit
+def get_reshuffled(k):
+  X,Y=shuffle_xy(k,X_trn,Y_trn)
+  return X[:last].reshape(n_batches,bs,-1),Y[:last].reshape(n_batches,bs)
+
+
+#@jit
+def _get_preds(w,X_trn,Y_trn,X_tst,Y_tst):
+  Yp_smooth_trn=_forward(w,X_trn).flatten()
+  Yp_smooth_tst=_forward(w,X_tst).flatten()
+  Yp_trn=Yp_smooth_trn>0.
+  Yp_tst=Yp_smooth_tst>0.
+  return {'fp_trn':((~Y_trn)&(Yp_trn)).mean(),'fn_trn':((Y_trn)&(~Yp_trn)).mean(),
+          'fp_tst':((~Y_tst)&(Yp_tst)).mean(),'fn_tst':((Y_tst)&(~Yp_tst)).mean(),
+          'max':Yp_smooth_trn.max(),'min':Yp_smooth_trn.min(),'var':Yp_smooth_trn.var()}
+
+@jit
+def _get_state(s):
+  return dict(wl2=l2(s['w']),ml2=l2(s['m']),vl2=l2(s['v']),t=s['t'])
+
+get_preds=vmap(_get_preds,(0,None,None,None,None),0)
+get_state=vmap(_get_state)
+mod_shape=[in_dim,128,64,32,1]#[in_dim,1]
+states=init_layers_adam(mod_shape,init,k=ke.emit_key(),transpose=True,n=n_par,bias=.1)
+
+
+
+ts.get_timestep()
+for epoch in count(1):
+  X,Y=get_reshuffled(ke.emit_key())
+  ts.get_timestep('shuffle')
+  states=steps(states,consts_adam,X,Y,bets)
+  ts.get_timestep('epoch')
+  preds=get_preds(states['w'],X_trn,Y_trn,X_tst,Y_tst)
+  ts.get_timestep('pred')
+  bets=set_bet(bets,consts_bet,preds)
+  ts.get_timestep('upd_bet')
+  if not epoch%10:
+    print('============','epoch',epoch,'============')
+    #f_to_str(['l_last']+list(loss(states['w'],X[0],Y[0],consts_bet['bet'])),p=True)
+    f_to_str(['lrfpfn']+list(consts_bet['lrfpfn']),p=True)
+    f_to_str(['bet']+list(bets),p=True)
+    l2stats=get_state(states)
+    ts.get_timestep('l2s')
+    [f_to_str([v]+list(l2stats[v]),p=True) for\
+     v in sorted(list(l2stats),key=lambda s:s[-2:]=='l2' and s[0]!='w')]
+    [f_to_str([pr]+list(preds[pr]),p=True) for\
+     pr in sorted(list(preds),key=lambda s:s[-3:]=='trn')]
+    ts.get_timestep('report')
+    ts.report(p=True)

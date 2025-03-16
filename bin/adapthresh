@@ -20,10 +20,9 @@ path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import activations,f_to_str,shuffle_xy,init_layers,upd_adam,show_unique_stats,\
                       mk_epochs,mk_exps,rbd24,report_epochs,plot_epochs,update_epoch_history,\
                       ewma,mk_cross_entropy,implementation,TimeStepper,KeyEmitter,l2,mk_l1,\
-                      mk_l2,upd_grad,gts,mk_hinge,unsw,mk_l2_svd_do,mk_cross_entropy,norms_states,\
-                      rescale_weights_zmean_uvar
+                      mk_l2,upd_grad,gts,mk_hinge,unsw,mk_l2_svd_do,mk_cross_entropy,norms_states
 
-act_name='tanh'#'relu'
+act_name='relu'#'tanh'
 initialisation='glorot_normal' if act_name=='relu' else 'glorot_uniform'
 ts=TimeStepper(clock_avg_rate=.1)
 ke=KeyEmitter(1729)
@@ -44,62 +43,41 @@ target_fpfns=[(.05,.025)]
 targ_fpfns=[a/b for a,b in target_fpfns]
 start_dims=[64]#[32]#[128]#[256]#[64]#[512]#[128]
 end_dims=[32]#[16]#[64]#[128]#[256]#[16]
-lrs=[1e-2,1e-3,1e-4]#[1e-6,1e-7]#,1e-4,1e-5]#,1e-5]#[1e-3]#[1e-3,1e-4,1e-5,1e-6]#[1e-6]#[1e-5,1e-6]#,1e-5]
-regs=[1e-1,1e-2]#[1,.1]#,1e-3]#,1e-4]#[1e-1,1e-2]#,1e-3]##,1e-2]
+lrs=[1e-3,1e-4,1e-5,1e-6]#1e-3,1e-4,1e-5]#[1e-6,1e-7]#,1e-4,1e-5]#,1e-5]#[1e-3]
+batchnorm=True
+regs=[0] if batchnorm else [.1,.01]#0]#[1e-2,1e-3,0]#[1,.1]#,1e-3]#,1e-4]#[1e-1,1e-2]#,1e-3]##,1e-2]
 depths=[2]#[8]#[4,3,2]
 beta2s=[.999]
-#ps=[.01]#,.1]#,.1] #mi=0.#1.#2.  #md=0.#1/3
-#pids=[{'p':a,'i':a*mi,'d':a*md} for a in ps for mi,md in [(0,0),(2,1/3),(1,1/3)]]
-pids=[{'p':0,'i':0,'d':0},{'p':.001,'i':0,'d':0},{'p':.01,'i':0,'d':0},
-      {'p':.1,'i':0,'d':0},{'p':.2,'i':0,'d':0}]
-#pids=[{'p':a,'i':0,'d':a/3} for a in ps] #"No overshoot" params
-#mk_beta=lambda a,b,c:1
+#lrps=[{'p':.1,'i':0,'d':0},{'p':.5,'i':0,'d':0},{'p':.1,'i':0,'d':0},{'p':.01,'i':0,'d':0}]
+lrps=[.1,.01,.001]
 exps=mk_exps(targ_fpfns,in_dim,initialisation,p_train,ke.emit_key(),
-             tfpfns=target_fpfns,pids=pids,beta2s=beta2s,lrs=lrs,regs=regs,
+             tfpfns=target_fpfns,lrps=lrps,beta2s=beta2s,lrs=lrs,regs=regs,
              start_dims=start_dims,end_dims=end_dims,depths=depths)#,mk_beta=mk_beta)
 states=[e['state'] for e in exps]
 consts=[e['const'] for e in exps]
 shapes=[e['shape'] for e in exps]
-print(l2(states[0]['w']))
 print('n experiments:',len(exps))
-#loss=mk_cross_entropy_hinge(imp,reg=False) #loss=mk_hinge(imp) #loss=mk_cross_entropy(imp,reg=False)
-#loss=mk_l2_svd(act=act,k=1)#,reg=False) #loss=mk_l2(imp=imp,reg=False)#,reg=False)
-#imp_do=implementation('mlp_do',act)
-imp_bn=implementation('mlp_batchnorm',act)
-imp_bench=implementation('mlp_no_ll_act',act)
-loss=mk_cross_entropy(imp=imp_bn,reg=False,eps=1e-4)
-#loss=mk_l2_svd_do(act)
-#loss=mk_cross_entropy(imp_bn,eps=1e-4)
 print('batch size:',bs)
 print('batches per epoch:',n_batches)
-epochs,dlo=mk_epochs(imp_bn,n_batches,bs,loss,batchnorm_rs_act=act,imp_bench=imp_bench)
-print(l2(dlo(states[0]['w'],X_train[:128],Y_train[:128],1,1)))
+imp=implementation('mlp_batchnorm',act) if batchnorm else implementation('mlp_no_ll_act',act)
+
+loss=mk_cross_entropy(lambda w,x:imp(w,x,ll_act=True),eps=1e-4)
+epochs,dlo=mk_epochs(imp,n_batches,bs,loss,X_train,Y_train,X_test,Y_test,
+                     batchnorm=batchnorm,adapthresh_tol=False)
 term_size=gts()
 epochs_per_eval=1#5
 all_benches=[]
-print('Hi')
 ns=norms_states(states,[s['w'] for s in states])
-#print('Rescaling...')
-#for v in geomspace(.001,1000,10):
-#  wns=[rescale_weights_zmean_uvar(s['w'],X_train,act,variance=v)[1] for s in states]
-#  ns=norms_states(states,wns)
-#  print('v:',v)
-#  f_to_str(list(ns[0]),p=True)
-#  [f_to_str(list(n.values()),p=True) for n in ns]
-#print()
-#for s,w in zip(states,wns):
-#  s['w']=w
-#print('Hi')
 for step in count():
   ts.get_timestep('start')
-  states,l2_states,consts,recent_benches=epochs(states,consts,X_train,Y_train,X_test,Y_test,
-                                                ke.emit_key(epochs_per_eval))
+  states,l2_states,consts,recent_benches=epochs(states,consts,ke.emit_key(),epochs_per_eval)
   all_benches+=recent_benches
   print('Epoch',(1+step)*epochs_per_eval)
 
   print(show_unique_stats([{**s,**b,**c,'p_test':p_test,'shape':sh} for s,c,b,sh in\
                            zip(l2_states,consts,all_benches[-1],
                                ['->'.join([str(s) for s in sh]) for sh in shapes])],
-                           trunc=True,by=['fpfn','fp_trn','fn_trn'],prec=4,term_size=term_size,ts=ts),
+                          trunc=True,by=['fpfn','fp_trn','fn_trn','lr'],
+                          prec=4,term_size=term_size,ts=ts,flatten_pid=False),
           flush=True)
   ts.get_timestep('rep_states')

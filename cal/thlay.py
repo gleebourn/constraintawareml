@@ -220,11 +220,6 @@ def f_dropout_no_ll_act(w,x,act,k,p=.4):
     x=act(x@a+b)
   return x
 
-def f_no_ll_act(w,x,act):
-  for a,b in zip(w[0][:-1],w[1][:-1]):
-    x=act(x@a+b)
-  return x@w[0][-1]+w[1][-1]
-
 def f_dropout(w,x,act,k,p=.4):
   ks=split(k,len(w[0]))
   for a,b,ki in zip(*w,ks):
@@ -239,59 +234,56 @@ def f_dropout(w,x,act,k,p=.4):
 #  x=act(x@w[0][-1]+w[1][-1])
 #  return x
 
-def rescale_weights_zmean_uvar(w,x,act,get_transform=True):
+#def rescale_weights_zmean_uvar(w,x,act,get_transform=True):
+#  if get_transform:
+#    Ta=[]
+#    Tb=[]
+#  for a,b in zip(w[0][:-1],w[1][:-1]):
+#    x=act(x@a+b)
+#    ta=(1e-4+x.var(axis=0))**-.5
+#    tb=x.mean(axis=0)*ta
+#    if get_transform:
+#      Ta.append(ta)
+#      Tb.append(tb)
+#    x=x*ta-tb
+#  y=x@w[0][-1]+w[1][-1]
+#  if get_transform:
+#    return y,(w[0][:1]+[a*(ta.reshape(-1,1)) for a,ta in zip(w[0][1:],Ta)],
+#              w[1][:1]+[b-Tb@a for a,b,Tb in zip(w[0][1:],w[1][1:],Tb)])
+#  return y
+
+def f_batchnorm(w,x,act,batchnorm=True,get_transform=False,ll_act=False):
   if get_transform:
-    Ta=[]
-    Tb=[]
+    A=[]
+    B=[]
   for a,b in zip(w[0][:-1],w[1][:-1]):
     x=act(x@a+b)
     ta=(1e-4+x.var(axis=0))**-.5
     tb=x.mean(axis=0)*ta
+    print(x.shape,ta.shape,tb.shape)
     if get_transform:
-      Ta.append(ta)
-      Tb.append(tb)
-    x=x*ta-tb
+      A.append(a*ta)
+      B.append(b-tb)
+    if batchnorm:
+      x=x*ta-tb
+    #x=act(x)
   y=x@w[0][-1]+w[1][-1]
+  if ll_act:
+    y=act(y)
   if get_transform:
-    return y,(w[0][:1]+[a*(ta.reshape(-1,1)) for a,ta in zip(w[0][1:],Ta)],
-              w[1][:1]+[b-Tb@a for a,b,Tb in zip(w[0][1:],w[1][1:],Tb)])
+    return y,(A+w[0][-1:],B+w[1][-1:])
   return y
-
-f_batchnorm=lambda w,x,act:rescale_weights_zmean_uvar(w,x,act,get_transform=False)
-
-#def rescale_weights_zmean_uvar(w,x,act,variance=1):#,inference_only=False):
-#  A,B=[],[]
-#  input_inv_sqrt_var=1.
-#  y=x@w[0][0]+w[1][0]
-#  for a,b in zip(w[0][:-1],w[1][:-1]):
-#    a*=input_inv_sqrt_var
-#    x=x@a+b
-#    b-=x.mean(axis=0)
-#    x=act(x)
-#    input_inv_sqrt_var=(1e-4+x.var(axis=0)/variance)**-.5
-#    A.append(a)
-#    B.append(b)
-#  y=x@a+b
-#  return y,(A+w[0][-1:],B+w[1][-1:])# if inference_only else y,(A,B)
-
-#def rescale_weights_zmean_uvar(w,x,act,variance=1,inference_only=False):
-#  a,b=w[0][0],w[1][0]
-#  A,B=[a],[b]
-#  Y=act(x@w[0][0]+w[1][0])
-#  for a,b in zip(w[0][1:],w[1][1:]):
-#    input_inv_sqrt_var=(1e-4+Y.var(axis=0)/variance)**-.5
-#    input_mean=Y.mean(axis=0)
-#    a*=input_inv_sqrt_var.reshape(-1,1)
-#    b-=input_mean@a
-#    A.append(a)
-#    B.append(b)
-#    Y=act(Y@a+b)
-#  return Y if inference_only else Y,(A,B)
 
 def f(w,x,act):
   for a,b in zip(*w):
     x=act(x@a+b)
   return x
+
+def f_no_ll_act(w,x,act,ll_act=False):
+  for a,b in zip(w[0][:-1],w[1][:-1]):
+    x=act(x@a+b)
+  x=x@w[0][-1]+w[1][-1]
+  return act(x) if ll_act else x
 
 def pad_or_trunc(x,n):
   return x[:n] if len(x)>=n else pad(x,n-len(x))
@@ -309,11 +301,11 @@ def resnet(w,x,act=tanh,first_layer_no_skip=True):
 activations={'tanh':tanh,'softmax':softmax,'linear':jit(lambda x:x),
              'relu':jit(lambda x:minimum(1,maximum(-1,x)))}
 implementations={'mlp':f,'mlp_do':f_dropout,'mlp_no_ll_act':f_no_ll_act,
-                 'mlp_do_no_ll_act':f_dropout_no_ll_act,'mlp_batchnorm':f_batchnorm,
+                 'mlp_no_ll_act':f_no_ll_act,'mlp_batchnorm':f_batchnorm,
                  'resnet':resnet,'linear':lambda w,x,_:x@w[0]+w[1]}
 
 def implementation(imp,act=None):
-  return jit(lambda w,x,**kwa:implementations[imp](w,x,act,**kwa))
+  return lambda w,x,**kwa:implementations[imp](w,x,act,**kwa)
 
 def select_initialisation(imp,act):
   if imp in ['fm','resnet']:
@@ -537,12 +529,12 @@ def init_ensemble(script=None):
 def f_to_str(X,lj=None,prec=2,p=False):
   if lj is None:
     lj=prec+6
-  try:
-    if isinstance(float(X),float):
-      #X=f'{X:.3g}'
+  if not(isinstance(X,str)):
+    try:
+      X=float(X)
       X='{0:.{1}g}'.format(X,prec)
-  except:
-    pass
+    except:
+      pass
   if isinstance(X,str):
     if lj:
       X=X.ljust(lj)
@@ -741,10 +733,11 @@ def l2(w):
 
 dl2=jit(value_and_grad(l2))
 
-def mk_hinge(imp,eps=1e-5):
-  def hinge(w,x,y,U,V,eps=eps):
+def mk_hinge(imp,eps=0.):
+  def hinge(w,x,y,U,V):
     y_smooth=imp(w,x)
-    y_diffs=maximum(0,y_smooth*(1-2*y))
+    l=y_smooth*(1-2*y)
+    y_diffs=maximum(eps*l,l)
     return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
   return hinge
 
@@ -752,7 +745,7 @@ def mk_l1(imp=f,reg=False):
   def l1(w,x,y,U,V,eps=None,**kwa):
     y_smooth=imp(w,x,**kwa)
     y_diffs=1-y_smooth*(2*y-1)
-    return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
+    return jsm((U*(~y)+V*y)*y_diffs) #U*cts_fp+V*cts_fn
   if reg:
     def ret(w,x,y,U,V,eps=None,reg=1e-2):
       return l1(w,x,y,U,V,eps=None)+reg*l2(w)
@@ -796,18 +789,18 @@ def mk_soft_cross_entropy(act=tanh,imp=f,reg=True):
       return soft_cross_entropy(w,x,y,U,V,eps)+reg*l2(w)
   else:
     ret=soft_cross_entropy
-  return jit(ret)
+  return ret
 
 def mk_cross_entropy(imp=f,reg=False,eps=1e-8):
   def cross_entropy(w,x,y,U,V,eps=eps,**kwa):
-    y_smooth=imp(w,x,**kwa)#,act=act)
+    y_smooth=imp(w,x,**kwa)
     return -jsm(((~y)*U+y*V)*log(eps+1+y_smooth*(2*y-1)))
   if reg:
-    def ret(w,x,y,U,V,eps=1e-8,reg=1.):
+    def ret(w,x,y,U,V,eps=1e-8,reg=reg):
       return cross_entropy(w,x,y,U,V,eps)+reg*l2(w)
   else:
     ret=cross_entropy
-  return jit(ret)
+  return ret
 
 def mk_l2_do(act=None,k=1):#,reg=1.):
   def l2_svd_do(w,x,y,U,V,k,eps=None):
@@ -864,7 +857,7 @@ losses={'loss':mk_l1,'l1':mk_l1,'cross_entropy':mk_cross_entropy,
         #'coalescence_cost':dcoalescence_cost,'cross_entropy_rn':dcross_entropy_rn,
         #'coalescence_res_cost':dcoalescence_res_cost}
 
-def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,
+def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n=None,bias=0.,
                 sqrt_normalise=False,orthonormalise=False,transpose=False):
   n_steps=len(layer_dimensions)-1
   if initialisation in ['ones','zeros']:
@@ -876,44 +869,58 @@ def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,
   wb=[]
   A=[]
   B=[]
+  if n is None:
+    e_dims=tuple()
+  else:
+    e_dims=(n,)
   for i,(k,l,d_i,d_o) in enumerate(zip(w_k,b_k,layer_dimensions,layer_dimensions[1:])):
     match initialisation:
       case 'zeros':
-        A.append(zeros((d_i,d_o)))
-        B.append(zeros(d_o))
+        A.append(zeros(e_dims+(d_i,d_o)))
+        B.append(zeros(e_dims+(d_o,))+bias)
       case 'resnet'|'ones':
-        A.append(ones((d_i,d_o))*mult_a)
-        B.append(zeros(d_o))
+        A.append(ones(e_dims+(d_i,d_o))*mult_a)
+        B.append(zeros(e_dims+(d_o,))+bias)
         initialisation='zeros' if initialisation=='resnet' else 'ones'
       case 'eye':
-        A.append(eye(d_i,d_o))*mult_a
-        B.append(zeros(d_o))
+        if n>1: raise Exception('Not yet done this')
+        A.append(eye(d_i,d_o)*mult_a)
+        B.append(zeros(d_o)+bias)
       case 'glorot_uniform':
-        A.append((2*(6/(d_i+d_o))**.5)*(uniform(shape=(d_i,d_o),key=k)-.5)*mult_a)
-        B.append(zeros(d_o))
+        A.append((2*(6/(d_i+d_o))**.5)*(uniform(shape=e_dims+(d_i,d_o),key=k)-.5)*mult_a)
+        B.append(zeros(e_dims+(d_o,))+bias)
       case 'glorot_normal':
-        A.append(((2/(d_i+d_o))**.5)*(normal(shape=(d_i,d_o),key=k))*mult_a)
-        B.append(zeros(d_o))
+        A.append(((2/(d_i+d_o))**.5)*normal(shape=e_dims+(d_i,d_o),key=k)*mult_a)
+        B.append(zeros(e_dims+(d_o,))+bias)
       case 'casewise_linear':
-        A=ones((d_i,d_i))
+        A=ones(e_dims+(d_i,d_i))
         #A=zeros((d_i,d_i))
-        B=zeros(shape=d_i)
+        B=zeros(shape=(e_dims+(d_i,))+bias)
         return A,B
       case _:
         raise Exception('Unknown initialisation: '+initialisation)
   if orthonormalise:
     for i,(d_i,d_o) in enumerate(layer_dimensions,layer_dimensions[1:]):
+      if n>1: raise Exception('Not yet done this')
       if d_i>d_o:
         A[i]=svd(A[i],full_matrices=False)[0]
       else:
         A[i]=svd(A[i],full_matrices=False)[2]
   if sqrt_normalise:
+    if n>1: raise Exception('Not yet done this')
     for i,d_i in enumerate(layer_dimensions[1:]):
       A[i]/=d_i**.5
   if transpose:
     return list(zip(A,B))
   else:
     return A,B
+
+def init_layers_adam(*a,**kwa):
+  w=init_layers(*a,**kwa)
+  kwa['bias']=0.
+  return {'w':w,'m':init_layers(a[0],'zeros',**kwa),
+          'v':init_layers(a[0],'zeros',**kwa),'t':zeros(kwa['n']) if 'n' in kwa else 0}
+
 
 def sample_x(bs,key):
   return 2*a.x_max*uniform(shape=(bs,2),key=key)-a.x_max
@@ -1393,24 +1400,27 @@ def upd_adam(w,m,v,dw,beta1,beta2,lr,reg,eps):
   w=jma(lambda W,M,V:(1-reg)*(W-lr*ad_diff(M,V,eps)),w,m,v)
   return w,m,v
 
-@jit
-def upd_adam_no_bias(w,m,v,t,dw,beta1,beta2,lr,reg,eps):
+def _upd_adam_no_bias(dw,w,m,v,t,beta1,beta2,lr,reg,eps):
   m=jma(lambda old,upd:ewma(upd,old,beta1),m,dw)
   v=jma(lambda old,upd:ewma(upd**2,old,beta2),v,dw)
   t+=1
   w=jma(lambda W,M,V:(1-reg)*(W-lr*ad_diff(M/(1-beta1**t),V/(1-beta2**t),eps)),w,m,v)
-  return w,m,v,t
+  return (w,m,v,t)
+#upd_adam_no_bias=jit(_upd_adam_no_bias,static_argnames='ret_dict')
+upd_adam_no_bias=_upd_adam_no_bias
+
+def dict_adam_no_bias(dw,s,c):
+  w,m,v,t=upd_adam_no_bias(dw,**s,**c)
+  return dict(w=w,m=m,v=v,t=t)
 
 @jit
 def upd_grad(w,dw,lr,reg):
   w=jma(lambda W,D:(1-reg)*(W-lr*D),w,dw)
   return w
-  #w=([a-lr*da for a,da in zip(w[0],upd[0])],
-  #   [b-lr*db for b,db in zip(w[1],upd[1])])
-  #dw_lw=(lr**2)*sum([jsm(da**2)+jsm(db**2) for da,db in zip(*upd)])
-  #w_l2=sum([jsm(a**2)+jsm(b**2) for a,b in zip(*w)])
 
-  #return w,w_l2,dw_l2
+def dict_grad(dw,s,c):
+  s['w']=upd_grad(s['w'],dw,c['lr'],c['reg'])
+  return s
 
 #@jit
 def update_weights(a,e,upd):#,start=None,end=None):
@@ -1946,48 +1956,65 @@ def dl_rbd24(data_dir=str(Path.home())+'/data',
 
 def unsw(csv_train=Path.home()/'data'/'UNSW_NB15_training-set.csv',
          csv_test=Path.home()/'data'/'UNSW_NB15_testing-set.csv',
-         rescale='log',numeric_only=False):
-  df_train=read_csv(csv_train)
-  df_test=read_csv(csv_test)
-  print('unsw proto vals:')
-  print('train:',list(set(df_train.proto)))
-  print('test:',list(set(df_test.proto)))
-  print('unsw service vals:')
-  print('train:',list(set(df_train.service)))
-  print('test:',list(set(df_test.service)))
-  print('unsw state vals:')
-  print('train:',list(set(df_train.state)))
-  print('test:',list(set(df_test.state)))
-
+         rescale='log',numeric_only=False,verbose=True):
+  df_train0=read_csv(csv_train)
+  df_test0=read_csv(csv_test)
+  df_train=df_train0.drop(['id','attack_cat'],axis=1)
+  df_test=df_test0.drop(['id','attack_cat'],axis=1)
+  y_train=df_train['label'].__array__().astype(bool)
+  y_test=df_test['label'].__array__().astype(bool)
   if numeric_only:
-    x_train=df_train.drop(['label','attack_cat'],axis=1).select_dtypes(include=number)
-    x_test=df_train.drop(['label','attack_cat'],axis=1).select_dtypes(include=number)
+    df_train=df_train.select_dtypes(include=number)
+    df_test=df_test.select_dtypes(include=number)
   else:
-    x_train=get_dummies(df_train.drop(['label','attack_cat'],axis=1))#.__array__().astype(float)
-    x_test=get_dummies(df_test.drop(['label','attack_cat'],axis=1))#.__array__().astype(float)
+    df_train=get_dummies(df_train)#.__array__().astype(float)
+    df_test=get_dummies(df_test)#.__array__().astype(float)
+
+  x_train=df_train.drop(['label'],axis=1)
+  x_test=df_test.drop(['label'],axis=1)
   train_cols=set(x_train.columns)
   test_cols=set(x_test.columns)
   diff_cols=train_cols^test_cols
   common_cols=list(train_cols&test_cols)
   x_test=x_test[common_cols].__array__().astype(float)
   x_train=x_train[common_cols].__array__().astype(float)
-  print('x_train.min(),x_test.min():',x_train.min(),x_test.min())
-  print('x_train.max(),x_test.max():',x_train.max(),x_test.max())
-  print('rescaling x<-log(1+x)')
+  if verbose:
+    print('x_train.min(),x_test.min():',x_train.min(),x_test.min())
+    print('x_train.max(),x_test.max():',x_train.max(),x_test.max())
   if rescale=='log':
+    if verbose:print('rescaling x<-log(1+x)')
     x_test=log(1+x_test)
     x_train=log(1+x_train)
   elif rescale=='standard':
+    if verbose:print('rescaling x<(x-E(x))/V(x)**.5')
     sc=StandardScaler()
     sc.fit(x_train)
-    x_train=sc.transform(x_train)
     x_test=sc.transform(x_test)
-  print('New x_train.min(),x_test.min():',x_train.min(),x_test.min())
-  print('New x_train.max(),x_test.max():',x_train.max(),x_test.max())
-  print(diff_cols)
+    x_train=sc.transform(x_train)
+  if verbose:
+    print('New x_train.min(),x_test.min():',x_train.min(),x_test.min())
+    print('New x_train.max(),x_test.max():',x_train.max(),x_test.max())
+    print('Differing columns:',f_to_str(list(diff_cols)))
   y_test=df_test['label'].__array__().astype(bool)
   y_train=df_train['label'].__array__().astype(bool)
-  return (x_train,y_train),(x_test,y_test),(df_train,df_test),sc if rescale=='standard' else rescale
+  if verbose:
+    print('Common cols:',*common_cols)
+    print('x vals of ds[0]:')
+    print(*df_train0.iloc[0][common_cols])
+    print('label of ds[0]:')
+    print(df_train0.iloc[0]['label'])
+    print('first row of xy:')
+    print(*x_train[0])
+    print(y_train[0])
+    print('x vals of ds[-1]:')
+    print(*df_train0.iloc[-1][common_cols])
+    print('label of ds[-1]:')
+    print(df_train0.iloc[-1]['label'])
+    print('last row of xy:')
+    print(*x_train[-1])
+    print(y_train[-1])
+    print()
+  return (x_train,y_train),(x_test,y_test),(df_train0,df_test0),sc if rescale=='standard' else rescale
 
 def rbd24(preproc=True,split_test_train=True,rescale_log=True,single_dataset=False,
           raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl',categorical=True,
@@ -2205,64 +2232,71 @@ def min_dist(X,Y=None):
     return m,x,y
 
 def mk_exp(lr,reg,in_dim,start_dim,end_dim,depth,tfp,tfn,p,beta1,beta2,
-           initialisation,pid,k,mk_beta0):#=lambda p,tfp,tfn:p**-.5):
+           initialisation,lrp,k,mk_beta0):#=lambda p,tfp,tfn:p**-.5):
   sh=[in_dim]+list(geomspace(start_dim,end_dim,depth+1,dtype=int))+[1]
   #Large beta: suppress fn more, small beta:suppress fp more.
   beta=mk_beta0(p,tfp,tfn)#1+(tfp-tfn)/p#(p+tfp)/(p+tfn) #Note typo in work of Rijsbergen
   print('Initial beta:',beta)
-  return {'state':{'w':init_layers(sh,initialisation,k=k),
-                   'm':init_layers(sh,'zeros'),
-                   'v':init_layers(sh,'zeros'),'t':0},
-          'const':{'beta':beta,'tfpfn':(tfp/tfn)**.5,#'vbeta':0,#**.5,#target_fpfn,
-                   'tfp':tfp,'tfn':tfn,'beta1':beta1,'beta2':beta2,
-                   'lr':lr,'reg':reg*lr,'eps':1e-8,'p_train':p,
-                   'pid':{**pid,'pdiv':0,'idiv':0,'ddiv':0}},
-          'shape':sh}
+  ret={'state':{'w':init_layers(sh,initialisation,k=k),
+                'm':init_layers(sh,'zeros'),
+                'v':init_layers(sh,'zeros'),'t':0},
+       'const':{'beta':beta,'tfpfn':(tfp/tfn)**.5,#'vbeta':0,#**.5,#target_fpfn,
+                'tfp':tfp,'tfn':tfn,'beta1':beta1,'beta2':beta2,
+                'lr':lr,'reg':reg*lr,'eps':1e-8,'p_train':p},
+       'shape':sh}
+  if isinstance(lrp,dict):
+    ret['const']['pid']={**lrp,'pdiv':0,'idiv':0,'ddiv':0}
+  else:
+    ret['const']['lrp']=lrp
+  return ret
 
 def mk_exps(targ_fpfns,in_dim,initialisation,p,k,tfpfns=[(.1,.01)],lrs=[1e-3],
             regs=[.1],start_dims=[128],end_dims=[8],depths=[2],mk_beta0=lambda p,tfp,tfn:(tfp/tfn),#**2,
-            beta1s=[.9],beta2s=[.999],pids=[{'i':0.,'p':.01,'d':0.}]):
+            beta1s=[.9],beta2s=[.999],lrps=[{'i':0.,'p':.01,'d':0.}]):
   params=[(lr,reg,in_dim,start_dim,end_dim,depth,
-           tfp,tfn,p,beta1,beta2,initialisation,pid) for\
+           tfp,tfn,p,beta1,beta2,initialisation,lrp) for\
            lr in lrs for reg in regs for start_dim in start_dims for\
            end_dim in end_dims for depth in depths for tfp,tfn in tfpfns for\
-           beta1 in beta1s for beta2 in beta2s for pid in pids]
+           beta1 in beta1s for beta2 in beta2s for lrp in lrps]
   return [mk_exp(*param,l,mk_beta0=mk_beta0) for param,l in zip(params,split(k,len(params)))]
 
 def binsearch_step(r,tfpfn,y,yp_smooth):
   a,b=r
   mid=(a+b)/2
   yp=yp_smooth-mid>0
-  excess_fps=(yp&~y).mean()/(y&~yp).mean()>tfpfn
+  excess_fps=((yp&~y).mean()/(y&~yp).mean())>tfpfn
   return (a*(~excess_fps)+excess_fps*mid,b*(excess_fps)+(~excess_fps)*mid)
 
 def fp_fn_bin(y,yp):
   return [(yp&~y).mean(),(y&~yp).mean()]
 
-def find_thresh(y,yp_smooth,tfpfn,thresh_tol):
-  thresh_range=while_loop(lambda r:r[1]-r[0]>thresh_tol,
+def find_thresh(y,yp_smooth,tfpfn,adapthresh_tol):
+  thresh_range=while_loop(lambda r:r[1]-r[0]>adapthresh_tol,
                           lambda r:binsearch_step(r,tfpfn,y,yp_smooth),
                           (yp_smooth.min(),yp_smooth.max()))
   return (thresh_range[0]+thresh_range[1])/2
 
-def bench_state(s,c,x,y,x_test,y_test,imp_bench,adapthresh_tol,batchnorm_rs_act=None):
+def bench_state(s,c,x,y,x_test,y_test,imp,adapthresh_tol,batchnorm):
   b={}
-  if batchnorm_rs_act:
-    yp_smooth,w=rescale_weights_zmean_uvar(s['w'],x,batchnorm_rs_act)
+  if batchnorm:
+    yp_smooth,w=imp(s['w'],x,batchnorm=True,get_transform=True)
+    test_kwa={'batchnorm':False,'get_transform':False}
   else:
     w=s['w']
-    yp_smooth=imp_bench(w,x)
-  b['fp_trn'],b['fn_trn']=fp_fn_bin(yp_smooth>0,y)
+    yp_smooth=imp(w,x)
+    test_kwa={}
+  b['fp_trn'],b['fn_trn']=fp_fn_bin(y,yp_smooth>0)
   b['fpfn']=b['fp_trn']/b['fn_trn']
-  if adapthresh_tol:
-    b['dbl']=find_thresh(y,yp_smooth,c['tfpfn'],adapthresh_tol)
-  b['fp_test'],b['fn_test']=fp_fn_bin(imp_bench(w,x_test)>0,y_test)
   b['fp_tfp']=b['fp_trn']/c['tfp']
   b['fn_tfn']=b['fn_trn']/c['tfn']
+  if adapthresh_tol:
+    b['dbl']=find_thresh(y,yp_smooth,c['tfpfn'],adapthresh_tol)
+    b['fp_dbl'],b['fn_dbl']=fp_fn_bin(y,yp_smooth>0)#GET IT THE RIGHT WAY ROUND!!!!
+  b['fp_test'],b['fn_test']=fp_fn_bin(y_test,imp(w,x_test,**test_kwa)>0)
   return b,w
 
-def bench_states(states,consts,x,y,x_test,y_test,imp_bench,adapthresh_tol,batchnorm_rs_act=None):
-  return tuple(zip(*[bench_state(s,c,x,y,x_test,y_test,imp_bench,adapthresh_tol,batchnorm_rs_act) for\
+def bench_states(states,consts,x,y,x_test,y_test,imp,adapthresh_tol,batchnorm=True):
+  return tuple(zip(*[bench_state(s,c,x,y,x_test,y_test,imp,adapthresh_tol,batchnorm) for\
                     s,c in zip(states,consts)]))
 
 def norms_state(s,prefix=''):
@@ -2294,40 +2328,49 @@ def epoch(states,consts,dlo,X,Y,n_batches,bs,k0,*k1):
   X_b,Y_b=X[:n_batches*bs].reshape(n_batches,bs,-1),Y[:n_batches*bs].reshape(n_batches,bs)
   return exps_steps(states,consts,dlo,X_b,Y_b,*(split(k,(n_batches,len(states))) for k in k1))
 
-def mk_epochs(imp,n_batches,bs,lo,batchnorm_rs_act=None,imp_bench=None,
-              dropout=False,adapthresh_tol=1e-3):
-  if imp_bench is None:
-    imp_bench=imp
+def mk_epochs(imp,n_batches,bs,lo,X_train,Y_train,X_test,Y_test,pids=False,
+              batchnorm=True,dropout=False,adapthresh_tol=1e-3):
   dlo=grad(lo)
 
+  _epoch=jit(lambda states,consts,*ks:epoch(states,consts,dlo,X_train,Y_train,n_batches,bs,*ks))
+  _bench_states=jit(lambda states,consts:bench_states(states,consts,X_train,Y_train,X_test,Y_test,
+                                                      imp,adapthresh_tol,batchnorm=batchnorm))
+
   @jit
-  def epochs(states,consts,X_train,Y_train,X_test,Y_test,ks):
+  def upd_post_epoch(states,benches,consts):
+    for s,b,c in  zip(states,benches,consts):
+      if adapthresh_tol:
+        s['w'][1][-1]-=b['dbl'] 
+      miss_fp=b['fp_trn']*c['tfpfn']**-.5
+      miss_fn=b['fn_trn']*c['tfpfn']**.5
+      fpfn_err=tanh(b['fp_trn']/c['tfp'])-tanh(b['fn_trn']/c['tfn'])
+      if pids:
+        pid=c['pid']
+        pid['idiv']+=fpfn_err
+        pid['ddiv']=fpfn_err-pid['pdiv']
+        pid['pdiv']=fpfn_err
+        c['beta']*=exp(-(pid['i']*pid['idiv']+pid['p']*fpfn_err+pid['d']*pid['ddiv']))
+      else:
+        c['beta']*=exp(-c['lrp']*fpfn_err)
+    return states,consts
+
+  @jit
+  def _epochs(states,consts,ks):
     benches_all=[]
     for l in ks:
       if dropout:
         ll=split(l)
       else:
         ll=(l,)
-      states=epoch(states,consts,dlo,X_train,Y_train,n_batches,bs,*ll)
-      benches,rs_ws=bench_states(states,consts,X_train,Y_train,X_test,Y_test,imp_bench,
-                                 adapthresh_tol,batchnorm_rs_act=batchnorm_rs_act)
-      for s,b,c in  zip(states,benches,consts):
-        if adapthresh_tol:
-          s['w'][1][-1]-=b['dbl'] 
-        miss_fp=b['fp_trn']*c['tfpfn']**-.5
-        miss_fn=b['fn_trn']*c['tfpfn']**.5
-        #fpfn_err=miss_fp-miss_fn
-        #fpfn_err=tanh(b['fp_trn']/b['fn_trn']-c['tfpfn'])
-        #fpfn_err=log(1+miss_fp)-log(1+miss_fn)
-        #fpfn_err/=(miss_fp**2+miss_fn**2)**.5
-        fpfn_err=tanh(b['fp_trn']/c['tfp'])-tanh(b['fn_trn']/c['tfn'])
-        pid=c['pid']
-        pid['idiv']+=fpfn_err
-        pid['ddiv']=fpfn_err-pid['pdiv']
-        pid['pdiv']=fpfn_err
-        c['beta']*=exp(-(pid['i']*pid['idiv']+pid['p']*fpfn_err+pid['d']*pid['ddiv']))
+      states=_epoch(states,consts,*ll)
+      benches,rs_ws=_bench_states(states,consts)
+      states,consts=upd_post_epoch(states,benches,consts)
       benches_all.append(benches)
     l2_states=norms_states(states,rs_ws)
     return states,l2_states,consts,benches_all
+
+  def epochs(states,consts,k,n_epochs):
+    ks=split(k,n_epochs)
+    return _epochs(states,consts,ks)
 
   return epochs,dlo
