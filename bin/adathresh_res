@@ -1,0 +1,27 @@
+#!/usr/bin/env python
+from pickle import load
+from numpy import array,max as nmx
+from sys import path,stdin
+from os import mkdir,environ,get_terminal_size
+from pathlib import Path
+from collections import namedtuple
+from os.path import dirname,abspath
+from sys import path
+from jax import config,devices
+config.update('jax_default_device',devices('cpu')[0])
+path.append(dirname(dirname(abspath(__file__))))
+from cal.thlay import f_to_str
+
+with Path('res_adathresh.pkl').open('rb') as fd:tfps,tfns,d=load(fd)
+
+#Get worst performance for last 10 epochs
+fpfnrls=list(d)
+worsts_fp=[nmx(v['fp_trn'][-10:],axis=0) for v in d.values()]
+worsts_fn=[nmx(v['fn_trn'][-10:],axis=0) for v in d.values()]
+
+f_to_str(['lrfpfn','reg','lr  tfp:']+list(tfps),p=True)
+f_to_str(['lrfpfn','reg','lr  tfn:']+list(tfns),p=True)
+[f_to_str(list(fpfnrl)+[max(a/tfp,b/tfn) for a,b,tfp,tfn in zip(A,B,tfps,tfns)],p=True)\
+ for fpfnrl,A,B in zip(fpfnrls,worsts_fp,worsts_fn)]
+
+

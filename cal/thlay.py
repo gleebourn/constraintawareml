@@ -896,7 +896,7 @@ def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n=None,bias=0.,
         A=ones(e_dims+(d_i,d_i))
         #A=zeros((d_i,d_i))
         B=zeros(shape=(e_dims+(d_i,))+bias)
-        return A,B
+        return [A,B]
       case _:
         raise Exception('Unknown initialisation: '+initialisation)
   if orthonormalise:
@@ -911,9 +911,9 @@ def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n=None,bias=0.,
     for i,d_i in enumerate(layer_dimensions[1:]):
       A[i]/=d_i**.5
   if transpose:
-    return list(zip(A,B))
+    return list([a,b] for a,b in zip(A,B))
   else:
-    return A,B
+    return [A,B]
 
 def init_layers_adam(*a,**kwa):
   w=init_layers(*a,**kwa)
@@ -2016,10 +2016,10 @@ def unsw(csv_train=Path.home()/'data'/'UNSW_NB15_training-set.csv',
     print()
   return (x_train,y_train),(x_test,y_test),(df_train0,df_test0),sc if rescale=='standard' else rescale
 
-def rbd24(preproc=True,split_test_train=True,rescale_log=True,single_dataset=False,
+def rbd24(preproc=True,split_test_train=True,rescale='log',single_dataset=False,
           raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl',categorical=True,
           processed_pickle_file=str(Path.home())+'/data/rbd24/rbd24_proc.pkl',verbose=False):
-  if split_test_train and preproc and rescale_log and\
+  if split_test_train and preproc and rescale=='log' and\
   isfile(processed_pickle_file) and not single_dataset:
     if verbose:print('Loading processed log rescaled pickle...')
     with open(processed_pickle_file,'rb') as fd:
@@ -2040,7 +2040,7 @@ def rbd24(preproc=True,split_test_train=True,rescale_log=True,single_dataset=Fal
   if single_dataset:
     df=df[df.category==single_dataset].drop(['category'],axis=1)
   if preproc:
-    df=preproc_rbd24(df,rescale_log=rescale_log,verbose=verbose)
+    df=preproc_rbd24(df,rescale_log=rescale=='log',verbose=verbose)
   if not split_test_train:
     return df
   if categorical:
@@ -2056,14 +2056,19 @@ def rbd24(preproc=True,split_test_train=True,rescale_log=True,single_dataset=Fal
   split_point=int(l*.7)
   x_train,x_test=x[:split_point],x[split_point:]
   y_train,y_test=y[:split_point],y[split_point:]
-  if split_test_train and preproc and rescale_log and not single_dataset:
+  if split_test_train and preproc and rescale=='log' and not single_dataset:
     if verbose:print('Saving processed log rescaled pickle...')
     with open(processed_pickle_file,'wb') as fd:
       dump(((x_train,y_train),(x_test,y_test),(df,x_cols)),fd)
-  return (x_train,y_train),(x_test,y_test),(df,x_cols)
+  if rescale=='standard':
+    sc=StandardScaler()
+    sc.fit(x_train)
+    x_train=sc.transform(x_train)
+    x_test=sc.transform(x_test)
+  return (x_train,y_train),(x_test,y_test),(df,sc)
 
 def preproc_rbd24(df,split_test_train=True,rm_redundant=True,plot_xvals=False,
-                  check_large=False,check_redundant=False,rescale_log=10,verbose=False):
+                  check_large=False,check_redundant=False,rescale_log=True,verbose=False):
   n_cols=len(df.columns)
   if rm_redundant: check_redundant=True
   if rescale_log: check_large=True
@@ -2095,11 +2100,11 @@ def preproc_rbd24(df,split_test_train=True,rm_redundant=True,plot_xvals=False,
     df=df.drop(redundant_cols,axis=1)
   if rescale_log:
     max_logs=max([npl10(1+m) for m in maximums])
-    if verbose and max_logs>rescale_log:
+    if verbose and max_logs>10:
       print('Note that rescale factor will not map values to be <=1')
-      print('Largest value:',max_logs)
+      print('Largest value:',max_logs,'>',10)
     for c in large_cols:
-      df[c]=npl10(1+df[c].__array__())/rescale_log
+      df[c]=npl10(1+df[c].__array__())/10
   if plot_xvals:
     plot_uniques(df)
   return df.sort_values('timestamp')
@@ -2264,16 +2269,19 @@ def binsearch_step(r,tfpfn,y,yp_smooth):
   a,b=r
   mid=(a+b)/2
   yp=yp_smooth-mid>0
-  excess_fps=((yp&~y).mean()/(y&~yp).mean())>tfpfn
-  return (a*(~excess_fps)+excess_fps*mid,b*(excess_fps)+(~excess_fps)*mid)
+  fpfn=((yp&~y).mean()/(y&~yp).mean())
+  excess_fps=fpfn>tfpfn
+  return a*(~excess_fps)+excess_fps*mid,b*(excess_fps)+(~excess_fps)*mid,(fpfn-tfpfn)**2
 
 def fp_fn_bin(y,yp):
   return [(yp&~y).mean(),(y&~yp).mean()]
 
+@jit
 def find_thresh(y,yp_smooth,tfpfn,adapthresh_tol):
-  thresh_range=while_loop(lambda r:r[1]-r[0]>adapthresh_tol,
-                          lambda r:binsearch_step(r,tfpfn,y,yp_smooth),
-                          (yp_smooth.min(),yp_smooth.max()))
+  yp_min_max=yp_smooth.min(),yp_smooth.max()
+  thresh_range=while_loop(lambda r:(r[2]>adapthresh_tol)&(r[3]<1/adapthresh_tol),
+                          lambda r:binsearch_step(r[:2],tfpfn,y,yp_smooth)+(r[3]+1,),
+                          (*yp_min_max,1,0))[:2]
   return (thresh_range[0]+thresh_range[1])/2
 
 def bench_state(s,c,x,y,x_test,y_test,imp,adapthresh_tol,batchnorm):

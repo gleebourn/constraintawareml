@@ -19,7 +19,7 @@ from sys import path
 path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import activations,f_to_str,shuffle_xy,init_layers_adam,dict_adam_no_bias,\
                       rbd24,mk_cross_entropy,implementation,TimeStepper,KeyEmitter,l2,mk_l1,\
-                      mk_l2,dict_grad,mk_hinge,unsw
+                      mk_l2,dict_grad,mk_hinge,unsw,find_thresh,ewma
 
 act_name='relu'#'tanh'
 act=activations[act_name]
@@ -30,9 +30,9 @@ act=activations[act_name]
 bs=128
 sds='P2P_smartphone' #sds=''
 
-(X_trn,Y_trn),(X_tst,Y_tst),_,sc=unsw(numeric_only=True,rescale='standard',verbose=False)
-#(X_trn,Y_trn),(X_tst,Y_tst),(_,X_columns)=rbd24(rescale_log=True,preproc=True,
-#                                                      categorical=True,single_dataset=sds)
+#(X_trn,Y_trn),(X_tst,Y_tst),_,sc=unsw(numeric_only=True,rescale='standard',verbose=False)
+(X_trn,Y_trn),(X_tst,Y_tst),(_,sc)=rbd24(rescale='standard',preproc=True,
+                                                categorical=True,single_dataset=sds)
 
 
 n_batches=len(Y_trn)//bs
@@ -44,41 +44,36 @@ in_dim=len(X_trn[0])
 t=0
 
 def _forward(w,x):
-  for a,b in w:
+  for a,b in w[:-1]:
     x=act(x@a+b)
-  return x
+  return x@w[-1][0]+w[-1][1]
 
 def _loss(w,x,y,bet):
   yp=_forward(w,x)
-  return -jsm((bet*y+(1-y)/bet)*log(1+1e-4+(2*y-1)*yp))
+  return -jsm((bet*y+(1-y)/bet)*log(1+1e-4+(2*y-1)*act(yp)))-.5*log(yp.var())
   #return jsm((bet*y+(1-y)/bet)*(1-2*y)*yp)
 
 _dl=grad(_loss)
 
 n_par=16
-consts_adam=dict(beta1=array([.9]*n_par),beta2=array([.999]*n_par),lr=array([.0001]*n_par),
-                 reg=array([.00001]*n_par),eps=array([1e-8]*n_par))
-consts_bet=dict(lrfpfn=geomspace(.001,.1,n_par),tfp=array([.1]*n_par),tfn=array([.1]*n_par))
-bets=array([1.]*n_par)
+#consts_bet=dict(lrfpfn=geomspace(.001,.015,n_par),tfp=array([.1]*n_par),tfn=array([.1]*n_par))
+bets=array([((1-p_trn)/p_trn)**.5]*n_par)
 def _upd(x,y,s,ca,b):
   return dict_adam_no_bias(_dl(s['w'],x,y,b),s,ca)
   #return dict_grad(_dl(s['w'],x,y,bet),s,c)
 
-def _set_bet(bet,cb,pred):
-  return bet*(1-cb['lrfpfn']*(pred['fp_trn']/cb['tfp']-pred['fn_trn']/cb['tfn']))
+def _set_bet(bet,cb,pred,epoch,ep_scale):
+  return bet*(1-cb['lrfpfn']*(tanh(pred['fp_trn']/cb['tfp'])-tanh(pred['fn_trn']/cb['tfn']))/epoch**ep_scale)
 
 forward=vmap(_forward,(0,None),0)
 loss=vmap(_loss,(0,None,None,0),0)
 dl=vmap(_dl,(0,None,None,0),0)
 upd=vmap(_upd,(None,None,0,0,0),0)
-set_bet=vmap(_set_bet,(0,0,0),0)
-
-tfp=.1
-tfn=.1
+set_bet=vmap(_set_bet,(0,0,0,None,None),0)#,None
 
 @jit
-def steps(states0,consts_adam,X,Y,bets):
-  return scan(lambda states,xy:(upd(xy[0],xy[1],states,consts_adam,bets),0),states0,(X,Y))[0]
+def steps(states,consts_adam,X,Y,bets):
+  return scan(lambda states,xy:(upd(xy[0],xy[1],states,consts_adam,bets),0),states,(X,Y))[0]
 
 @jit
 def get_reshuffled(k):
@@ -87,46 +82,73 @@ def get_reshuffled(k):
 
 
 #@jit
-def _get_preds(w,X_trn,Y_trn,X_tst,Y_tst):
+def _get_preds(w,X_trn,Y_trn,X_tst,Y_tst,tfpfn):
   Yp_smooth_trn=_forward(w,X_trn).flatten()
   Yp_smooth_tst=_forward(w,X_tst).flatten()
   Yp_trn=Yp_smooth_trn>0.
   Yp_tst=Yp_smooth_tst>0.
+  y_max=Yp_smooth_trn.max()
+  y_min=Yp_smooth_trn.min()
+  thresh=find_thresh(Y_trn,Yp_smooth_trn,tfpfn,1e-1)
   return {'fp_trn':((~Y_trn)&(Yp_trn)).mean(),'fn_trn':((Y_trn)&(~Yp_trn)).mean(),
           'fp_tst':((~Y_tst)&(Yp_tst)).mean(),'fn_tst':((Y_tst)&(~Yp_tst)).mean(),
-          'max':Yp_smooth_trn.max(),'min':Yp_smooth_trn.min(),'var':Yp_smooth_trn.var()}
+          'max':y_max,'min':y_min,'var':Yp_smooth_trn.var(),'thresh':thresh}
 
 @jit
 def _get_state(s):
-  return dict(wl2=l2(s['w']),ml2=l2(s['m']),vl2=l2(s['v']),t=s['t'])
+  return dict(wl2=l2(s['w']),mv=l2(s['m'])/l2(s['v']),t=s['t'])
 
-get_preds=vmap(_get_preds,(0,None,None,None,None),0)
+get_preds=vmap(_get_preds,(0,None,None,None,None,0),0)
 get_state=vmap(_get_state)
 mod_shape=[in_dim,128,64,32,1]#[in_dim,1]
-states=init_layers_adam(mod_shape,init,k=ke.emit_key(),transpose=True,n=n_par,bias=.1)
 
-
+ep_scale=0.
+epochs_per_trial=50
 
 ts.get_timestep()
-for epoch in count(1):
-  X,Y=get_reshuffled(ke.emit_key())
-  ts.get_timestep('shuffle')
-  states=steps(states,consts_adam,X,Y,bets)
-  ts.get_timestep('epoch')
-  preds=get_preds(states['w'],X_trn,Y_trn,X_tst,Y_tst)
-  ts.get_timestep('pred')
-  bets=set_bet(bets,consts_bet,preds)
-  ts.get_timestep('upd_bet')
-  if not epoch%10:
-    print('============','epoch',epoch,'============')
-    #f_to_str(['l_last']+list(loss(states['w'],X[0],Y[0],consts_bet['bet'])),p=True)
-    f_to_str(['lrfpfn']+list(consts_bet['lrfpfn']),p=True)
-    f_to_str(['bet']+list(bets),p=True)
-    l2stats=get_state(states)
-    ts.get_timestep('l2s')
-    [f_to_str([v]+list(l2stats[v]),p=True) for\
-     v in sorted(list(l2stats),key=lambda s:s[-2:]=='l2' and s[0]!='w')]
-    [f_to_str([pr]+list(preds[pr]),p=True) for\
-     pr in sorted(list(preds),key=lambda s:s[-3:]=='trn')]
-    ts.get_timestep('report')
-    ts.report(p=True)
+epoch_keys=ke.emit_key(epochs_per_trial)
+state_key=ke.emit_key()
+res={}
+tfps=geomspace(.1,.5,n_par)
+tfns=geomspace(.1,.01,n_par)
+
+lrs=[.001,.0001,.00001,.000001]
+tfpfn=array(tfps/tfns)
+lrfpfns=geomspace(.01,.001,20)
+regs=geomspace(.0001,.01,5)
+for lrfpfn,reg,lr in [(lrfpfn,reg,lr) for lrfpfn in lrfpfns for reg in regs for lr in lrs]:
+  res_current=dict(fp_trn=[],fn_trn=[],fp_tst=[],fn_tst=[])
+  res[lrfpfn,reg*lr,lr]=res_current
+  consts_bet=dict(lrfpfn=array([lrfpfn*lr]*n_par),
+                  tfp=array(tfps),
+                  tfn=array(tfns))
+  consts_adam=dict(beta1=array([.9]*n_par),beta2=array([.999]*n_par),lr=array([lr]*n_par),
+                   reg=array([reg]*n_par),eps=array([1e-8]*n_par))
+  states=init_layers_adam(mod_shape,init,k=state_key,transpose=True,n=n_par,bias=.1)
+  for epoch,k in enumerate(epoch_keys,1):
+    X,Y=get_reshuffled(k)
+    ts.get_timestep('shuffle')
+    states=steps(states,consts_adam,X,Y,bets)
+    ts.get_timestep('epoch')
+    preds=get_preds(states['w'],X_trn,Y_trn,X_tst,Y_tst,tfpfn)
+    [v.append(preds[l]) for l,v in res_current.items()]
+    ts.get_timestep('pred')
+    states['w'][-1][1]-=preds['thresh'].reshape(-1,1)#*.2
+    ts.get_timestep('upd_thr')
+    bets=set_bet(bets,consts_bet,preds,epoch,ep_scale)
+    ts.get_timestep('upd_bet')
+    if not epoch%10:
+      print('============','epoch',epoch,'============')
+      #f_to_str(['l_last']+list(loss(states['w'],X[0],Y[0],consts_bet['bet'])),p=True)
+      f_to_str(['bet']+list(bets),p=True)
+      l2stats=get_state(states)
+      ts.get_timestep('l2s')
+      [f_to_str([v]+list(l2stats[v]),p=True) for\
+       v in sorted(list(l2stats),key=lambda s:s[-2:]=='l2' and s[0]!='w')]
+      [f_to_str([v]+list(consts_bet[v]),p=True) for v in consts_bet]
+      [f_to_str([pr]+list(preds[pr]),p=True) for\
+       pr in sorted(list(preds),key=lambda s:s[-3:]=='trn')]
+      ts.get_timestep('report')
+      ts.report(p=True)
+
+  with Path('res_adathresh.pkl').open('wb') as fd: dump((tfps,tfns,res),fd)
