@@ -30,10 +30,13 @@ act=activations[act_name]
 bs=128
 sds='P2P_smartphone' #sds=''
 
-#(X_trn,Y_trn),(X_tst,Y_tst),_,sc=unsw(numeric_only=True,rescale='standard',verbose=False)
-(X_trn,Y_trn),(X_tst,Y_tst),(_,sc)=rbd24(rescale='standard',preproc=True,
-                                                categorical=True,single_dataset=sds)
+dataset='unsw'#'rdb24'
 
+if dataset=='unsw':
+  (X_trn,Y_trn),(X_tst,Y_tst),_,sc=unsw(rescale='standard',verbose=False)#numeric_only=True,
+else:
+  (X_trn,Y_trn),(X_tst,Y_tst),(_,sc)=rbd24(rescale='standard',preproc=True,
+                                           categorical=True,single_dataset=sds)
 
 n_batches=len(Y_trn)//bs
 last=n_batches*bs#-(len(Y_trn)%bs)
@@ -50,30 +53,29 @@ def _forward(w,x):
 
 def _loss(w,x,y,bet):
   yp=_forward(w,x)
-  return -jsm((bet*y+(1-y)/bet)*log(1+1e-4+(2*y-1)*act(yp)))-.5*log(yp.var())
+  return -jsm((bet*y+(1-y)/bet)*log(1+1e-4+(2*y-1)*act(yp)))#-.5*log(yp.var())
   #return jsm((bet*y+(1-y)/bet)*(1-2*y)*yp)
 
 _dl=grad(_loss)
-
-n_par=16
+n_par=8
 #consts_bet=dict(lrfpfn=geomspace(.001,.015,n_par),tfp=array([.1]*n_par),tfn=array([.1]*n_par))
-bets=array([((1-p_trn)/p_trn)**.5]*n_par)
-def _upd(x,y,s,ca,b):
-  return dict_adam_no_bias(_dl(s['w'],x,y,b),s,ca)
+def _upd(x,y,s,ca,cb):
+  return dict_adam_no_bias(_dl(s['w'],x,y,cb['bet']),s,ca)
   #return dict_grad(_dl(s['w'],x,y,bet),s,c)
 
-def _set_bet(bet,cb,pred,epoch,ep_scale):
-  return bet*(1-cb['lrfpfn']*(tanh(pred['fp_trn']/cb['tfp'])-tanh(pred['fn_trn']/cb['tfn']))/epoch**ep_scale)
+def _set_bet(cb,pred,epoch,ep_scale):
+  cb['bet']*=exp(-cb['lrfpfn']*(pred['fp_trn']/cb['tfp']-pred['fn_trn']/cb['tfn'])/epoch**ep_scale)
+  return cb
 
 forward=vmap(_forward,(0,None),0)
 loss=vmap(_loss,(0,None,None,0),0)
 dl=vmap(_dl,(0,None,None,0),0)
 upd=vmap(_upd,(None,None,0,0,0),0)
-set_bet=vmap(_set_bet,(0,0,0,None,None),0)#,None
+set_bet=vmap(_set_bet,(0,0,None,None),0)#,None
 
 @jit
-def steps(states,consts_adam,X,Y,bets):
-  return scan(lambda states,xy:(upd(xy[0],xy[1],states,consts_adam,bets),0),states,(X,Y))[0]
+def steps(states,consts_adam,X,Y,consts_bet):
+  return scan(lambda states,xy:(upd(xy[0],xy[1],states,consts_adam,consts_bet),0),states,(X,Y))[0]
 
 @jit
 def get_reshuffled(k):
@@ -81,8 +83,20 @@ def get_reshuffled(k):
   return X[:last].reshape(n_batches,bs,-1),Y[:last].reshape(n_batches,bs)
 
 
-#@jit
-def _get_preds(w,X_trn,Y_trn,X_tst,Y_tst,tfpfn):
+@jit
+def _get_preds(w,X_trn,Y_trn,X_tst,Y_tst):#,tfpfn):
+  Yp_smooth_trn=_forward(w,X_trn).flatten()
+  Yp_smooth_tst=_forward(w,X_tst).flatten()
+  Yp_trn=Yp_smooth_trn>0.
+  Yp_tst=Yp_smooth_tst>0.
+  #y_max=Yp_smooth_trn.max()
+  #y_min=Yp_smooth_trn.min()
+  return {'fp_trn':((~Y_trn)&(Yp_trn)).mean(),'fn_trn':((Y_trn)&(~Yp_trn)).mean(),
+          'fp_tst':((~Y_tst)&(Yp_tst)).mean(),'fn_tst':((Y_tst)&(~Yp_tst)).mean()}#,
+          #'max':y_max,'min':y_min,'var':Yp_smooth_trn.var()}
+
+@jit
+def _get_preds_thresh(w,X_trn,Y_trn,X_tst,Y_tst,tfpfn):
   Yp_smooth_trn=_forward(w,X_trn).flatten()
   Yp_smooth_tst=_forward(w,X_tst).flatten()
   Yp_trn=Yp_smooth_trn>0.
@@ -98,12 +112,16 @@ def _get_preds(w,X_trn,Y_trn,X_tst,Y_tst,tfpfn):
 def _get_state(s):
   return dict(wl2=l2(s['w']),mv=l2(s['m'])/l2(s['v']),t=s['t'])
 
-get_preds=vmap(_get_preds,(0,None,None,None,None,0),0)
+get_preds=vmap(_get_preds,(0,None,None,None,None),0)
+get_preds_thresh=vmap(_get_preds_thresh,(0,None,None,None,None,0),0)
 get_state=vmap(_get_state)
-mod_shape=[in_dim,128,64,32,1]#[in_dim,1]
+#mod_shape=[in_dim,128,64,32,1]#[in_dim,1]
+mod_shape=[in_dim,256,128,64,1]#,8,1]#[in_dim,1]
+
+outf='res_adathresh_'+dataset+('-'.join([str(l) for l in mod_shape]))+'.pkl'
 
 ep_scale=0.
-epochs_per_trial=50
+epochs_per_trial=200
 
 ts.get_timestep()
 epoch_keys=ke.emit_key(epochs_per_trial)
@@ -112,43 +130,49 @@ res={}
 tfps=geomspace(.1,.5,n_par)
 tfns=geomspace(.1,.01,n_par)
 
-lrs=[.001,.0001,.00001,.000001]
+lrs=[.0001]#[.001,.0001]#,.00001,.000001]
 tfpfn=array(tfps/tfns)
-lrfpfns=geomspace(.01,.001,20)
-regs=geomspace(.0001,.01,5)
+#lrfpfns=geomspace(.0001,.001,10)
+#lrfpfns=geomspace(.0001,.0003,10)
+lrfpfns=[.0003]#geomspace(.0003,.003,10)
+regs=[.001]#[.1,.01,.001]#geomspace(.0001,.01,5)
 for lrfpfn,reg,lr in [(lrfpfn,reg,lr) for lrfpfn in lrfpfns for reg in regs for lr in lrs]:
   res_current=dict(fp_trn=[],fn_trn=[],fp_tst=[],fn_tst=[])
   res[lrfpfn,reg*lr,lr]=res_current
-  consts_bet=dict(lrfpfn=array([lrfpfn*lr]*n_par),
+  consts_bet=dict(lrfpfn=array([lrfpfn]*n_par),
                   tfp=array(tfps),
+                  bet=array([((1-p_trn)/p_trn)**.5]*n_par),
                   tfn=array(tfns))
   consts_adam=dict(beta1=array([.9]*n_par),beta2=array([.999]*n_par),lr=array([lr]*n_par),
-                   reg=array([reg]*n_par),eps=array([1e-8]*n_par))
+                   reg=array([reg*lr]*n_par),eps=array([1e-8]*n_par))
   states=init_layers_adam(mod_shape,init,k=state_key,transpose=True,n=n_par,bias=.1)
   for epoch,k in enumerate(epoch_keys,1):
     X,Y=get_reshuffled(k)
     ts.get_timestep('shuffle')
-    states=steps(states,consts_adam,X,Y,bets)
+    states=steps(states,consts_adam,X,Y,consts_bet)
     ts.get_timestep('epoch')
-    preds=get_preds(states['w'],X_trn,Y_trn,X_tst,Y_tst,tfpfn)
-    [v.append(preds[l]) for l,v in res_current.items()]
+    preds=get_preds_thresh(states['w'],X_trn,Y_trn,X_tst,Y_tst,tfpfn)
+    #preds=get_preds(states['w'],X_trn,Y_trn,X_tst,Y_tst)#,tfpfn)
     ts.get_timestep('pred')
+    [v.append(preds[l]) for l,v in res_current.items()]
+    ts.get_timestep('record')
     states['w'][-1][1]-=preds['thresh'].reshape(-1,1)#*.2
     ts.get_timestep('upd_thr')
-    bets=set_bet(bets,consts_bet,preds,epoch,ep_scale)
+    consts_bet=set_bet(consts_bet,preds,epoch,ep_scale)
     ts.get_timestep('upd_bet')
     if not epoch%10:
       print('============','epoch',epoch,'============')
       #f_to_str(['l_last']+list(loss(states['w'],X[0],Y[0],consts_bet['bet'])),p=True)
-      f_to_str(['bet']+list(bets),p=True)
       l2stats=get_state(states)
       ts.get_timestep('l2s')
       [f_to_str([v]+list(l2stats[v]),p=True) for\
        v in sorted(list(l2stats),key=lambda s:s[-2:]=='l2' and s[0]!='w')]
       [f_to_str([v]+list(consts_bet[v]),p=True) for v in consts_bet]
+      [f_to_str([v]+list(consts_adam[v]),p=True) for v in ['lr','reg']]
       [f_to_str([pr]+list(preds[pr]),p=True) for\
        pr in sorted(list(preds),key=lambda s:s[-3:]=='trn')]
       ts.get_timestep('report')
       ts.report(p=True)
 
-  with Path('res_adathresh.pkl').open('wb') as fd: dump((tfps,tfns,res),fd)
+  with Path(outf).open('wb') as fd:
+    dump((tfps,tfns,res,mod_shape),fd)
