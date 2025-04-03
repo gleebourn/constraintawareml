@@ -11,9 +11,12 @@ from jax import config,devices
 config.update('jax_default_device',devices('cpu')[0])
 path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import f_to_str
-argv.append('adathresh_res.pkl')
+#argv.append('adathresh_res.pkl')
+#argv.append('-1')
 
 with Path(argv[1]).open('rb') as fd:tfps,tfns,d,mod_shape=load(fd)
+
+ep=-1 if len(argv)<3 else int(argv[2])
 
 print('Model shape:',mod_shape)
 
@@ -24,8 +27,8 @@ fpfnrls=list(d)
 
 ##Get performance for last epoch
 #fpfnrls=list(d)
-last_fp=[v['fp_trn'][-1] for v in d.values()]
-last_fn=[v['fn_trn'][-1] for v in d.values()]
+last_fp=[v['fp_trn'][ep] for v in d.values()]
+last_fn=[v['fn_trn'][ep] for v in d.values()]
 regret_fp=[log(exp(v).mean(axis=0)) for v in [vv['fp_trn'][-len(vv['fp_trn'])//4:] for vv in d.values()]]
 regret_fn=[log(exp(v).mean(axis=0)) for v in  [vv['fn_trn'][-len(vv['fn_trn'])//4:] for vv in d.values()]]
 stat_fp=last_fp

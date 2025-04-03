@@ -227,51 +227,70 @@ def f_dropout(w,x,act,k,p=.4):
     x=act(x@a+b)
   return x
 
-#def f_batchnorm(w,x,act):
-#  for a,b in zip(w[0][:-1],w[1][:-1]):
-#    x=act(x@a+b)
-#    x=(x-x.mean(axis=0))*(1e-4+x.var(axis=0))**-.5
-#  x=act(x@w[0][-1]+w[1][-1])
-#  return x
-
-#def rescale_weights_zmean_uvar(w,x,act,get_transform=True):
+#def forward(w,x,act,batchnorm=True,get_transform=False,ll_act=False,transpose=False):
 #  if get_transform:
-#    Ta=[]
-#    Tb=[]
-#  for a,b in zip(w[0][:-1],w[1][:-1]):
-#    x=act(x@a+b)
-#    ta=(1e-4+x.var(axis=0))**-.5
-#    tb=x.mean(axis=0)*ta
-#    if get_transform:
-#      Ta.append(ta)
-#      Tb.append(tb)
-#    x=x*ta-tb
-#  y=x@w[0][-1]+w[1][-1]
+#    A=[]
+#    B=[]
+#  if transpose:
+#    l=w[:-1]
+#    al=w[-1][0]
+#    bl=w[-1][1]
+#  else:
+#    l=zip(w[0][:-1],w[1][:-1])
+#    al=w[0][-1]
+#    bl=w[1][-1]
+#  for a,b in l:
+#    #x=act(x@a+b)
+#    x=x@a+b
+#    if batchnorm:
+#      ta=(1e-4+x.var(axis=0))**-.5
+#      tb=x.mean(axis=0)*ta
+#      if get_transform:
+#        A.append(a*ta)
+#        B.append(b-tb)
+#      x=x*ta-tb
+#    x=act(x)
+#  y=x@al+bl
+#  if ll_act:
+#    y=act(y)
 #  if get_transform:
-#    return y,(w[0][:1]+[a*(ta.reshape(-1,1)) for a,ta in zip(w[0][1:],Ta)],
-#              w[1][:1]+[b-Tb@a for a,b,Tb in zip(w[0][1:],w[1][1:],Tb)])
+#    trans=(A+[al],B+[bl])
+#    if transpose:
+#      trans=list(zip(*trans))
+#    return y,trans
 #  return y
 
-def f_batchnorm(w,x,act,batchnorm=True,get_transform=False,ll_act=False):
+def forward(w,x,act,batchnorm=True,get_transform=False,ll_act=False,transpose=False):
   if get_transform:
     A=[]
     B=[]
-  for a,b in zip(w[0][:-1],w[1][:-1]):
+  if transpose:
+    l=w[:-1]
+    al,bl=w[-1]
+  else:
+    l=zip(w[0][:-1],w[1][:-1])
+    al=w[0][-1]
+    bl=w[1][-1]
+  for a,b in l:
     x=act(x@a+b)
-    ta=(1e-4+x.var(axis=0))**-.5
-    tb=x.mean(axis=0)*ta
-    print(x.shape,ta.shape,tb.shape)
-    if get_transform:
-      A.append(a*ta)
-      B.append(b-tb)
     if batchnorm:
-      x=x*ta-tb
-    #x=act(x)
-  y=x@w[0][-1]+w[1][-1]
+      ta=(1e-8+x.var(axis=0))**-.5
+      tb=x.mean(axis=0)#*ta
+      if get_transform:
+        A.append(ta)
+        B.append(tb)
+      x=(x-tb)*ta
+  y=x@al+bl
   if ll_act:
     y=act(y)
   if get_transform:
-    return y,(A+w[0][-1:],B+w[1][-1:])
+    if transpose:
+      A=[a*(ta.reshape(-1,1)) for (a,_),ta in zip(w[1:],A)]
+      trans=w[:1]+[(ta,b-tb@ta) for (_,b),ta,tb in zip(w[1:],A,B)]
+    else:
+      A=[a*(ta.reshape(-1,1)) for a,ta in zip(w[0][1:],A)]
+      trans=w[0][:1]+A,w[1][:1]+[b-tb@ta for b,ta,tb in zip(w[1][1:],A,B)]
+    return y,trans
   return y
 
 def f(w,x,act):
@@ -299,9 +318,10 @@ def resnet(w,x,act=tanh,first_layer_no_skip=True):
   return jsm(x,axis=1) # final layer: sum components, check + or -.
 
 activations={'tanh':tanh,'softmax':softmax,'linear':jit(lambda x:x),
-             'relu':jit(lambda x:minimum(1,maximum(-1,x)))}
+             #'relu':jit(lambda x:minimum(1,maximum(-1,x)))}
+             'relu':jit(lambda x:maximum(x,.03*x))}
 implementations={'mlp':f,'mlp_do':f_dropout,'mlp_no_ll_act':f_no_ll_act,
-                 'mlp_no_ll_act':f_no_ll_act,'mlp_batchnorm':f_batchnorm,
+                 'mlp_no_ll_act':f_no_ll_act,'mlp_batchnorm':forward,
                  'resnet':resnet,'linear':lambda w,x,_:x@w[0]+w[1]}
 
 def implementation(imp,act=None):

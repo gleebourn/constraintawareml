@@ -8,7 +8,6 @@ from jax.random import key,split,normal,binomial
 from jax import jit,value_and_grad,grad,vmap,devices
 from jaxlib.xla_extension import XlaRuntimeError
 from jax.tree import map as jma,reduce as jrd
-from jax.nn import tanh
 from sys import path,stdin
 from os import mkdir,environ,get_terminal_size
 from itertools import count
@@ -19,9 +18,10 @@ from sys import path
 path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import activations,f_to_str,shuffle_xy,init_layers_adam,dict_adam_no_bias,\
                       rbd24,mk_cross_entropy,implementation,TimeStepper,KeyEmitter,l2,mk_l1,\
-                      mk_l2,dict_grad,mk_hinge,unsw,find_thresh,ewma
+                      mk_l2,dict_grad,mk_hinge,unsw,find_thresh,ewma,forward
 
-act_name='relu'#'tanh'
+#act_name='tanh'
+act_name='relu'
 act=activations[act_name]
 init='glorot_normal' if act_name=='relu' else 'glorot_uniform'
 ts=TimeStepper(clock_avg_rate=.1)
@@ -30,7 +30,10 @@ act=activations[act_name]
 bs=128
 sds='P2P_smartphone' #sds=''
 
-dataset='unsw'#'rdb24'
+dataset='unsw'
+#dataset='rbd24'
+batchnorm=False
+#batchnorm=True
 
 if dataset=='unsw':
   (X_trn,Y_trn),(X_tst,Y_tst),_,sc=unsw(rescale='standard',verbose=False)#numeric_only=True,
@@ -46,15 +49,18 @@ p_tst=Y_tst.mean()
 in_dim=len(X_trn[0])
 t=0
 
-def _forward(w,x):
-  for a,b in w[:-1]:
-    x=act(x@a+b)
-  return x@w[-1][0]+w[-1][1]
+_forward=lambda w,x:forward(w,x,act,batchnorm=batchnorm,transpose=True)
+#def _forward(w,x):
+#  for a,b in w[:-1]:
+#    x=act(x@a+b)
+#  return x@w[-1][0]+w[-1][1]
 
 def _loss(w,x,y,bet):
   yp=_forward(w,x)
-  return -jsm((bet*y+(1-y)/bet)*log(1+1e-4+(2*y-1)*act(yp)))#-.5*log(yp.var())
-  #return jsm((bet*y+(1-y)/bet)*(1-2*y)*yp)
+  #return -jsm((bet*y+(1-y)/bet)*log(1+1e-4+(2*y-1)*act(yp)))#-.5*log(yp.var())
+  #return jsm(act((bet*y+(1-y)/bet)*(1-2*y)*yp))
+  #return jsm(maximum(0,(bet*y+(1-y)/bet)*(1-2*y)*yp))
+  return jsm((bet*y+(1-y)/bet)*(1-2*y)*yp)
 
 _dl=grad(_loss)
 n_par=8
@@ -64,10 +70,10 @@ def _upd(x,y,s,ca,cb):
   #return dict_grad(_dl(s['w'],x,y,bet),s,c)
 
 def _set_bet(cb,pred,epoch,ep_scale):
-  cb['bet']*=exp(-cb['lrfpfn']*(pred['fp_trn']/cb['tfp']-pred['fn_trn']/cb['tfn'])/epoch**ep_scale)
+  cb['bet']*=exp(cb['lrfpfn']*(-pred['fp_trn']/cb['tfp']+pred['fn_trn']/cb['tfn'])/epoch**ep_scale)
   return cb
 
-forward=vmap(_forward,(0,None),0)
+f=vmap(_forward,(0,None),0)
 loss=vmap(_loss,(0,None,None,0),0)
 dl=vmap(_dl,(0,None,None,0),0)
 upd=vmap(_upd,(None,None,0,0,0),0)
@@ -85,8 +91,11 @@ def get_reshuffled(k):
 
 @jit
 def _get_preds(w,X_trn,Y_trn,X_tst,Y_tst):#,tfpfn):
-  Yp_smooth_trn=_forward(w,X_trn).flatten()
-  Yp_smooth_tst=_forward(w,X_tst).flatten()
+  yps=forward(w,X_trn,act,transpose=True,get_transform=batchnorm,batchnorm=batchnorm)
+  if batchnorm:
+    yps,w=yps
+  Yp_smooth_trn=yps.flatten()
+  Yp_smooth_tst=forward(w,X_tst,act,transpose=True,batchnorm=False).flatten()
   Yp_trn=Yp_smooth_trn>0.
   Yp_tst=Yp_smooth_tst>0.
   #y_max=Yp_smooth_trn.max()
@@ -97,15 +106,20 @@ def _get_preds(w,X_trn,Y_trn,X_tst,Y_tst):#,tfpfn):
 
 @jit
 def _get_preds_thresh(w,X_trn,Y_trn,X_tst,Y_tst,tfpfn):
-  Yp_smooth_trn=_forward(w,X_trn).flatten()
-  Yp_smooth_tst=_forward(w,X_tst).flatten()
+  yps=forward(w,X_trn,act,transpose=True,get_transform=batchnorm,batchnorm=batchnorm)
+  if batchnorm:
+    yps,w=yps
+  Yp_smooth_trn=yps.flatten()
+  Yp_smooth_tst=forward(w,X_tst,act,transpose=True,batchnorm=False).flatten()
   Yp_trn=Yp_smooth_trn>0.
   Yp_tst=Yp_smooth_tst>0.
   y_max=Yp_smooth_trn.max()
   y_min=Yp_smooth_trn.min()
   thresh=find_thresh(Y_trn,Yp_smooth_trn,tfpfn,1e-1)
+  Yp_trn_thresh=Yp_smooth_trn>thresh
   return {'fp_trn':((~Y_trn)&(Yp_trn)).mean(),'fn_trn':((Y_trn)&(~Yp_trn)).mean(),
           'fp_tst':((~Y_tst)&(Yp_tst)).mean(),'fn_tst':((Y_tst)&(~Yp_tst)).mean(),
+          'fp_tsh':((~Y_trn)&(Yp_trn_thresh)).mean(),'fn_tsh':((Y_trn)&(~Yp_trn_thresh)).mean(),
           'max':y_max,'min':y_min,'var':Yp_smooth_trn.var(),'thresh':thresh}
 
 @jit
@@ -115,13 +129,18 @@ def _get_state(s):
 get_preds=vmap(_get_preds,(0,None,None,None,None),0)
 get_preds_thresh=vmap(_get_preds_thresh,(0,None,None,None,None,0),0)
 get_state=vmap(_get_state)
-#mod_shape=[in_dim,128,64,32,1]#[in_dim,1]
-mod_shape=[in_dim,256,128,64,1]#,8,1]#[in_dim,1]
+mod_shape=[in_dim,128,64,32,1]#[in_dim,1]
+#mod_shape=[in_dim,256,128,64,1]#,8,1]#[in_dim,1]
 
-outf='res_adathresh_'+dataset+('-'.join([str(l) for l in mod_shape]))+'.pkl'
 
 ep_scale=0.
 epochs_per_trial=200
+
+outf='n_ep_'+str(epochs_per_trial)+'_'+act_name+'_'+\
+     dataset+('-'.join([str(l) for l in mod_shape]))+'.pkl'
+
+if batchnorm:
+  outf='bn_'+outf
 
 ts.get_timestep()
 epoch_keys=ke.emit_key(epochs_per_trial)
@@ -130,12 +149,13 @@ res={}
 tfps=geomspace(.1,.5,n_par)
 tfns=geomspace(.1,.01,n_par)
 
-lrs=[.0001]#[.001,.0001]#,.00001,.000001]
+lrs=[.001,.0001]#,.0001] #seems best when not batch norming?
+#lrs=[.001]#,.00001,.000001]
 tfpfn=array(tfps/tfns)
 #lrfpfns=geomspace(.0001,.001,10)
 #lrfpfns=geomspace(.0001,.0003,10)
-lrfpfns=[.0003]#geomspace(.0003,.003,10)
-regs=[.001]#[.1,.01,.001]#geomspace(.0001,.01,5)
+lrfpfns=geomspace(.0001,.1,10)#[.0003,.003,.01]
+regs=[.1,.01]#[1,.3,.1]#,.001]#,.0001,0]#[.1,.01,.001]#geomspace(.0001,.01,5)
 for lrfpfn,reg,lr in [(lrfpfn,reg,lr) for lrfpfn in lrfpfns for reg in regs for lr in lrs]:
   res_current=dict(fp_trn=[],fn_trn=[],fp_tst=[],fn_tst=[])
   res[lrfpfn,reg*lr,lr]=res_current
