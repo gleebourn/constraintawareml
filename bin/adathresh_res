@@ -34,7 +34,8 @@ regret_fn=[log(exp(v).mean(axis=0)) for v in  [vv['fn_trn'][-len(vv['fn_trn'])//
 stat_fp=last_fp
 stat_fn=last_fn
 
-srch=lambda x:x[2][-1]#lambda x:nmx(x[2])
+#srch=lambda x:x[2][-1]
+srch=lambda x:nmx(x[2])
 L=sorted(list(zip(fpfnrls,stat_fp,stat_fn)),key=srch)
 
 f_to_str(['lrfpfn','reg','lr  tfp:']+list(tfps),p=True)

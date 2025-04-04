@@ -15,6 +15,7 @@ from pathlib import Path
 from collections import namedtuple
 from os.path import dirname,abspath
 from sys import path
+from csv import writer
 path.append(dirname(dirname(abspath(__file__))))
 from cal.thlay import activations,f_to_str,shuffle_xy,init_layers_adam,dict_adam_no_bias,\
                       rbd24,mk_cross_entropy,implementation,TimeStepper,KeyEmitter,l2,mk_l1,\
@@ -130,17 +131,34 @@ get_preds=vmap(_get_preds,(0,None,None,None,None),0)
 get_preds_thresh=vmap(_get_preds_thresh,(0,None,None,None,None,0),0)
 get_state=vmap(_get_state)
 mod_shape=[in_dim,128,64,32,1]#[in_dim,1]
-#mod_shape=[in_dim,256,128,64,1]#,8,1]#[in_dim,1]
+##mod_shape=[in_dim,256,128,64,1]#,8,1]#[in_dim,1]
+##mod_shape=[in_dim,81, 54, 36, 24, 16,1]#,256,128,64,1]#,8,1]#[in_dim,1]
+#mod_shape=[in_dim,54,36,24,16,1]#,256,128,64,1]#,8,1]#[in_dim,1]
+#start_width=64
+#end_width=8
+#depth=8
+#width_decay=(end_width/start_width)**(1/depth)
+#mod_shape=[in_dim]+[int(start_width*width_decay**i) for i in range(depth)]+[1]
+print('Model shape:',mod_shape)
 
 
 ep_scale=0.
 epochs_per_trial=200
 
-outf='n_ep_'+str(epochs_per_trial)+'_'+act_name+'_'+\
-     dataset+('-'.join([str(l) for l in mod_shape]))+'.pkl'
+out='n_ep_'+str(epochs_per_trial)+'_'+act_name+'_'+dataset+('-'.join([str(l) for l in mod_shape]))
+
+outp=out+'.pkl'
+outc=out+'.csv'
+outc_nice=out+'_rounded.csv'
 
 if batchnorm:
-  outf='bn_'+outf
+  outp='bn_'+outp
+  outc='bn_'+outc
+  outc_nice='bn_'+outc_nice
+
+outp=Path(outp)
+outc=Path(outc)
+outc_nice=Path(outc_nice)
 
 ts.get_timestep()
 epoch_keys=ke.emit_key(epochs_per_trial)
@@ -149,13 +167,17 @@ res={}
 tfps=geomspace(.1,.5,n_par)
 tfns=geomspace(.1,.01,n_par)
 
-lrs=[.001,.0001]#,.0001] #seems best when not batch norming?
+lrs=[.0001]
 #lrs=[.001]#,.00001,.000001]
 tfpfn=array(tfps/tfns)
 #lrfpfns=geomspace(.0001,.001,10)
-#lrfpfns=geomspace(.0001,.0003,10)
-lrfpfns=geomspace(.0001,.1,10)#[.0003,.003,.01]
-regs=[.1,.01]#[1,.3,.1]#,.001]#,.0001,0]#[.1,.01,.001]#geomspace(.0001,.01,5)
+lrfpfns=geomspace(.0002,.03,10)
+#lrfpfns=geomspace(.0001,.1,10)#[.0003,.003,.01]
+regs=[.001,.01]#[1,.3,.1]#,.001]#,.0001,0]#[.1,.01,.001]#geomspace(.0001,.01,5)
+#[lr,reg*lr,lrfpfn,tfp,tfn,fp_train,fn_train,fp_test,fn_test]
+header='lr,reg,lrfpfn,tfp,tfn,fp_train,fn_train,fp_test,fn_test\n'
+with outc.open('w') as fd:fd.write(header)
+with outc_nice.open('w') as fd:fd.write(header)
 for lrfpfn,reg,lr in [(lrfpfn,reg,lr) for lrfpfn in lrfpfns for reg in regs for lr in lrs]:
   res_current=dict(fp_trn=[],fn_trn=[],fp_tst=[],fn_tst=[])
   res[lrfpfn,reg*lr,lr]=res_current
@@ -194,5 +216,18 @@ for lrfpfn,reg,lr in [(lrfpfn,reg,lr) for lrfpfn in lrfpfns for reg in regs for 
       ts.get_timestep('report')
       ts.report(p=True)
 
-  with Path(outf).open('wb') as fd:
+  with outp.open('wb') as fd:
     dump((tfps,tfns,res,mod_shape),fd)
+  with outc.open('a') as fd:
+    with outc_nice.open('a') as fd_nice:
+      w=writer(fd)
+      w_nice=writer(fd_nice)
+      fp_trains=res_current['fp_trn'][-1]
+      fn_trains=res_current['fn_trn'][-1]
+      fp_tests=res_current['fp_tst'][-1]
+      fn_tests=res_current['fn_tst'][-1]
+      for tfp,tfn,fp_train,fn_train,fp_test,fn_test in\
+      zip(tfps,tfns,fp_trains,fn_trains,fp_tests,fn_tests):
+        row=[lr,reg*lr,lrfpfn,tfp,tfn,fp_train,fn_train,fp_test,fn_test]
+        w.writerow(row)
+        w_nice.writerow([f_to_str(z) for z in row])
