@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from itertools import count
 from csv import writer
 from os.path import isdir,isfile
-from os import mkdir,listdir,get_terminal_size
+from os import mkdir,listdir,get_terminal_size,devnull
 from io import BytesIO
 from urllib.request import urlopen
 from zipfile import ZipFile
@@ -26,11 +26,12 @@ from jax.scipy.signal import convolve
 from jax.nn import tanh,softmax
 from jax.random import uniform,normal,split,key,choice,binomial,permutation
 from jax.tree import map as jma,reduce as jrd
-from jax import grad,value_and_grad,jit,config
+from jax import grad,value_and_grad,jit,config,vmap
 from jax.lax import scan,while_loop,switch
 from jax.lax.linalg import svd
 from sklearn.utils.extmath import cartesian
-from pandas import read_csv
+from sklearn.model_selection import train_test_split
+from pandas import read_csv,concat
 from matplotlib.pyplot import imshow,legend,show,scatter,xlabel,ylabel,\
                               gca,plot,title,savefig,close,rcParams,yscale
 from matplotlib.patches import Patch
@@ -38,6 +39,7 @@ from matplotlib.cm import jet
 rcParams['font.family'] = 'monospace'
 from pandas import read_pickle,read_parquet,concat,get_dummies
 from traceback import format_exc
+from sklearn.ensemble import RandomForestRegressor
 
 def set_jax_cache():
   config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
@@ -1976,31 +1978,49 @@ def dl_rbd24(data_dir=str(Path.home())+'/data',
 
 def unsw(csv_train=Path.home()/'data'/'UNSW_NB15_training-set.csv',
          csv_test=Path.home()/'data'/'UNSW_NB15_testing-set.csv',
-         rescale='log',numeric_only=False,verbose=True):
-  df_train0=read_csv(csv_train)
-  df_test0=read_csv(csv_test)
-  df_train=df_train0.drop(['id','attack_cat'],axis=1)
-  df_test=df_test0.drop(['id','attack_cat'],axis=1)
-  y_train=df_train['label'].__array__().astype(bool)
-  y_test=df_test['label'].__array__().astype(bool)
+         rescale='log',numeric_only=False,verbose=False,
+         random_split=False,lab_cat=False):
+  _df_train=read_csv(csv_train)
+  _df_test=read_csv(csv_test)
+  if lab_cat:
+    y_train=_df_train['attack_cat']
+    y_test=_df_test['attack_cat']
+    if verbose:
+      print('Train:')
+      print(y_train.value_counts())
+      print('Test:')
+      print(y_test.value_counts())
+  else:
+    y_train=df_train['label']
+    y_test=df_test['label']
+  df_train=_df_train.drop(['id','attack_cat'],axis=1)
+  df_test=_df_test.drop(['id','attack_cat'],axis=1)
   if numeric_only:
     df_train=df_train.select_dtypes(include=number)
     df_test=df_test.select_dtypes(include=number)
   else:
     df_train=get_dummies(df_train)#.__array__().astype(float)
     df_test=get_dummies(df_test)#.__array__().astype(float)
-
   x_train=df_train.drop(['label'],axis=1)
   x_test=df_test.drop(['label'],axis=1)
+
   train_cols=set(x_train.columns)
   test_cols=set(x_test.columns)
   diff_cols=train_cols^test_cols
   common_cols=list(train_cols&test_cols)
-  x_test=x_test[common_cols].__array__().astype(float)
-  x_train=x_train[common_cols].__array__().astype(float)
-  if verbose:
-    print('x_train.min(),x_test.min():',x_train.min(),x_test.min())
-    print('x_train.max(),x_test.max():',x_train.max(),x_test.max())
+  x_test=x_test[common_cols]
+  x_train=x_train[common_cols]
+  #if verbose:
+  #  print('x_train.min(),x_test.min():',x_train.min(),x_test.min())
+  #  print('x_train.max(),x_test.max():',x_train.max(),x_test.max())
+  if random_split:
+    x_train,x_test,y_train,y_test=train_test_split(concat([x_train,x_test]),concat([y_train,y_test]),
+                                                   test_size=.3,random_state=random_split)
+  x_train=x_train.__array__().astype(float)
+  x_test=x_test.__array__().astype(float)
+  if not lab_cat:
+    y_train=y_train.__array__().astype(bool)
+    y_test=y_test.__array__().astype(bool)
   if rescale=='log':
     if verbose:print('rescaling x<-log(1+x)')
     x_test=log(1+x_test)
@@ -2015,28 +2035,10 @@ def unsw(csv_train=Path.home()/'data'/'UNSW_NB15_training-set.csv',
     print('New x_train.min(),x_test.min():',x_train.min(),x_test.min())
     print('New x_train.max(),x_test.max():',x_train.max(),x_test.max())
     print('Differing columns:',f_to_str(list(diff_cols)))
-  y_test=df_test['label'].__array__().astype(bool)
-  y_train=df_train['label'].__array__().astype(bool)
-  if verbose:
     print('Common cols:',*common_cols)
-    print('x vals of ds[0]:')
-    print(*df_train0.iloc[0][common_cols])
-    print('label of ds[0]:')
-    print(df_train0.iloc[0]['label'])
-    print('first row of xy:')
-    print(*x_train[0])
-    print(y_train[0])
-    print('x vals of ds[-1]:')
-    print(*df_train0.iloc[-1][common_cols])
-    print('label of ds[-1]:')
-    print(df_train0.iloc[-1]['label'])
-    print('last row of xy:')
-    print(*x_train[-1])
-    print(y_train[-1])
-    print()
-  return (x_train,y_train),(x_test,y_test),(df_train0,df_test0),sc if rescale=='standard' else rescale
+  return (x_train,y_train),(x_test,y_test),(_df_train,_df_test),(sc if rescale=='standard' else rescale)
 
-def rbd24(preproc=True,split_test_train=True,rescale='log',single_dataset=False,
+def rbd24(preproc=True,split_test_train=True,rescale='log',single_dataset=False,random_split=False,
           raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl',categorical=True,
           processed_pickle_file=str(Path.home())+'/data/rbd24/rbd24_proc.pkl',verbose=False):
   if split_test_train and preproc and rescale=='log' and\
@@ -2072,10 +2074,13 @@ def rbd24(preproc=True,split_test_train=True,rescale='log',single_dataset=False,
   x_cols=x.columns
   x=x.__array__().astype(float)
   y=df.label.__array__().astype(bool)
-  l=len(y)
-  split_point=int(l*.7)
-  x_train,x_test=x[:split_point],x[split_point:]
-  y_train,y_test=y[:split_point],y[split_point:]
+  if random_split:
+    x_train,x_test,y_train,y_test=train_test_split(x,y,test_size=.3,random_state=random_split)
+  else:
+    l=len(y)
+    split_point=int(l*.7)
+    x_train,x_test=x[:split_point],x[split_point:]
+    y_train,y_test=y[:split_point],y[split_point:]
   if split_test_train and preproc and rescale=='log' and not single_dataset:
     if verbose:print('Saving processed log rescaled pickle...')
     with open(processed_pickle_file,'wb') as fd:
@@ -2086,6 +2091,18 @@ def rbd24(preproc=True,split_test_train=True,rescale='log',single_dataset=False,
     x_train=sc.transform(x_train)
     x_test=sc.transform(x_test)
   return (x_train,y_train),(x_test,y_test),(df,sc)
+
+def load_ds(dataset,rescale='standard',verbose=False,random_split=0,categorical=True,
+            single_dataset=None,lab_cat=False):
+  if dataset=='unsw':
+    (X_trn,Y_trn),(X_tst,Y_tst),_,sc=unsw(rescale=rescale,verbose=verbose,
+                                          random_split=random_split,lab_cat=lab_cat)
+  elif dataset=='rbd24':
+    if lab_cat:
+      print('WARNING: lab_cat will have no effect on rbd24')
+    (X_trn,Y_trn),(X_tst,Y_tst),(_,sc)=rbd24(rescale=rescale,random_split=random_split,
+                                             categorical=categorical,single_dataset=single_dataset)
+  return X_trn,Y_trn,X_tst,Y_tst,sc
 
 def preproc_rbd24(df,split_test_train=True,rm_redundant=True,plot_xvals=False,
                   check_large=False,check_redundant=False,rescale_log=True,verbose=False):
@@ -2402,3 +2419,278 @@ def mk_epochs(imp,n_batches,bs,lo,X_train,Y_train,X_test,Y_test,pids=False,
     return _epochs(states,consts,ks)
 
   return epochs,dlo
+
+def mk_nn_epochs(act,bs,X_trn,Y_trn,X_tst,Y_tst,batchnorm=False):
+  '''
+  Returns a function which trains multiple neural networks.
+  This approach allows the user to provide a custom activation and batch size,
+  while still benefitting from jax's jit functionality.
+  '''
+
+  header='lr,reg,lrfpfn,tfp,tfn,fp_train,fn_train,fp_test,fn_test\n'
+  n_batches=len(Y_trn)//bs
+  last=n_batches*bs
+  _forward=lambda w,x:forward(w,x,act,batchnorm=batchnorm,transpose=True)
+  def _loss(w,x,y,bet):
+    yp=_forward(w,x)
+    return jsm((bet*y+(1-y)/bet)*(1-2*y)*yp)
+
+  _dl=grad(_loss)
+  def _upd(x,y,s,ca,cb):
+    return dict_adam_no_bias(_dl(s['w'],x,y,cb['bet']),s,ca)
+
+  def _set_bet(cb,pred,epoch,ep_scale):
+    cb['bet']*=exp(cb['lrfpfn']*(-pred['fp_trn']/cb['tfp']+pred['fn_trn']/cb['tfn'])/epoch**ep_scale)
+    return cb
+
+  upd=vmap(_upd,(None,None,0,0,0),0)
+  set_bet=vmap(_set_bet,(0,0,None,None),0)#,None
+
+  @jit
+  def steps(states,consts_adam,X,Y,consts):
+    return scan(lambda states,xy:(upd(xy[0],xy[1],states,consts_adam,consts),0),states,(X,Y))[0]
+
+  @jit
+  def get_reshuffled(k):
+    X,Y=shuffle_xy(k,X_trn,Y_trn)
+    return X[:last].reshape(n_batches,bs,-1),Y[:last].reshape(n_batches,bs)
+
+  @jit
+  def _get_preds_thresh(w,tfpfn):
+    yps=forward(w,X_trn,act,transpose=True,get_transform=batchnorm,batchnorm=batchnorm)
+    if batchnorm:
+      yps,w=yps
+    Yp_smooth_trn=yps.flatten()
+    Yp_smooth_tst=forward(w,X_tst,act,transpose=True,batchnorm=False).flatten()
+    Yp_trn=Yp_smooth_trn>0.
+    Yp_tst=Yp_smooth_tst>0.
+    y_max=Yp_smooth_trn.max()
+    y_min=Yp_smooth_trn.min()
+    thresh=find_thresh(Y_trn,Yp_smooth_trn,tfpfn,1e-1)
+    Yp_trn_thresh=Yp_smooth_trn>thresh
+    return {'fp_trn':((~Y_trn)&(Yp_trn)).mean(),'fn_trn':((Y_trn)&(~Yp_trn)).mean(),
+            'fp_tst':((~Y_tst)&(Yp_tst)).mean(),'fn_tst':((Y_tst)&(~Yp_tst)).mean(),
+            'fp_tsh':((~Y_trn)&(Yp_trn_thresh)).mean(),'fn_tsh':((Y_trn)&(~Yp_trn_thresh)).mean(),
+            'max':y_max,'min':y_min,'var':Yp_smooth_trn.var(),'thresh':thresh}
+
+  @jit
+  def _get_state(s):
+    return dict(wl2=l2(s['w']),mv=l2(s['m'])/l2(s['v']),t=s['t'])
+
+  get_preds_thresh=vmap(_get_preds_thresh)
+  get_state=vmap(_get_state)
+
+  def nn_epochs(n_epochs,consts_hp,consts_adam,states,k,outc=devnull,outc_nice=devnull,
+                new_csvs=True,verbose=True,ep_scale=0.):
+    outc=Path(outc)
+    outc_nice=Path(outc_nice)
+    if new_csvs:
+      with outc.open('w') as fd:fd.write(header)
+      with outc_nice.open('w') as fd:fd.write(header)
+    tfps=consts_hp['tfp']
+    tfns=consts_hp['tfn']
+    lrfpfns=consts_hp['lrfpfn']
+    lrs=consts_adam['lr']
+    regs=consts_adam['reg']
+    tfpfns=tfps/tfns
+    k,l=split(k)
+    res=dict(fp_trn=[],fn_trn=[],fp_tst=[],fn_tst=[])
+    epoch_keys=split(l,n_epochs)
+    for epoch,k in enumerate(epoch_keys,1):
+      X,Y=get_reshuffled(k)
+      states=steps(states,consts_adam,X,Y,consts_hp)
+      preds=get_preds_thresh(states['w'],tfpfns)
+      [v.append(preds[l]) for l,v in res.items()]
+      states['w'][-1][1]-=preds['thresh'].reshape(-1,1)#*.2
+      consts_hp=set_bet(consts_hp,preds,epoch,ep_scale)
+      if verbose and not(epoch%10):
+        print('============','epoch',epoch,'============')
+        l2stats=get_state(states)
+        [f_to_str([v]+list(l2stats[v]),p=True) for\
+         v in sorted(list(l2stats),key=lambda s:s[-2:]=='l2' and s[0]!='w')]
+        [f_to_str([stat]+list(v),p=True) for stat,v in consts_hp.items()]
+        [f_to_str([v]+list(consts_adam[v]),p=True) for v in ['lr','reg']]
+        [f_to_str([pr]+list(preds[pr]),p=True) for\
+         pr in sorted(list(preds),key=lambda s:s[-3:]=='trn')]
+    with outc.open('a') as fd:
+      with outc_nice.open('a') as fd_nice:
+        w=writer(fd)
+        w_nice=writer(fd_nice)
+        fp_trains=res['fp_trn'][-1]
+        fn_trains=res['fn_trn'][-1]
+        fp_tests=res['fp_tst'][-1]
+        fn_tests=res['fn_tst'][-1]
+        for lr,reg,lrfpfn,tfp,tfn,fp_train,fn_train,fp_test,fn_test in\
+        zip(lrs,regs,lrfpfns,tfps,tfns,fp_trains,fn_trains,fp_tests,fn_tests):
+          row=[lr,reg,lrfpfn,tfp,tfn,fp_train,fn_train,fp_test,fn_test]
+          w.writerow(row)
+          w_nice.writerow([f_to_str(z) for z in row])
+
+    return res
+
+  return nn_epochs
+
+def init_consts_states(k,mod_shape,init,lrfpfn,reg,p,tfps,tfns,
+                       lr=1e-4,beta1=.9,beta2=.999,eps=1e-8,bias=.1):
+  '''
+  Helper function for initialising constants and states for a collection of neural networks.
+
+  Parameters:
+  k::jax prng key or numerical: seed or key for generating model weights
+  mod_shape::list[int]: the size of each layer in the network
+  init::str: glorot_uniform or glorot_normal, the distribution for the weights
+  lrfpfn::float: the loss used here is adjusted do compensate for relative rates of fp vs fn.
+  This parameter controls the rate at which the weighting changes after each epoch.
+  reg::float: constant for L2 regularisation
+  p::float: the imbalance of the dataset - only used to set a prior guess for lrfpfn
+  tfps::list[float]: a list of target false positive rates
+  tfns::list[float]: a list of target false negative rates
+
+  Returns:
+  consts_hp,consts_adam,states: a tuple of dicts corresponding to the constants and states of the
+  neural networks, which can then be trained using nn_epochs()
+  '''
+  if isinstance(k,int|float):
+    k=key(k) #For initialising weights
+  n_par=len(tfps)
+  lrfpfn,reg,lr=(array([h]*n_par) for h in (lrfpfn,reg,lr))
+  beta1s,beta2s,epsilons,bets=(array([c]*n_par) for c in (beta1,beta2,eps,((1-p)/p)**.5))
+  consts_hp=dict(bet=bets,lrfpfn=lrfpfn,tfp=tfps,tfn=tfns)
+  consts_adam=dict(beta1=beta1s,beta2=beta2s,lr=lr,reg=reg,eps=epsilons)
+  states=init_layers_adam(mod_shape,init,k=k,transpose=True,n=n_par,bias=bias)
+  return consts_hp,consts_adam,states
+
+class ModelEvaluation:
+  def __init__(self,ds='unsw',seed=1729,lab_cat=True,sds=False,categorical=True,out_fn=None):
+    self.seed=seed
+    self.rng=default_rng(seed)
+    if out_fn is None:
+      out_fn=ds+'_'+'_'+('lc_' if lab_cat else '')+'s_'+str(seed)+'_model_res'
+    self.out_fn=out_fn
+    if isinstance(ds,str):
+      self.X_trn,Y_trn,self.X_tst,Y_tst,self.sc=load_ds(ds,random_split=self.rng.integers(2**32),
+                                                        lab_cat=lab_cat,single_dataset=sds)
+    else:
+      self.X_trn,Y_trn,self.X_tst,Y_tst,self.sc=ds
+    if lab_cat:
+      Y_labs=set(Y_trn)
+      self.Y_trn={l:Y_trn==l for l in Y_labs}
+      self.Y_tst={l:Y_tst==l for l in Y_labs}
+    else:
+      self.Y_trn={'all':Y_trn}
+      self.Y_tst={'all':Y_tst}
+
+    self.p_trn={l:yt.mean() for l,yt in self.Y_trn.items()}
+    self.p_tst={l:yt.mean() for l,yt in self.Y_tst.items()}
+    self.regressors={}
+    self.thresholds={}
+    self.res_trn={}
+    self.res_tst={}
+  
+  def set_targets(self,tfps=None,tfns=None,n_targets=8,min_tfpfn=1.,max_tfpfn=100.,e0=.1):
+    if tfps is None:
+      gar=geomspace(min_tfpfn**.5,max_tfpfn**.5,n_targets)
+      tfp0=e0*gar
+      tfn0=e0/gar
+      self.tfps={l:tfp0*p for l,p in self.p_trn.items()}
+      self.tfns={l:tfn0*p for l,p in self.p_trn.items()}
+    elif isinstance(tfps,list):
+      self.tfps={l:tfps for l in self.p_trn}
+      self.tfns={l:tfns for l in self.p_trn}
+    else:
+      self.tfps=tfps
+      self.tfns=tfns
+
+    self.tfpfns={l:a/self.tfns[l] for l,a in self.tfps.items()}
+
+  def train_rfs(self,*depths,n_proc=-1):
+    if len(depths):
+      if isinstance(depths[0],list):
+        self.rf_depths=depths[0]
+      elif isinstance(depths[0],int):
+        self.rf_depths=range(*depths)
+    else:
+      self.rf_depths=range(5,15)
+    regs={('rf',l,d):RandomForestRegressor(max_depth=d,n_jobs=-1,
+                                           random_state=self.rng.integers(2**32))\
+          for l in self.Y_trn for d in self.rf_depths}
+    self.regressors|=regs
+    for (_,l,_),v in regs.items():
+      v.fit(self.X_trn,self.Y_trn[l])
+    Y_ordered=self.ordered_predictions(regs)
+    self.thresh_from_ordered(Y_ordered)
+
+  def thresh_from_ordered(self,Y_ordered):
+    for (r,l,d),Yo in Y_ordered.items():
+      for tfpfn,thresh,fp,fn in get_threshes(tfpfn,Yo,self.p_trn[l]):
+            self.thresholds[(r,l,d,tfpfn)]=thresh
+            self.res_trn[(r,l,d,tfpfn)]=dict(fp=fp,fn=fn,fpfn=fp/fn)
+
+  def ordered_predictions(self,regs,X='train',Y=None):
+    if X=='train':
+      X,Y=self.X_trn,self.Y_trn
+    elif X=='test':
+      X,Y=self.X_tst,self.Y_tst
+    return {(r,l,d):sorted(zip(reg.predict(X),Y[l])) for (r,l,d),reg in regs.items()}
+
+  def bench_rfs(self,save=True):
+    for r,l,d,reg in [m for m in self.regressors.items() if m[0][0]=='rf']:
+      X_tst,Y_tst=self.X_tst[l],self.Y_tst[l]
+      Yp_smooth=reg.predict(X_tst)
+      threshes=[self.thresholds[(r,l,d,tfpfn)] for tfpfn in self.tfpfns]
+      for tfpfn,fp,fn in zip(self.tfpfns,get_class_by_thresh(threshes,yo)):
+        self.res_tst[(r,l,d,tfpfn)]=dict(dict(fp=fp,fn=fn,fpfn=fp/fn))
+    self.save_res()
+
+  def save(self,append=False):
+    res_all=self.res_to_list()
+    with Path(self.out_f+'.pkl').open('wb') as fd:
+      dump((self.seed,self.res_tst,self.res_trn),fd)
+    with Path(self.out_f+'.csv').open('a' if append else 'w') as fd:
+      w=writer(fd)
+      if not append:
+        w.writeline(self.header)
+      [w.writeline(l) for l in res_all]
+
+  def res_to_list(self):
+    self.header=['lab_cat','p','imbalance','target_ratio','fp_train',
+                 'fn_train','fp_train','fn_test','method']
+    self.res_list=[[l,str(self.p_trn[l]),tfpfn,
+                    trn['fp'],trn['fn'],tst['fp'],tst['fn'],r] for trn,tst,l,r,tfpfn,d in\
+                    [(self.res_trn[(r,l,d,tfpfn)],self.res_tst[(r,l,d,tfpfn)],l,r,tfpfn,d) for\
+                                   (r,l,d,tfpfn) in self.res_test]]
+
+
+def get_threshes(tfpfns,yo,p):
+  n_thresh=len(tfpfns)
+  delta_p=1/len(yo)
+  i=0
+  fp=0
+  fn=p
+  for thresh,y in yo:
+    if y:
+      fn-=delta_p
+    else:
+      fp+=delta_p
+    if fp/fn>tfpfns[i]:
+      yield tfpfns[i],thresh,fp,fn
+      i+=1
+      if i==n_thresh:
+        break
+
+def get_class_by_thresh(threshes,yo):
+  n_thresh=len(tfpfns)
+  delta_p=1/len(Yo)
+  i=0
+  fp=0
+  fn=sum([Y[1] for Y in Yo])*delta_p
+  for yp,y in Yo:
+    if y:
+      fn-=delta_p
+    else:
+      fp+=delta_p
+    if yp>threshes[i]:
+      yield fp,fn
+      i+=1
+      if i==n_thresh:
+        break
