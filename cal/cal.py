@@ -40,6 +40,7 @@ rcParams['font.family'] = 'monospace'
 from pandas import read_pickle,read_parquet,concat,get_dummies
 from traceback import format_exc
 from sklearn.ensemble import RandomForestRegressor
+from csv import reader,writer
 
 def set_jax_cache():
   config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
@@ -879,7 +880,7 @@ losses={'loss':mk_l1,'l1':mk_l1,'cross_entropy':mk_cross_entropy,
         #'coalescence_cost':dcoalescence_cost,'cross_entropy_rn':dcross_entropy_rn,
         #'coalescence_res_cost':dcoalescence_res_cost}
 
-def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n=None,bias=0.,
+def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n_par=None,bias=0.,
                 sqrt_normalise=False,orthonormalise=False,transpose=False):
   n_steps=len(layer_dimensions)-1
   if initialisation in ['ones','zeros']:
@@ -891,10 +892,10 @@ def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n=None,bias=0.,
   wb=[]
   A=[]
   B=[]
-  if n is None:
+  if n_par is None:
     e_dims=tuple()
   else:
-    e_dims=(n,)
+    e_dims=(n_par,)
   for i,(k,l,d_i,d_o) in enumerate(zip(w_k,b_k,layer_dimensions,layer_dimensions[1:])):
     match initialisation:
       case 'zeros':
@@ -939,7 +940,7 @@ def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n=None,bias=0.,
 
 def init_layers_adam(*a,**kwa):
   w=init_layers(*a,**kwa)
-  kwa['bias']=0.
+  kwa['bias']=kwa.pop('bias',0)
   return {'w':w,'m':init_layers(a[0],'zeros',**kwa),
           'v':init_layers(a[0],'zeros',**kwa),'t':zeros(kwa['n']) if 'n' in kwa else 0}
 
@@ -2273,8 +2274,8 @@ def min_dist(X,Y=None):
           return m,x,y
     return m,x,y
 
-def mk_exp(lr,reg,in_dim,start_dim,end_dim,depth,tfp,tfn,p,beta1,beta2,
-           initialisation,lrp,k,mk_beta0):#=lambda p,tfp,tfn:p**-.5):
+def mk_exp_nn(lr,reg,in_dim,start_dim,end_dim,depth,tfp,tfn,p,beta1,beta2,
+              initialisation,lrp,k,mk_beta0):#=lambda p,tfp,tfn:p**-.5):
   sh=[in_dim]+list(geomspace(start_dim,end_dim,depth+1,dtype=int))+[1]
   #Large beta: suppress fn more, small beta:suppress fp more.
   beta=mk_beta0(p,tfp,tfn)#1+(tfp-tfn)/p#(p+tfp)/(p+tfn) #Note typo in work of Rijsbergen
@@ -2300,7 +2301,7 @@ def mk_exps(targ_fpfns,in_dim,initialisation,p,k,tfpfns=[(.1,.01)],lrs=[1e-3],
            lr in lrs for reg in regs for start_dim in start_dims for\
            end_dim in end_dims for depth in depths for tfp,tfn in tfpfns for\
            beta1 in beta1s for beta2 in beta2s for lrp in lrps]
-  return [mk_exp(*param,l,mk_beta0=mk_beta0) for param,l in zip(params,split(k,len(params)))]
+  return [mk_exp_nn(*param,l,mk_beta0=mk_beta0) for param,l in zip(params,split(k,len(params)))]
 
 def binsearch_step(r,tfpfn,y,yp_smooth):
   a,b=r
@@ -2420,7 +2421,7 @@ def mk_epochs(imp,n_batches,bs,lo,X_train,Y_train,X_test,Y_test,pids=False,
 
   return epochs,dlo
 
-def mk_nn_epochs(act,bs,X_trn,Y_trn,X_tst,Y_tst,batchnorm=False):
+def mk_nn_epochs(act,bs,batchnorm=False):
   '''
   Returns a function which trains multiple neural networks.
   This approach allows the user to provide a custom activation and batch size,
@@ -2428,8 +2429,6 @@ def mk_nn_epochs(act,bs,X_trn,Y_trn,X_tst,Y_tst,batchnorm=False):
   '''
 
   header='lr,reg,lrfpfn,tfp,tfn,fp_train,fn_train,fp_test,fn_test\n'
-  n_batches=len(Y_trn)//bs
-  last=n_batches*bs
   _forward=lambda w,x:forward(w,x,act,batchnorm=batchnorm,transpose=True)
   def _loss(w,x,y,bet):
     yp=_forward(w,x)
@@ -2450,13 +2449,12 @@ def mk_nn_epochs(act,bs,X_trn,Y_trn,X_tst,Y_tst,batchnorm=False):
   def steps(states,consts_adam,X,Y,consts):
     return scan(lambda states,xy:(upd(xy[0],xy[1],states,consts_adam,consts),0),states,(X,Y))[0]
 
-  @jit
-  def get_reshuffled(k):
+  def get_reshuffled(k,X_trn,Y_trn,n_batches,bs,last):
     X,Y=shuffle_xy(k,X_trn,Y_trn)
     return X[:last].reshape(n_batches,bs,-1),Y[:last].reshape(n_batches,bs)
 
   @jit
-  def _get_preds_thresh(w,tfpfn):
+  def _get_preds_thresh(w,tfpfn,X_trn,Y_trn,X_tst,Y_tst):
     yps=forward(w,X_trn,act,transpose=True,get_transform=batchnorm,batchnorm=batchnorm)
     if batchnorm:
       yps,w=yps
@@ -2477,11 +2475,12 @@ def mk_nn_epochs(act,bs,X_trn,Y_trn,X_tst,Y_tst,batchnorm=False):
   def _get_state(s):
     return dict(wl2=l2(s['w']),mv=l2(s['m'])/l2(s['v']),t=s['t'])
 
-  get_preds_thresh=vmap(_get_preds_thresh)
+  get_preds_thresh=vmap(_get_preds_thresh,(0,0,None,None,None,None),0)
   get_state=vmap(_get_state)
 
-  def nn_epochs(n_epochs,consts_hp,consts_adam,states,k,outc=devnull,outc_nice=devnull,
-                new_csvs=True,verbose=True,ep_scale=0.):
+  @jit
+  def _nn_epochs(n_batches,bs,last,X_trn,Y_trn,X_tst,Y_tst,n_epochs,consts_hp,consts_adam,states,k,
+                 outc=devnull,outc_nice=devnull,new_csvs=True,verbose=True,ep_scale=0.):
     outc=Path(outc)
     outc_nice=Path(outc_nice)
     if new_csvs:
@@ -2497,9 +2496,9 @@ def mk_nn_epochs(act,bs,X_trn,Y_trn,X_tst,Y_tst,batchnorm=False):
     res=dict(fp_trn=[],fn_trn=[],fp_tst=[],fn_tst=[])
     epoch_keys=split(l,n_epochs)
     for epoch,k in enumerate(epoch_keys,1):
-      X,Y=get_reshuffled(k)
-      staees=steps(states,consts_adam,X,Y,consts_hp)
-      preds=get_preds_thresh(states['w'],tfpfns)
+      X,Y=get_reshuffled(k,X_trn,Y_trn,n_batches,bs)
+      states=steps(states,consts_adam,X,Y,consts_hp)
+      preds=get_preds_thresh(states['w'],tfpfns,X_trn,Y_trn,X_tst,Y_tst)
       [v.append(preds[l]) for l,v in res.items()]
       states['w'][-1][1]-=preds['thresh'].reshape(-1,1)#*.2
       consts_hp=set_bet(consts_hp,preds,epoch,ep_scale)
@@ -2528,10 +2527,17 @@ def mk_nn_epochs(act,bs,X_trn,Y_trn,X_tst,Y_tst,batchnorm=False):
 
     return res
 
+  def nn_epochs(X_trn,*a,**kwa):
+    n_batches=len(X_trn)//bs
+    last=n_batches*bs
+    return _nn_epochs(n_batches,bs,last,X_trn,*a,**kwa)
+
+
   return nn_epochs
 
-def init_consts_states(k,mod_shape,init,lrfpfn,reg,p,tfps,tfns,
-                       lr=1e-4,beta1=.9,beta2=.999,eps=1e-8,bias=.1):
+def init_states(k,init,lrfpfn,reg,p,tfps,tfns,mod_shape=None,in_dim=None,
+                start_width=None,end_width=None,depth=None,ret_dict=False,
+                lr=1e-4,beta1=.9,beta2=.999,eps=1e-8,bias=.1):
   '''
   Helper function for initialising constants and states for a collection of neural networks.
 
@@ -2550,20 +2556,36 @@ def init_consts_states(k,mod_shape,init,lrfpfn,reg,p,tfps,tfns,
   consts_hp,consts_adam,states: a tuple of dicts corresponding to the constants and states of the
   neural networks, which can then be trained using nn_epochs()
   '''
+  if mod_shape is None:
+    mod_shape=[in_dim]+list(geomspace(start_width,end_width,depth+1,dtype=int))+[1]
   if isinstance(k,int|float):
     k=key(k) #For initialising weights
   n_par=len(tfps)
-  lrfpfn,reg,lr=(array([h]*n_par) for h in (lrfpfn,reg,lr))
-  beta1s,beta2s,epsilons,bets=(array([c]*n_par) for c in (beta1,beta2,eps,((1-p)/p)**.5))
+  o=ones(n_par)
+  lrfpfn,reg,lr=(o*h for h in (lrfpfn,reg,lr))
+  beta1s,beta2s,epsilons,bets=(o*c for c in (beta1,beta2,eps,((1-p)/p)**.5))
   consts_hp=dict(bet=bets,lrfpfn=lrfpfn,tfp=tfps,tfn=tfns)
   consts_adam=dict(beta1=beta1s,beta2=beta2s,lr=lr,reg=reg,eps=epsilons)
-  states=init_layers_adam(mod_shape,init,k=k,transpose=True,n=n_par,bias=bias)
-  return consts_hp,consts_adam,states
+  states=init_layers_adam(mod_shape,init,k=k,transpose=True,n_par=n_par,bias=bias)
+  if ret_dict:
+    return dict(consts_hp=consts_hp,consts_adam=consts_adam,states=states)
+  else:
+    return consts_hp,consts_adam,states
 
 class ModelEvaluation:
-  def __init__(self,ds='unsw',seed=1729,lab_cat=True,sds=False,categorical=True,out_f=None):
+  def __init__(self,directory,ds='unsw',seed=1729,lab_cat=True,sds=False,categorical=True,out_f=None,
+               fixed_params={'nn':dict(n_epochs=100,start_width=128,end_width=32,depth=2,n_par=8,bs=128,
+                                       bias=.1,act='relu',init='glorot_normal',eps=1e-8,beta1=.9,beta2=.999),
+                             'rf':dict(n_jobs=-1)},
+               varying_params={'rf':[{'d':i} for i in range(3,13)],
+                               'nn':[{'lr_ad':la,'reg':rl*la,'lrfpfn':lf}for la in [.0001] for\
+                                     rl in [1e-3,1e-2] for lf in geomspace(.0002,.03,10)]}):
+    self.directory=Path(directory)
     self.seed=seed
     self.rng=default_rng(seed)
+    self.rkg=KeyEmitter(self.rng.integers(2**32))
+    self.varying_params=varying_params
+    self.fixed_params=fixed_params
     if out_f is None:
       out_f=ds+'_'+'_'+('lc_' if lab_cat else '')+'s_'+str(seed)+'_model_res'
     self.out_f=out_f
@@ -2584,42 +2606,125 @@ class ModelEvaluation:
     self.p_tst={l:yt.mean() for l,yt in self.Y_tst.items()}
     self.regressors={}
     self.thresholds={}
-    self.res_trn={}
-    self.res_tst={}
+    self.res={}
+    self.func={'nn':mk_nn_epochs(activations[self.fixed_params['nn']['act']],self.fixed_params['nn']['bs'])}
   
   def set_targets(self,tfps=None,tfns=None,n_targets=8,min_tfpfn=1.,max_tfpfn=100.,e0=.1):
     if tfps is None:
       gar=geomspace(min_tfpfn**.5,max_tfpfn**.5,n_targets)
       tfp0=e0*gar
       tfn0=e0/gar
-      self.tfps={l:tfp0*p for l,p in self.p_trn.items()}
-      self.tfns={l:tfn0*p for l,p in self.p_trn.items()}
-    elif isinstance(tfps,list):
-      self.tfps={l:tfps for l in self.p_trn}
-      self.tfns={l:tfns for l in self.p_trn}
-    else:
-      self.tfps=tfps
-      self.tfns=tfns
+      self.targets={l:[(tfp*p,tfn*p,tfp/tfn) for (tfp,tfn) in zip(tfp0,tfn0)]\
+                    for l,p in self.p_trn.items()}
+    elif isinstance(tfp0s,list):
+      n_targets=len(tfp0s)
+      self.targets={l:[(tfp0*p,tfn0*p,tfp0/tfn0) for (tfp0,tfn0) in zip(tfp0s,tfn0s)] for\
+                    l,p in self.p_trn.items()}
+    self.tfps={l:[t[0] for t in v] for l,v in self.targets.items()}
+    self.tfns={l:[t[1] for t in v] for l,v in self.targets.items()}
+    self.n_targets=n_targets
 
-    self.tfpfns={l:a/self.tfns[l] for l,a in self.tfps.items()}
+  def define_jobs(self,methods=['rf','nn'],resamplers=['']):
+    self.jobs=[(method,resampler,i) for i in range(len(self.varying_params[method])) for\
+               method in methods for resampler in resamplers]
+    self.n_complete=0
+    self.n_remaining=len(self.jobs)
 
-  def train_rfs(self,*depths,n_proc=-1):
-    if len(depths):
-      if isinstance(depths[0],list):
-        self.rf_depths=depths[0]
-      elif isinstance(depths[0],int):
-        self.rf_depths=range(*depths)
+  def init_models(self):
+    for method,i,resampler in self.jobs:
+      params=self.varying_params[method][i]
+      self.regressors[method,i,resampler]={l:self.init_model(method,params,resampler) for\
+                                           l in self.p_trn}
+
+  def benchmark_models(self):
+    regs=sorted(self.regressors.items,key=lambda x:x[-1])
+    self.resampler=''
+    for (method,i,resampler),reg in self.regressors.items():
+      if resampler!=self.resampler:
+        self.resample(resampler)
+      self.res[method,i,self.resampler]=self.benchmark_model(method,reg)
+
+  def update_results(self,single=False):
+    done_fp=(self.directory/'done.csv')
+    res_fp=self.directory/'res.csv'
+    append_done=done_fp.exists():
+    if single:
+      newly_done={single}
+    elif append:
+      with done_fp.open('r') as fd:
+        previously_done=set(list(reader(fd)))
+      newly_done=set(self.res)-previously_done
     else:
-      self.rf_depths=range(5,15)
-    regs={('rf',l,d):RandomForestRegressor(max_depth=d,n_jobs=-1,
-                                           random_state=self.rng.integers(2**32))\
-          for l in self.Y_trn for d in self.rf_depths}
-    self.regressors|=regs
-    for (_,l,_),v in regs.items():
-      v.fit(self.X_trn,self.Y_trn[l])
-      with Path(self.out_f+'_rfs.pkl').open('wb') as fd:dump(self.regressors,fd)
-    Y_ordered=self.ordered_predictions(regs)
-    self.thresh_from_ordered(Y_ordered)
+      newly_done=self.res
+
+    append_res=res_fp.exists()
+    with res_fp.open('a' if append_res else 'w') as fd:
+      w=DictWriter(fd['method','parameter_index','resampler','fp_target','fn_target',
+                      'fp_train','fn_train','fp_test','fn_test'])
+      if not append_res:fd.writeheader()
+      [w.writerow(dict(method=method,parameter_index=i,resampler=resampler,
+                       **{k+lab:self.res[method,i,resampler][s][k] for k in ('fp','fn') for (lab,s) in\
+                       (('_target','tgt'),('_train','trn'),('_test','tst'))})) for (method,i,resampler) in\
+                       newly_done]
+
+    with done_fp.open('w' if new else 'a') as fd:
+      w=writer(fd)
+      [w.writerow(r) for r in newly_done]
+
+  def resample(self,resampler):
+    match resampler:
+      case '':
+        self.X_trn_resamp,self.Y_trn_resamp=Self.X_trn,self.Y_trn
+      case _:
+        raise NotImplementedError('Resampler',resampler,'not found')
+    self.resampler=resampler
+
+  def init_model(self,method,param,resampler):
+    pm=self.fixed_params[method]
+    match method:
+      case 'rf':
+        return {l:{'rf':RandomForestRegressor(max_depth=param['d'],n_jobs=self.fixed_params['rf'],
+                                              random_state=self.rng.integers(2*32)),
+                   'thresholds':{}} for l in self.p_trn}
+      case 'nn':
+        return {l:init_states(self.rkg.emit_key(),pm['init'],param['lrfpfn'],param['reg'],p,
+                              self.tfps[l],self.tfns[l],in_dim=self.X_trn.shape[1],
+                              start_width=pm['start_width'],end_width=pm['end_width'],
+                              depth=pm['depth'],lr=param['lr_ad'],beta1=pm['beta1'],beta2=pm['beta2'],
+                              eps=pm['eps'],bias=pm['bias'],ret_dict=True)\
+                for l,p in self.p_trn.items()}
+      case _:
+        raise NotImplementedError('Method',method,'not found')
+
+  def benchmark_model(self,method,regressor):
+    res={}
+    for l,reg in regressor.items():
+      res[l]={'trn':{},'tst':{},'tgt':{a:dict(fp=b,fn=c,fpfn=a) for a,b,c in self.targets[l]}}
+      tgts=self.targets[l]
+      match method:
+        case 'rf':
+          reg['rf'].fit(self.X_trn_resamp,self.Y_trn_resamp[l])
+          Yp_ordered=sorted(zip(reg['rf'].predict(self.X_trn),self.Y_trn[l]))
+          for tfpfn,thresh,fp,fn in get_threshes(self.targets[l],Yp_ordered,self.p_trn[l]):
+            reg['thresholds'][tfpfn]=thresh
+            res[l]['trn'][tfpfn]=dict(fp=fp,fn=fn,fpfn=fp/fn)
+            Yp_tst=reg['rf'].predict(self.X_tst)>thresh
+            fpt=((~self.Y_tst)&Yp_tst).mean()
+            fnt=(self.Y_tst&~Yp_tst).mean()
+            res[l]['tst'][tfpfn]=dict(fp=fpt,fn=fnt,fpfn=fpt/fnt)
+
+        case 'nn':
+          f_arrs=self.func['nn'](ms['n_epochs'],reg['consts_hp'],reg['consts_adam'],reg['states'],
+                                 ms['ke'].emit_key(),outc=devnull,outc_nice=devnull,new_csvs=False,
+                                 verbose=False,ep_scale=0.)
+          for stage in ['tst','trn']:
+            fp_ar=f_arrs['fp_'+stage]
+            fn_ar=f_arrs['fn_'+stage]
+            for tfpfn,fp,fn in zip(tgts,fp_ar,fn_ar):
+              res[l][stage][tfpfn]=dict(fp=fp,fn=fn,fpfn=fp/fn)
+        case _:
+          raise NotImplementedError('Method',method,'not found')
+    return res
 
   def thresh_from_ordered(self,Y_ordered):
     for rld,Yo in Y_ordered.items():
@@ -2647,10 +2752,9 @@ class ModelEvaluation:
       self.mod_shape=mod_shape
     if hyperparams is None:
       hyperparams=[(lrfpfn,reglr*lr,lr) for lrfpfn in lrfpfns for reglr in reglrs for lr in lrs]
-    self.ke=KeyEmitter(self.rng.integers(2*832))
-    self.regressors={('nn',l,lrfpfn,reglr,lr):init_consts_states(self.emit_key(),self.mod_shape,
-                                                                 self.init,self.lrfpfn,reg,imb,
-                                                                 self.tfps,self.tfns,lr=lr)for\
+    self.ke=KeyEmitter(self.rng.integers(2*32))
+    self.regressors={('nn',l,lrfpfn,reglr,lr):init_states(self.emit_key(),self.mod_shape,self.init,
+                                                          self.lrfpfn,reg,imb,self.tfps,self.tfns,lr=lr)for\
                      lrfpfn,reglr,lr in hyperparams for l,imb in self.p_trn.items()}
   
   def train_nns(self,new_csvs=True):
@@ -2660,11 +2764,12 @@ class ModelEvaluation:
       with Path(self.out_f+'_nns.pkl').open('wb') as fd:dump(self.res_nn,fd)
       new_csvs=False
 
-  def ordered_predictions(self,regs,X='train',Y=None):
+  def ordered_predictions(self,reg,X='train',Y=None):
     if X=='train':
       X,Y=self.X_trn,self.Y_trn
     elif X=='test':
       X,Y=self.X_tst,self.Y_tst
+
     return {(r,l,d):sorted(zip(reg.predict(X),Y[l])) for (r,l,d),reg in regs.items()}
 
   def bench_rfs(self,save=True):
@@ -2695,11 +2800,13 @@ class ModelEvaluation:
                                    k in self.res_test]]
 
 def get_threshes(tfpfns,yo,p):
-  n_thresh=len(tfpfns)
-  delta_p=1/len(yo)
-  i=0
-  fp=0
-  fn=p
+  if isinstance(ftpfns,tuple):
+    tfpfns=[tfpfn[0] for tfpfn in tfpfns]
+    n_thresh=len(tfpfns)
+    delta_p=1/len(yo)
+    i=0
+    fp=0
+    fn=p
   for thresh,y in yo:
     if y:
       fn-=delta_p

@@ -7,7 +7,7 @@ from pathlib import Path
 from os.path import dirname,abspath
 from sys import path
 path.append(dirname(dirname(abspath(__file__))))
-from cal.cal import activations,init_layers_adam,KeyEmitter,mk_nn_epochs,load_ds,init_consts_states
+from cal.cal import activations,init_layers_adam,KeyEmitter,mk_nn_epochs,load_ds,init_states
 
 act_name='relu'
 act=activations[act_name]
@@ -62,8 +62,7 @@ nn_epochs=mk_nn_epochs(act,bs,X_trn,Y_trn,X_tst,Y_tst)
 new_csvs=True
 hyperparams=[(lrfpfn,reglr*lr,lr) for lrfpfn in lrfpfns for reglr in reglrs for lr in lrs]
 for lrfpfn,reg,lr in hyperparams:
-  consts_hp,consts_adam,states=init_consts_states(ke.emit_key(),mod_shape,init,
-                                                  lrfpfn,reg,p_trn,tfps,tfns,lr=lr)
+  consts_hp,consts_adam,states=init_states(ke.emit_key(),init,lrfpfn,reg,p_trn,tfps,tfns,mod_shape,lr=lr)
   res_hp=nn_epochs(n_epochs,consts_hp,consts_adam,states,
                    ke.emit_key(),outc,outc_nice,new_csvs=new_csvs)
   new_csvs=False
