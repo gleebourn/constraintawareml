@@ -8,5 +8,4 @@ from cal.cal import ModelEvaluation
 m=ModelEvaluation(argv[1])
 m.set_targets()
 m.define_jobs()
-m.benchmark_models()
-m.update_results()
+m.run_jobs()
