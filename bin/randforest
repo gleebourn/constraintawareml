@@ -23,4 +23,7 @@ random_split=seed#False
 m=ModelEvaluation()
 m.set_targets()
 m.train_rfs()
+m.bench_rfs()
 
+m.init_nns()
+m.train_nns()

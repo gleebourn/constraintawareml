@@ -2498,7 +2498,7 @@ def mk_nn_epochs(act,bs,X_trn,Y_trn,X_tst,Y_tst,batchnorm=False):
     epoch_keys=split(l,n_epochs)
     for epoch,k in enumerate(epoch_keys,1):
       X,Y=get_reshuffled(k)
-      states=steps(states,consts_adam,X,Y,consts_hp)
+      staees=steps(states,consts_adam,X,Y,consts_hp)
       preds=get_preds_thresh(states['w'],tfpfns)
       [v.append(preds[l]) for l,v in res.items()]
       states['w'][-1][1]-=preds['thresh'].reshape(-1,1)#*.2
@@ -2561,12 +2561,12 @@ def init_consts_states(k,mod_shape,init,lrfpfn,reg,p,tfps,tfns,
   return consts_hp,consts_adam,states
 
 class ModelEvaluation:
-  def __init__(self,ds='unsw',seed=1729,lab_cat=True,sds=False,categorical=True,out_fn=None):
+  def __init__(self,ds='unsw',seed=1729,lab_cat=True,sds=False,categorical=True,out_f=None):
     self.seed=seed
     self.rng=default_rng(seed)
-    if out_fn is None:
-      out_fn=ds+'_'+'_'+('lc_' if lab_cat else '')+'s_'+str(seed)+'_model_res'
-    self.out_fn=out_fn
+    if out_f is None:
+      out_f=ds+'_'+'_'+('lc_' if lab_cat else '')+'s_'+str(seed)+'_model_res'
+    self.out_f=out_f
     if isinstance(ds,str):
       self.X_trn,Y_trn,self.X_tst,Y_tst,self.sc=load_ds(ds,random_split=self.rng.integers(2**32),
                                                         lab_cat=lab_cat,single_dataset=sds)
@@ -2617,14 +2617,48 @@ class ModelEvaluation:
     self.regressors|=regs
     for (_,l,_),v in regs.items():
       v.fit(self.X_trn,self.Y_trn[l])
+      with Path(self.out_f+'_rfs.pkl').open('wb') as fd:dump(self.regressors,fd)
     Y_ordered=self.ordered_predictions(regs)
     self.thresh_from_ordered(Y_ordered)
 
   def thresh_from_ordered(self,Y_ordered):
-    for (r,l,d),Yo in Y_ordered.items():
-      for tfpfn,thresh,fp,fn in get_threshes(tfpfn,Yo,self.p_trn[l]):
-            self.thresholds[(r,l,d,tfpfn)]=thresh
-            self.res_trn[(r,l,d,tfpfn)]=dict(fp=fp,fn=fn,fpfn=fp/fn)
+    for rld,Yo in Y_ordered.items():
+      for tfpfn,thresh,fp,fn in get_threshes(self.tfpfns[rld[1]],Yo,self.p_trn[rld[1]]):
+        self.thresholds[rld+(tfpfn,)]=thresh
+        self.res_trn[rld+(tfpfn,)]=dict(fp=fp,fn=fn,fpfn=fp/fn)
+
+  def init_nns(self,lrfpfns=geomspace(.0002,.03,10),lrs=[.0001],mod_shape=None,
+               reglrs=[.001,.01],n_epochs=50,hyperparams=None,act_name='relu',bs=128,
+               start_width=128,end_width=32,depth=2,n_par_jax=8):
+    self.init='glorot_normal' if act_name=='relu' else 'glorot_uniform'
+    self.n_par_jax=n_par_jax
+    self.act=activations[act_name]
+    self.lrs=lrs
+    self.reglrs=reglrs
+    self.bs=bs
+    in_dim=len(self.X_trn[0])
+    self.nn_epochs={l:mk_nn_epochs(self.act,self.bs,self.X_trn,self.Y_trn[l],
+                                   self.X_tst,self.Y_tst[l]) for l in self.p_trn}
+
+    if mod_shape is None:
+      width_decay=(end_width/start_width)**(1/depth)
+      self.mod_shape=[in_dim]+[round(start_width*width_decay**i) for i in range(depth+1)]+[1]
+    else:
+      self.mod_shape=mod_shape
+    if hyperparams is None:
+      hyperparams=[(lrfpfn,reglr*lr,lr) for lrfpfn in lrfpfns for reglr in reglrs for lr in lrs]
+    self.ke=KeyEmitter(self.rng.integers(2*832))
+    self.regressors={('nn',l,lrfpfn,reglr,lr):init_consts_states(self.emit_key(),self.mod_shape,
+                                                                 self.init,self.lrfpfn,reg,imb,
+                                                                 self.tfps,self.tfns,lr=lr)for\
+                     lrfpfn,reglr,lr in hyperparams for l,imb in self.p_trn.items()}
+  
+  def train_nns(self,new_csvs=True):
+    for k,(hparam,consts,states) in [(k,v) for (k,v) in self.regressors.items() if k[0]=='nn']:
+      self.res_nn[k]=nn_epochs(self.n_epochs,hparam,consts,states,self.ke.emit_key(),Path(self.out_f+'.csv'),
+                            Path(self.out_f+'_rounded.csv'),new_csvs=new_csvs)
+      with Path(self.out_f+'_nns.pkl').open('wb') as fd:dump(self.res_nn,fd)
+      new_csvs=False
 
   def ordered_predictions(self,regs,X='train',Y=None):
     if X=='train':
@@ -2634,32 +2668,31 @@ class ModelEvaluation:
     return {(r,l,d):sorted(zip(reg.predict(X),Y[l])) for (r,l,d),reg in regs.items()}
 
   def bench_rfs(self,save=True):
-    for r,l,d,reg in [m for m in self.regressors.items() if m[0][0]=='rf']:
-      X_tst,Y_tst=self.X_tst[l],self.Y_tst[l]
-      Yp_smooth=reg.predict(X_tst)
-      threshes=[self.thresholds[(r,l,d,tfpfn)] for tfpfn in self.tfpfns]
-      for tfpfn,fp,fn in zip(self.tfpfns,get_class_by_thresh(threshes,yo)):
-        self.res_tst[(r,l,d,tfpfn)]=dict(dict(fp=fp,fn=fn,fpfn=fp/fn))
+    for (r,l,d),reg in [m for m in self.regressors.items() if m[0][0]=='rf']:
+      Y_tst=self.Y_tst[l]
+      Yp_smooth=reg.predict(self.X_tst)
+      threshes=[self.thresholds[(r,l,d,tfpfn)] for tfpfn in self.tfpfns[l]]
+      for tfpfn,fp,fn in zip(self.tfpfns,get_class_by_thresh(threshes,Y_tst)):
+        self.res_tst[(r,l,d,tfpfn)]=dict(fp=fp,fn=fn,fpfn=fp/fn)
     self.save_res()
 
-  def save(self,append=False):
-    res_all=self.res_to_list()
+  def save_res(self,append=False):
+    self.res_to_list()
     with Path(self.out_f+'.pkl').open('wb') as fd:
       dump((self.seed,self.res_tst,self.res_trn),fd)
     with Path(self.out_f+'.csv').open('a' if append else 'w') as fd:
       w=writer(fd)
       if not append:
         w.writeline(self.header)
-      [w.writeline(l) for l in res_all]
+      [w.writeline(l) for l in self.res_list]
 
   def res_to_list(self):
-    self.header=['lab_cat','p','imbalance','target_ratio','fp_train',
-                 'fn_train','fp_train','fn_test','method']
-    self.res_list=[[l,str(self.p_trn[l]),tfpfn,
-                    trn['fp'],trn['fn'],tst['fp'],tst['fn'],r] for trn,tst,l,r,tfpfn,d in\
-                    [(self.res_trn[(r,l,d,tfpfn)],self.res_tst[(r,l,d,tfpfn)],l,r,tfpfn,d) for\
-                                   (r,l,d,tfpfn) in self.res_test]]
-
+    self.header=['lab_cat','p','imbalance','target_ratio',
+                 'fp_train','fn_train','fp_train','fn_test','method']
+    self.res_list=[[l,str(self.p_trn[l]),tfpfn,trn['fp'],trn['fn'],
+                    tst['fp'],tst['fn'],r] for trn,tst,r,l,d,tfpfn in\
+                    [(self.res_trn[k],self.res_tst[k])+k for\
+                                   k in self.res_test]]
 
 def get_threshes(tfpfns,yo,p):
   n_thresh=len(tfpfns)
