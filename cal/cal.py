@@ -1,10 +1,7 @@
-from argparse import ArgumentParser
 from pickle import load,dump
-from types import SimpleNamespace
 from itertools import count
-from csv import writer
 from os.path import isdir,isfile
-from os import mkdir,listdir,get_terminal_size,devnull
+from os import mkdir,listdir,get_terminal_size
 from io import BytesIO
 from urllib.request import urlopen
 from zipfile import ZipFile
@@ -12,17 +9,15 @@ from pathlib import Path
 from select import select
 from sys import stdin,stdout
 from time import perf_counter
-from itertools import accumulate
+from json import dump as jump
 from numpy import inf,unique as npunique,array as nparr,min as nmn,number,\
                   max as nmx,sum as nsm,log10 as npl10,round as rnd,geomspace
 from numpy.random import default_rng #Only used for deterministic routines
 from sklearn.preprocessing import StandardScaler
-from jax.numpy import array,vectorize,zeros,log,log10,flip,maximum,minimum,pad,\
+from jax.numpy import array,zeros,log,log10,maximum,minimum,pad,\
                       concat,exp,ones,linspace,array_split,reshape,corrcoef,eye,\
                       concatenate,unique,cov,expand_dims,identity,\
                       diag,average,triu_indices,sum as jsm,max as jmx
-from jax.numpy.linalg import svdvals
-from jax.scipy.signal import convolve
 from jax.nn import tanh,softmax
 from jax.random import uniform,normal,split,key,choice,binomial,permutation
 from jax.tree import map as jma,reduce as jrd
@@ -35,12 +30,12 @@ from pandas import read_csv,concat
 from matplotlib.pyplot import imshow,legend,show,scatter,xlabel,ylabel,\
                               gca,plot,title,savefig,close,rcParams,yscale
 from matplotlib.patches import Patch
-from matplotlib.cm import jet
 rcParams['font.family'] = 'monospace'
 from pandas import read_pickle,read_parquet,concat,get_dummies
 from traceback import format_exc
 from sklearn.ensemble import RandomForestRegressor
-from csv import reader,writer
+from csv import reader,writer,DictWriter
+from imblearn.combine import SMOTETomek,SMOTEENN
 
 def set_jax_cache():
   config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
@@ -100,169 +95,6 @@ class TimeStepper:
     tsrx+='\\end{tabular}'
     return tsr,tsrx
 
-@jit
-def fp_fn_nl(bs,avg_rate,fp,fn,fp_b,fn_b):
-  fp_amnt=avg_rate*minimum(1,bs*fp)
-  fn_amnt=avg_rate*minimum(1,bs*fn)
-  fp*=(1-fp_amnt)
-  fn*=(1-fn_amnt)
-  fp+=fp_amnt*fp_b
-  fn+=fn_amnt*fn_b
-  return fp,fn
-
-@jit
-def fp_fn_ewma(bs,avg_rate,fp,fn,fp_b,fn_b):
-  fp*=(1-avg_rate)
-  fn*=(1-avg_rate)
-  fp+=avg_rate*fp_b
-  fn+=avg_rate*fn_b
-  return fp,fn
-
-class OTFBinWeights:
-  def __init__(self,avg_rate,target_fp,target_fn,adaptive_thresh_rate,
-               tp0=.25,tn0=.25,fp0=.25,fn0=.25,nl_avg=False,
-               sm_UV=False,imb=.5,p_scale=1.):
-    self.thresh=self.pre_thresh=self.d_pre_thresh=0.
-    self.adaptive_thresh_rate=adaptive_thresh_rate
-    self.target_fp=target_fp
-    self.target_fn=target_fn
-    self.avg_rate=avg_rate
-    self.om_avg_rate=1-avg_rate
-    self.tp=tp0
-    self.tn=tn0
-    self.fp=fp0
-    self.fn=fn0
-    self.nl_avg=nl_avg
-    self.sm_UV=sm_UV
-    self.U=.5
-    self.V=.5
-    self.imb=imb
-    self.p_scale=p_scale
-
-  def upd(self,y,yp):
-    bs=len(y)
-    tp_b=jsm(yp&y)/bs
-    tn_b=jsm(~(yp|y))/bs
-    fp_b=jsm(yp&~y)/bs
-    fn_b=1.-tp_b-tn_b-fp_b
-    if self.nl_avg:
-      self.fp,self.fn=fp_fn_nl(self.fp,self.fn,fp_b,fn_b,
-                               self.avg_rate,bs)
-    else:
-      self.tp*=self.om_avg_rate
-      self.tn*=self.om_avg_rate
-      self.fp*=self.om_avg_rate
-      self.fn*=self.om_avg_rate
-      self.tp+=self.avg_rate*tp_b
-      self.tn+=self.avg_rate*tn_b
-      self.fp+=self.avg_rate*fp_b
-      self.fn+=self.avg_rate*fn_b
-    self.pre_thresh+=(max(0,(fp_b-self.target_fp))**2-\
-                      max(0,(fn_b-self.target_fn))**2)*\
-                      self.adaptive_thresh_rate
-    self.pre_thresh*=(1-self.pre_thresh**2)**.25
-    #self.pre_thresh+=(max(0,fp_b/self.target_fp-1)-\
-    #                  max(0,fn_b/self.target_fn-1))*\
-    #                  self.adaptive_thresh_rate
-    #self.thresh=self.pre_thresh/\
-    #            (1+self.pre_thresh**2)**.5
-    #self.thresh=tanh(self.pre_thresh)
-    self.thresh=self.pre_thresh
-    U=self.fp/self.target_fp
-    V=self.fn/(self.target_fn*self.imb**self.p_scale)
-    if self.sm_UV:
-      self.U,self.V=softmax(array([U,V]))
-    else:
-      sUV=U+V
-      self.U,self.V=U/sUV,V/sUV
-
-  def report(self,p='\r'):
-    rep='tp:'+f_to_str(self.tp)+'tn:'+f_to_str(self.tn)+\
-        'fp:'+f_to_str(self.fp)+'fn:'+f_to_str(self.fn)+\
-        'threshold:'+\
-        f_to_str(self.thresh)+\
-        'pre_threshold:'+\
-        f_to_str(self.pre_thresh)+\
-        'U:'+f_to_str(self.U)+'V:'+f_to_str(self.V)
-    if p:
-      print(rep,end=p)
-    return rep
-
-def read_input_if_ready():
-  return stdin.readline().lower() if stdin in select([stdin],[],[],0)[0] else ''
-
-leg=lambda t=None,h=None,l='upper right':legend(fontsize='x-small',loc=l,
-                                                handles=h,title=t)
-class cyc:
-  def __init__(self,n):
-    self.list=[None]*n
-    self.n=n
-    self.virt_len=0
-
-  def __getitem__(self,k):
-    if isinstance(k,slice):
-      return [self.list[i%self.n] for i in range(k.start,k.stop)]
-    return self.list[k%self.n]
-
-  def __setitem__(self,k,v):
-    self.list[k%self.n]=v
-    self.virt_len=min(k+1,self.n)
-
-  def avg(self):
-    return sum(self.list[:self.virt_len])/self.virt_len if self.virt_len else 0
-
-def fm(w,x,act=tanh):
-  for a,b in zip(*w):
-    x=act(x*(x@a)+b)
-  return tanh(jsm(x,axis=1))
-
-def f_dropout_no_ll_act(w,x,act,k,p=.4):
-  ks=split(k,len(w[0]))
-  for a,b,ki in zip(*w,ks[1:]):
-    x*=binomial(ki,1,p,shape=x.shape)
-    x=act(x@a+b)
-  return x
-
-def f_dropout(w,x,act,k,p=.4):
-  ks=split(k,len(w[0]))
-  for a,b,ki in zip(*w,ks):
-    x*=binomial(ki,1,p,shape=x.shape)
-    x=act(x@a+b)
-  return x
-
-#def forward(w,x,act,batchnorm=True,get_transform=False,ll_act=False,transpose=False):
-#  if get_transform:
-#    A=[]
-#    B=[]
-#  if transpose:
-#    l=w[:-1]
-#    al=w[-1][0]
-#    bl=w[-1][1]
-#  else:
-#    l=zip(w[0][:-1],w[1][:-1])
-#    al=w[0][-1]
-#    bl=w[1][-1]
-#  for a,b in l:
-#    #x=act(x@a+b)
-#    x=x@a+b
-#    if batchnorm:
-#      ta=(1e-4+x.var(axis=0))**-.5
-#      tb=x.mean(axis=0)*ta
-#      if get_transform:
-#        A.append(a*ta)
-#        B.append(b-tb)
-#      x=x*ta-tb
-#    x=act(x)
-#  y=x@al+bl
-#  if ll_act:
-#    y=act(y)
-#  if get_transform:
-#    trans=(A+[al],B+[bl])
-#    if transpose:
-#      trans=list(zip(*trans))
-#    return y,trans
-#  return y
-
 def forward(w,x,act,batchnorm=True,get_transform=False,ll_act=False,transpose=False):
   if get_transform:
     A=[]
@@ -296,39 +128,9 @@ def forward(w,x,act,batchnorm=True,get_transform=False,ll_act=False,transpose=Fa
     return y,trans
   return y
 
-def f(w,x,act):
-  for a,b in zip(*w):
-    x=act(x@a+b)
-  return x
-
-def f_no_ll_act(w,x,act,ll_act=False):
-  for a,b in zip(w[0][:-1],w[1][:-1]):
-    x=act(x@a+b)
-  x=x@w[0][-1]+w[1][-1]
-  return act(x) if ll_act else x
-
-def pad_or_trunc(x,n):
-  return x[:n] if len(x)>=n else pad(x,n-len(x))
-
-def resnet(w,x,act=tanh,first_layer_no_skip=True):
-  if first_layer_no_skip:
-    x=act(x@w[0][0]+w[1][0])
-    A=w[0][1:]
-    B=w[1][1:]
-  for a,b in zip(*w):
-    #x=pad_or_trunc(x,len(b))+act(x@a+b)
-    x+=act(x@a+b)
-  return jsm(x,axis=1) # final layer: sum components, check + or -.
-
 activations={'tanh':tanh,'softmax':softmax,'linear':jit(lambda x:x),
              #'relu':jit(lambda x:minimum(1,maximum(-1,x)))}
              'relu':jit(lambda x:maximum(x,.03*x))}
-implementations={'mlp':f,'mlp_do':f_dropout,'mlp_no_ll_act':f_no_ll_act,
-                 'mlp_no_ll_act':f_no_ll_act,'mlp_batchnorm':forward,
-                 'resnet':resnet,'linear':lambda w,x,_:x@w[0]+w[1]}
-
-def implementation(imp,act=None):
-  return lambda w,x,**kwa:implementations[imp](w,x,act,**kwa)
 
 def select_initialisation(imp,act):
   if imp in ['fm','resnet']:
@@ -344,210 +146,6 @@ def select_initialisation(imp,act):
       case _:
         print('Initialising weights to glorot uniform!')
         return 'glorot_uniform'
-
-def rbd24_opts(ap):
-  ap.add_argument('-rbd24_no_rescale_log',action='store_true')
-  ap.add_argument('-rbd24_no_shuffle',action='store_true') #Very easy - sorted by label!!!!!!
-  ap.add_argument('-rbd24_sort_timestamp',action='store_true')
-  ap.add_argument('-rbd24_single_dataset',default='',type=str)
-  ap.add_argument('-rbd24_no_categorical',action='store_true')
-  ap.add_argument('-rbd24_no_preproc',action='store_true')
-
-n_exps=5
-target_fps=[int(50*10**(1-i/n_exps))/1000 for i in range(n_exps+1)]
-target_fns=[int(10*10**(i/n_exps))/1000 for i in range(n_exps+1)]
-def init_ensemble(script=None):
-  ap=ArgumentParser()
-  ap.add_argument('--seed',default=1729,type=int)
-  rbd24_opts(ap)
-  ap.add_argument('-activation',choices=list(activations),default='tanh')
-  ap.add_argument('-implementation',type=str,
-                  choices=list(implementations),default='mlp')
-  ap.add_argument('-lrs',default=[1e-2],type=float,nargs='+')
-  ap.add_argument('-regs',default=[1e-1],type=float,nargs='+')
-  ap.add_argument('-beta1',default=.9,type=float) #1- beta1 in adam
-  ap.add_argument('-beta2',default=.999,type=float)
-  ap.add_argument('-avg_rate',default=.1,type=float)#binom avg parameter
-  ap.add_argument('-bs',default=0,type=int)
-  ap.add_argument('-res',default=1000,type=int)
-  ap.add_argument('-outf',default='thlay')
-  ap.add_argument('-target_fps',default=target_fps,nargs='+',type=float)
-  ap.add_argument('-target_fns',default=target_fns,nargs='+',type=float)
-  ap.add_argument('-target_tolerance',default=1.,type=float)
-  ap.add_argument('-stop_on_target',action='store_true')
-  ap.add_argument('-geomnet_start',default=False,type=int)
-  ap.add_argument('-geomnet_end',default=False,type=int)
-  ap.add_argument('-geomnet_n_layers',default=False,type=int)
-  ap.add_argument('-model_inner_dims',default=[],type=int,nargs='+')
-  ap.add_argument('-initialisation',type=str,
-                  choices=['glorot_uniform','glorot_normal','eye',
-                           'ones','zeros','resnet','casewise_linear'],default='')
-  ap.add_argument('-clock_avg_rate',default=.1,type=float) #Track timings
-  ap.add_argument('-no_bias',action='store_true')
-  ap.add_argument('-orthonormalise',action='store_true')
-  ap.add_argument('-sqrt_normalise_a',action='store_true')
-  ap.add_argument('-mult_a',default=1.,type=float)
-  ap.add_argument('-fpfn_targets',default=[],nargs='+',type=float)
-  if script in ['rbd24','thlay']:
-    ap.add_argument('mode',default='all',
-                    choices=['all','adaptive_lr','imbalances','rbd24j',
-                             'unsw','gmm','mnist','rbd24'])
-    ap.add_argument('-no_U_V',action='store_true')
-    ap.add_argument('-no_epochs',action='store_true')
-    ap.add_argument('-trad_avg',action='store_true')
-    ap.add_argument('-resnet',default=0,type=int)
-    ap.add_argument('-resnet_dim',default=64,type=int)
-    ap.add_argument('-fm',default=0,type=int)
-    ap.add_argument('-nnpca',action='store_true')
-    ap.add_argument('-single_layer_upd',action='store_true')
-    ap.add_argument('-p_scale',default=1.,type=float)#.5
-    ap.add_argument('-scale_before_sm',action='store_true')
-    ap.add_argument('-softmax_U_V',action='store_true')
-    ap.add_argument('-window_avg',action='store_true')
-    ap.add_argument('-n_gaussians',default=4,type=int)
-    ap.add_argument('-loss',default='loss',choices=list(losses))
-    ap.add_argument('-reporting_interval',default=1000,type=int)
-    ap.add_argument('-print_step_interval',default=100,type=int)
-    ap.add_argument('-gmm_spread',default=.05,type=float)
-    ap.add_argument('-gmm_scatter_samples',default=10000,type=int)
-    ap.add_argument('-no_gmm_compensate_variances',action='store_true')
-    ap.add_argument('-gmm_min_dist',default=4,type=float)
-    ap.add_argument('-force_batch_cost',default=0.,type=float)
-    ap.add_argument('-adam',action='store_true')
-    ap.add_argument('-no_adam',action='store_true')
-    ap.add_argument('-adaptive_threshold',action='store_true')
-    ap.add_argument('-n_splits_img',default=100,type=int)
-    ap.add_argument('-imbalances',type=float,
-                    default=[0.1,0.06812921,0.04641589,0.03162278,0.02154435,
-                             0.01467799,0.01,0.00681292,0.00464159,0.00316228,
-                             0.00215443,0.0014678,0.001],nargs='+')
-    ap.add_argument('-in_dim',default=2,type=int)
-    ap.add_argument('-unsw_cat_thresh',default=.1,type=int)
-    ap.add_argument('-lr_resolution',default=16,type=int)
-    ap.add_argument('-all_resolution',default=5,type=int)
-    ap.add_argument('-history_len',default=16384,type=int)
-    ap.add_argument('-weight_normalisation',default=0.,type=float)
-    ap.add_argument('-saving_interval',default=1000,type=int)
-    ap.add_argument('-lr_init_min',default=1e-4,type=float)
-    ap.add_argument('-lr_init_max',default=1e-2,type=float)
-    ap.add_argument('-lr_min',default=1e-5,type=float)
-    ap.add_argument('-lr_max',default=1e-1,type=float)
-    ap.add_argument('-lr_update_interval',default=1000,type=int)
-    ap.add_argument('-recent_memory_len',default=1000,type=int)
-    ap.add_argument('-unsw_test',default='~/data/UNSW_NB15_testing-set.csv')
-    ap.add_argument('-unsw_train',default='~/data/UNSW_NB15_training-set.csv')
-    ap.add_argument('-model_resid',default=False,type=bool)
-    ap.add_argument('-p',default=.1,type=float)
-    ap.add_argument('-threshold_accuracy_tolerance',default=.1,type=float)
-    #Silly
-    ap.add_argument('-x_max',default=10.,type=float)
-    ap.add_argument('-reproduce_llpal',action='store_true')
-  
-  a=ap.parse_args()
-
-  if not isdir('reports'):
-    mkdir('reports')
-  a.outf='reports/'+a.outf
-  a.report_dir=a.outf+'_report'
-
-  if script in ['thlay','rbd24']:
-    a.epochs=not a.no_epochs
-    a.n_imb=len(a.imbalances)
-    a.gmm_compensate_variances=not a.no_gmm_compensate_variances
-    if a.adam and a.no_adam:
-      print('Cannot have adam and no_adam!')
-      exit(1)
-
-    if a.nnpca:
-      a.loss='nn_pca_loss'
-    elif a.loss=='distribution_flow_cost':
-      a.w_init=1.
-      a.target_increment=.9
-
-  if not a.implementation:
-    if a.resnet:
-      a.implementation='resnet'
-    elif a.fm:
-      a.implementation='fm'
-    else:
-      a.implementation='mlp'
-
-  if not a.activation and a.implementation not in ['linear','casewise_linear']:
-    a.activation='tanh'
-
-  if not a.initialisation:
-    a.initialisation=select_initialisation(a.implementation,a.activation)
-
-  elif not a.adam and not a.no_adam:
-    if a.implementation=='casewise_linear' or a.activation=='linear':
-      a.no_adam=True
-    else:
-      a.adam=True
-  if a.fpfn_targets:
-    a.target_fpfns=array([[a*b,a] for a,b in zip(a.target_fns,a.target_fpfns)])
-  else:
-    a.target_fpfns=array(list(zip(a.target_fps,a.target_fns)))
-  a.lrs=array(a.lrs)
-  a.out_dir=a.outf+'_report'
-  a.step=0
-  if len(a.lrs)==1:
-    a.lr=a.lrs[0]
-  if not a.bs:
-    if a.mode=='mnist':
-      a.bs=128
-    else:
-      a.bs=1
-
-  if a.geomnet_start and a.geomnet_end and a.geomnet_n_layers:
-    gs=a.geomnet_start**(1/a.geomnet_n_layers)
-    ge=a.geomnet_end**(1/a.geomnet_n_layers)
-    a.model_inner_dims=[round(gs**(a.geomnet_n_layers-i)*\
-                              ge**i)\
-                        for i in range(a.geomnet_n_layers+1)]
-  if not a.model_inner_dims and not a.fm:
-    if a.mode=='gmm':
-      a.model_inner_dims=[32,16]
-    elif a.mode==['mnist','rbd24','rbd24j'] and a.act not in ['linear','relu']:
-      a.model_inner_dims=[64,32,16]
-    else:
-      a.model_inner_dims=[64,32]
-  try:
-    mkdir(a.out_dir)
-    new=True
-  except FileExistsError:
-    print('Already seems to be something there... [O]verwrite, [L]oad or [A]bort?')
-    ln=stdin.readline()[0].lower()
-    if ln[0]=='l':
-      new=False
-    elif ln[0]=='o':
-      new=True
-      print('Overwriting any existing ensembles...')
-    else:
-      print('Abort!')
-      exit()
-  if not new:
-    try:
-      with open(a.out_dir+'/ensemble.pkl','rb') as fd:
-        print('Opening experiment ensemble',a.outf,'...')
-        od=a.out_dir #Correct the actual directory if opened somewhere else
-        a,experiments=load(fd)
-        ke=KeyEmitter(a.seed,a.parent_keys)
-        print(a.time_avgs)
-        ts=TimeStepper(a.clock_avg_rate,a.time_avgs)
-        a.out_dir=od
-        new=False
-        print('Restored',a.outf+'.pkl','from disk')
-    except FileNotFoundError:
-      print('No pkl in directory...')
-      new=True
-  if new:
-    print('Generating new experiments...')
-    ke=KeyEmitter(a.seed)
-    ts=TimeStepper(a.clock_avg_rate)
-    experiments=init_experiments(a,ke,mode='rbd24j' if script=='rbd24j' else a.mode,
-                                 epochs=True if script=='rbd24j' else a.epochs)
-
-  return a,ke,ts,experiments
 
 def f_to_str(X,lj=None,prec=2,p=False):
   if lj is None:
@@ -567,318 +165,11 @@ def f_to_str(X,lj=None,prec=2,p=False):
     print(X)
   return X
 
-exp_to_str=lambda e:'exp_p'+f_to_str(e.p,lj=False)+'fpt'+f_to_str(e.target_fp,lj=False)+\
-                    'fnt'+f_to_str(e.target_fn,lj=False)+'lr'+f_to_str(e.lr,lj=False)
-
-fpfnp_lab=lambda e:'FP_t,FN_t,p='+f_to_str(e.target_fp,lj=False)+','+\
-                   f_to_str(e.target_fn,lj=False)+','+f_to_str(e.p,lj=False)
-
-@jit
-def svd_cost(w,x,act=tanh,top_growth=array([2,1]),imp=resnet,
-             eps=1e-8,dimension=4,vol_growth=0.):
-  if dimension is None: dimension=x.shape[1]
-  iden=identity(x_dim)
-  sqs=jsm(x**2,axis=1)
-  dists_init=sqs+expand_dims(sqs,-1)-2*x@x.T
-  x=imp(*w,x)
-  sqs=jsm(x**2,axis=1)
-  dists_final=sqs+expand_dims(sqs,-1)-2*x@x.T
-  distortion=dists_final/(dists_init+iden)
-  growth=log(svdvals(distortion)[:dimension])
-  return (top_growth-growth[:len(top_growth)])**2+(jsm(growth)-vol_growth)**2
-
-@jit
-def dot_penalty(z,y):
-  target_directions=1-2*y^expand_dims(y,-1)
-  sqs=jsm(z**2,axis=1)
-  return jsm((sqs+expand_dims(sqs,-1)-2*z@z.T)*target_directions)
-
-@jit
-def dist_penalty(z,y):
-  n_pos=int(jsm(y))
-  n_neg=len(y)-n_pos
-  U=n_neg
-  V=n_pos
-  pn=y^expand_dims(y,-1)
-  pp=y&expand_dims(y,-1)
-  nn=~(pp|pn)
-  sqs=jsm(z**2,axis=1)
-  dists=sqs+expand_dims(sqs,-1)-2*z@z.T
-  return (U*jsm(dists[pp])+V*jsm(dists[nn]))/(1e-8+jsm(dists[pn]))
-
-@jit
-def metric_cost(w,x,y,act=tanh,imp=resnet):
-  z=imp(*w,x)
-  return dist_penalty(z,y)
-
-@jit
-def coalescence_cost(w,x,y,U,V,act=tanh,tol=1e-4):
-  bs=len(y)
-  iden=identity(bs)
-  n_pos=jsm(y)
-  n_neg=bs-n_pos
-  target_expansion=0
-  yT=expand_dims(y,-1)
-  ny=~y
-  if n_pos and n_neg:
-    target_expansion=(U*n_neg/n_pos+V*n_pos/n_neg)*(y^yT)
-  target_growth=target_expansion-U*(~(y|yT))-V*(y&yT)+diag(ny*U+y*V)
-  sqs=jsm(x**2,axis=1)
-  old_ldists=log(iden+tol+sqs+expand_dims(sqs,-1)-2*x@x.T)
-  ret=0.
-  for a,b in zip(*w):
-    x=act(x@a+b)
-    iden=identity(bs)
-    sqs=jsm(x**2,axis=1)
-    dists=iden+tol+sqs+expand_dims(sqs,-1)-2*x@x.T
-    ldists=log(dists)
-    ret+=jsm((old_ldists-ldists)*target_growth/dists) #Don't worry so much about far pts
-    old_ldists=ldists
-  return (ret+y@log(tol+1-x)+ny@log(tol+1+x))[0]
-
-@jit
-def nn_cost_expansion(w,xp,xn,contraction=False,act=tanh,tol=1e-2,imp=f):
-  ret=0.
-  dists_init=jsm((xp-xn)**2,axis=1)
-  xp,xn=imp(w,xp,act=act),imp(w,xn,act=act)
-  dists_final=jsm((xp-xn)**2,axis=1)
-  expansion=jsm((tol+dists_final)/(tol+dists_init))
-  return expansion if contraction else -expansion
-
-'''
-def nn_cost_contraction(A,B,x,act=tanh,tol=1e-8,imp=f):
-  ret=0.
-  dists_init=jsm((expand_dims(x,axis=0)-expand_dims(x,axis=1))**2,axis=2)
-  x=imp(A,B,xp,act=act)
-  dists_final=jsm((expand_dims(x,axis=0)-expand_dims(x,axis=1))**2,axis=2)
-  return jsm(dists_final/dists_init)/len(x)
-'''
-
-@jit
-def coalescence_res_cost(w,x,y,U,V,act=tanh,tol=1e-2):
-  bs=len(y)
-  #l=1/len(A)
-  iden=identity(bs)
-  n_pos=jsm(y)
-  n_neg=bs-n_pos
-  target_expansion=0
-  yT=expand_dims(y,-1)
-  ny=~y
-  #if n_pos and n_neg:
-  r=1.#U*n_neg/(1+n_pos)+V*n_pos/(1+n_neg)
-  norm=(n_pos*(n_pos-1)*V**2+n_neg*(n_neg-1)*U**2+2*n_pos*n_neg*r)**.5
-  u=U/norm
-  v=V/norm
-  r/=norm
-  #target_growth=#((y^yT)-U*(~(y|yT))-V*(y&yT)+diag(ny*U+y*V))/\
-  #target_growth=r*(y^yT)-u*(~(y|yT))-v*(y&yT)+diag(ny*u+y*v)
-  target_lyap=-r*(y^yT)+u*(~(y|yT))+v*(y&yT)+diag(ny*u+y*v)
-  #target_growth=(1.*(y^yT)-1.*(y==yT)+iden)/(bs*(bs-1))**.5
-  ret=0.
-  sqs=jsm(x**2,axis=1)
-  old_ldists=log(tol+sqs+expand_dims(sqs,-1)-2*x@x.T)
-  for a,b in zip(*w):
-    dx=act(x@a+b)
-    x+=dx
-    sqs=jsm(x**2,axis=1)
-    dists=sqs+expand_dims(sqs,-1)-2*x@x.T
-    similarities=exp(-dists)#+iden)#tol
-    ldists=log(tol+dists)
-    #ret+=jsm((dx@dx.T-target_growth)**2) #same class->similar directions
-    #xdx=x@dx.T # 
-    #ret+=jsm((((1-iden)*(-xdx-xdx.T)-target_growth)**2)/dists)
-    #delx=(-xdx-xdx.T)/dists
-    #delx=-xdx/dists #>0 when dist growing, roughly
-    #ret+=log(tol+(jsm(delx**2)-jsm(delx*target_growth)**2))
-    #grow_dirs=xdx*target_direction
-    #grow_dirs/=tol+jsm(xdx**2)**.5
-    ret+=jsm(target_lyap*(ldists-old_ldists)/similarities)
-    old_ldists=ldists
-  #x=act(jsm(x,axis=1))
-  return ret+jsm(V*y@(tol+1-x)+U*ny@(tol+1+x))
-  #return log(1+ret)+jsm(V*y*(1-x)+U*ny*(1+x))
-
-@jit
-def distribution_flow_cost(*w,x,y,U,V,w_init,act=tanh,tol=1e-8):
-  ret=0.
-  n=len(A)
-  bs=len(y)
-  n_pos=jsm(y)
-  n_neg=bs-n_pos
-  end_dim=len(B[-1])
-  end_dists=log(2)*(y!=expand_dims(y,-1))
-  end_l2=(n_pos**2+n_neg**2)*log(2)**2
-
-  sqs=jsm(x**2,axis=1)
-  init_dists=log(1+sqs+expand_dims(sqs,-1)-2*x@x.T)
-  init_l2=jsm(init_dists**2)
-  UV_mask=U*(~y)+V*y
-  UV_mask=UV_mask*expand_dims(UV_mask,-1)
-  for i,(a,b) in enumerate(zip(*w)):
-    x=act(x@a+b)
-    sqs=jsm(x**2,axis=1)
-    dists=log(1+sqs+expand_dims(sqs,-1)-2*x@x.T)
-    dists_l2=jsm(dists**2)
-    dec=tol**(i/n)
-    ret+=w_init*dec*jsm((dists-init_dists)**2)
-    ret+=(1-w_init)*(tol/dec)*jsm(UV_mask*(dists-end_dists)**2)
-  return ret/n+(1-w_init)*jsm(U*(~y)*(1+x)+V*y*(1-x))
-
-@jit
-def resnet_cost(w,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
-  c=0
-  n=len(A)
-  UmV=y*(U+V)-U #weight positives and negatives by importance
-  for a,b in zip(*w):
-    dx=act(x@a.T+b)
-    #sg_dx=dx.T*UmV
-    sg_dx=dx.T*(2*y-1)
-    x+=dx
-  return c-jsm(UmV*x.T) # final layer: sum components, check + or -.
-
-@jit
-def resnet_cost_layer(*w,i,c,d,x,y,U,V,act=tanh,eps=1e-8): #Already vectorised
-  ret=0.
-  UmV=y*(U+V)-U
-  for j,(a,b) in enumerate(zip(*w)):
-    if i==j:
-      dx=act(x@(a.T+c.T)+b+d)
-    else:
-      dx=act(x@a.T+b)
-    sg_dx=dx.T*(2*y-1)#UmV
-    ret-=jsm(log(1+eps+sg_dx.T@sg_dx))
-    x+=dx
-  return ret-jsm(UmV*x.T)
-
 @jit
 def l2(w):
   return jrd(lambda x,y:x+(y**2).sum(),w,initializer=0.)
 
 dl2=jit(value_and_grad(l2))
-
-def mk_hinge(imp,eps=0.):
-  def hinge(w,x,y,U,V):
-    y_smooth=imp(w,x)
-    l=y_smooth*(1-2*y)
-    y_diffs=maximum(eps*l,l)
-    return jsm(((V-U)*y+U)*y_diffs) #U*cts_fp+V*cts_fn
-  return hinge
-
-def mk_l1(imp=f,reg=False):
-  def l1(w,x,y,U,V,eps=None,**kwa):
-    y_smooth=imp(w,x,**kwa)
-    y_diffs=1-y_smooth*(2*y-1)
-    return jsm((U*(~y)+V*y)*y_diffs) #U*cts_fp+V*cts_fn
-  if reg:
-    def ret(w,x,y,U,V,eps=None,reg=1e-2):
-      return l1(w,x,y,U,V,eps=None)+reg*l2(w)
-  else:
-    ret=l1
-  return jit(ret)
-
-def mk_mk_lp(p=2.):
-  def mk_l(imp=f,reg=False):
-    def lp(w,x,y,U,V,eps=None,**kwa):
-      y_smooth=imp(w,x,**kwa)
-      y_diffs=((2*y-1)-y_smooth)**p
-      #a_p,a_n=y_smooth[y],y_smooth[~y]
-      #cts_fp=jsm(1.+a_n)
-      #cts_fn=jsm(1.-a_p)
-      return jsm((U*(~y)+V*y)*y_diffs) #U*cts_fp+V*cts_fn
-    if reg:
-      def ret(w,x,y,U,V,eps=None,reg=.1):
-        return lp(w,x,y,U,V)+reg*l2(w)
-    else:
-      ret=lp
-    return jit(ret)
-  return mk_l
-
-mk_l2=mk_mk_lp()
-
-@jit
-def l1(w,x,y,U,V,act=tanh):
-  return l1_soft(w,x,y,U,V,0.,act)
-
-def mk_soft_cross_entropy(act=tanh,imp=f,reg=True):
-  @jit
-  def soft_cross_entropy(w,x,y,U,V,eps=1e-8):
-    y_smooth=imp(w,x)#,act=act)
-    #y_winnings=y_smooth*(2*y-1) #+ if same sign, - if different sign
-    #return jsm(((V-U)*y+U)*log(1+eps-y_winnings))
-    #return -jsm(((V-U)*y+U)*log(1+eps+y_winnings))
-    return jsm(((-1)**y)*log(((~y)/U+y/V)+(1+y_smooth)/2))
-  if reg:
-    def ret(w,x,y,U,V,eps=1e-8,reg=1.):
-      return soft_cross_entropy(w,x,y,U,V,eps)+reg*l2(w)
-  else:
-    ret=soft_cross_entropy
-  return ret
-
-def mk_cross_entropy(imp=f,reg=False,eps=1e-8):
-  def cross_entropy(w,x,y,U,V,eps=eps,**kwa):
-    y_smooth=imp(w,x,**kwa)
-    return -jsm(((~y)*U+y*V)*log(eps+1+y_smooth*(2*y-1)))
-  if reg:
-    def ret(w,x,y,U,V,eps=1e-8,reg=reg):
-      return cross_entropy(w,x,y,U,V,eps)+reg*l2(w)
-  else:
-    ret=cross_entropy
-  return ret
-
-def mk_l2_do(act=None,k=1):#,reg=1.):
-  def l2_svd_do(w,x,y,U,V,k,eps=None):
-    ret=0.
-    for a,b in zip(*w):
-      ret-=svd(x,compute_uv=False)[k]
-
-    return ret+jsm(((~y*U)+y*V)*((2*y-1)-x)**2)
-  return l2_svd
-
-def mk_l2_svd_do(act,i=1,reg=1):#,reg=1.):
-  def l2_svd_do(w,x,y,U,V,k,reg=reg,eps=None,p=.4,i=i):
-    ks=split(k,len(w[0])-1)
-    for a,b,ki in zip(w[0][:-1],w[1][:-1],ks):
-      x=act(x@a+b)
-      x*=binomial(ki,1,p,shape=b.shape)
-    yp=act(x@w[0][-1]+w[1][-1])
-    return -reg*svd(x,compute_uv=False)[i]+jsm(((~y*U)+y*V)*((2*y-1)-yp)**2)
-  return l2_svd_do
-
-@jit
-def cross_entropy_rn(w,x,y,U,V,act=tanh,eps=1e-8):
-  y_smooth=tanh(resnet(w,x,act=act))
-  a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
-  cts_fn=-jsm(log(eps+1.+a_p)) #y=1 => H(y,y')=-log(y'')=-log((1+y')/2)
-  cts_fp=-jsm(log(eps+1.-a_n)) #y=0 => H(y,y')=-log(1-y'')=-log((1-y')/2)
-  return U*cts_fp+V*cts_fn
-
-@jit
-def cross_entropy_soft(w,x,y,U,V,act=tanh,normalisation=False,softness=.1,eps=1e-8):
-  y_smooth=f(w,x,act=act)
-  a_p,a_n=y_smooth[y],y_smooth[~y] # 0<y''=(1+y')/2<1
-  cts_fn=-(1-softness)*jsm(log(eps+1.+a_p))-softness*jsm(log(eps+1.-a_p))
-  cts_fp=-(1-softness)*jsm(log(eps+1.-a_n))-softness*jsm(log(eps+1.+a_n))
-  return U*cts_fp+V*cts_fn
-
-@jit
-def nn_pca_loss(w_c,b_c,w_e,b_e,x,x_targ,eps=1e-8):
-  x_c=f(w_c,b_c,x)
-  l=cov(x_c)
-  x_c_vars=var(x_c,axis=0)
-  #x_c_vars/=jsm(x_c_vars)
-  l+=jsm(x_c_vars[1:]/(eps+x_c_vars[:-1]))
-
-  x_p=f(w_e,b_e,x_c)
-  l+=jsm((x_p-x_targ)**2)
-  return l#log(jsm(w_c[-1]@w_c[-1].T)))
-
-losses={'loss':mk_l1,'l1':mk_l1,'cross_entropy':mk_cross_entropy,
-        'l2':mk_l2,'hinge':mk_hinge}
-        #'l1_soft':dl1_soft,'cross_entropy_soft':dcross_entropy_soft,
-        #'resnet_cost':dresnet_cost,'resnet_cost_layer':dresnet_cost_layer,
-        #'nn_pca_loss':nn_pca_loss,'distribution_flow_cost':ddistribution_flow_cost,
-        #'coalescence_cost':dcoalescence_cost,'cross_entropy_rn':dcross_entropy_rn,
-        #'coalescence_res_cost':dcoalescence_res_cost}
 
 def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n_par=None,bias=0.,
                 sqrt_normalise=False,orthonormalise=False,transpose=False):
@@ -944,462 +235,12 @@ def init_layers_adam(*a,**kwa):
   return {'w':w,'m':init_layers(a[0],'zeros',**kwa),
           'v':init_layers(a[0],'zeros',**kwa),'t':zeros(kwa['n_par']) if 'n_par' in kwa else 0}
 
-
-def sample_x(bs,key):
-  return 2*a.x_max*uniform(shape=(bs,2),key=key)-a.x_max
-
-def colour_rescale(fpfn):
-  l=log(array(fpfn))-log(a.fpfn_min)
-  l/=log(a.fpfn_max)-log(a.fpfn_min)
-  return jet(l)
-
-def change_worst_j(states,consts,benches,shapes,n_to_change,k):
-  ks=split(k,n_to_change)
-  ranked=[x[0] for x in sorted(enumerate(benches),key=lambda x:-x[1]['div'])]
-  worst=ranked[:n_to_change]
-  best=ranked[n_to_change:]
-  for i,j,l in zip(best,worst,ks):
-    c=consts[i]
-    l0,l=split(l)
-    z=normal(l,2)
-    consts[j]={'beta':c['beta'],'tfp':c['tfp'],'tfn':c['tfn'],'beta1':c['beta1'],'beta2':c['beta2'],
-                'lr':c['lr']*exp(z[0]),'reg':c['reg']*exp(z[1]),'eps':1e-8}  
-    #states[j]=states[i]
-    states[j]={'w':init_layers(shapes[i],init_dist,k=l0),
-               'm':init_layers(shapes[i],'zeros'),
-               'v':init_layers(shapes[i],'ones')}
-
-def mk_experiment(p,thresh,target_fp,target_fn,lr,a,mode,reg=0.,eps=1e-8,adfpfn=False):
-  e=SimpleNamespace()
-  e.report_done=False
-  e.fp_test='?'
-  e.fn_test='?'
-  e.fp_train='?'
-  e.fn_train='?'
-  e.eps=eps
-  e.reg=reg
-  e.bs=a.bs
-  e.p_test=a.p_test
-  e.beta1=a.beta1
-  e.beta2=a.beta2
-  e.target_tolerance=a.target_tolerance
-  e.steps_to_target=False
-  e.stop_to_target=a.stop_on_target
-  e.avg_rate=a.avg_rate
-  e.dw_l2=e.w_l2=0
-  e.w_model=[v.copy() for v in a.w_model_init[0]],[v.copy() for v in a.w_model_init[1]]
-  e.p=float(p) #"imbalance"
-  e.target_fp=target_fp#target_fn*fpfn_ratio
-  e.target_fn=target_fn
-  if mode!='rbd24j':
-    e.history_len=a.history_len
-    e.pn=e.p**a.p_scale
-    e.recent_memory_len=int((1/a.avg_rate)*max(1,1/(e.bs*min(e.target_fp,e.target_fn))))
-    e.FPs=cyc(e.recent_memory_len)
-    e.FNs=cyc(e.recent_memory_len)
-    e.loss_vals=cyc(e.recent_memory_len)#a.bs)
-    e.U=e.V=1
-    e.thresh=thresh
-    e.history=SimpleNamespace(FP=[],FN=[],lr=[],cost=[],w=[],dw=[],loss_vals=[],
-                              resolution=1,l=0)
-    if a.loss=='distribution_flow_cost':
-      e.w_init=1.
-      e.loss_target=inf
-      e.loss_val=a.bs**2*a.model_inner_dims[-1]
-  else:
-    e.pn=1.
-
-    e.epochs=SimpleNamespace(fp_otf=[],fn_otf=[],fpfn_otf=[],
-                             div_otf=[],div_train=[],div_test=[],
-                             fp_train=[],fn_train=[],fpfn_train=[],
-                             fp_test=[],fn_test=[],fpfn_test=[],w_l2=[])
-  e.step=0
-
-  if adfpfn:
-    e.ad_m_fp=jma(lambda x:0.*x,e.w_model)
-    e.ad_v_fp=jma(exp,e.ad_m_fp)
-    e.ad_m_fn=jma(lambda x:x*0.,e.ad_m_fp)
-    e.ad_v_fn=jma(exp,e.ad_m_fn)
-    jma(lambda x:f_to_str(x.sum()),e.ad_m_fp)
-    jma(lambda x:f_to_str(x.sum()),e.ad_v_fp)
-  else:
-    e.ad_m=jma(lambda x:0.*x,e.w_model)
-    e.ad_v=jma(exp,e.ad_m_fp)
-
-
-  e.lr=float(lr)
-  #e.p_its=int(1/p) #if repeating minority class iterations
-  e.fpfn_target=e.target_fp/e.target_fn
-
-  e.fp=e.fp_otf=(e.target_fp*.5)**.5
-  e.fn=e.fn_otf=(target_fn*.5)**.5#.25 #softer start if a priori assume doing well
-  return e
-
-def desc_e(stats,e):
-  return f_to_str((stats,e.lr,e.reg,e.target_fp,e.target_fn))
-
-def update_epoch_history(e):
-  e_v=vars(e)
-  ep_v=vars(e.epochs)
-  [v.append(e_v[k]) for k,v in ep_v.items()]
-
-def update_epochs(e):
-  #if not e.steps_to_target: #only update if still going
-  e.w_l2=l2(e.w_model)
-  e.fp_otf=e.fp
-  e.fn_otf=e.fn
-  e.div_from_tgt=max(e.fp_train/e.target_fp,e.fn_train/e.target_fn)
-  e.fpfn_otf=e.fp_otf/e.fn_otf
-  e.fpfn_train=e.fp_train/e.fn_train
-  e.fpfn_test=e.fp_test/e.fn_test
-  update_epoch_history(e)
-  if e.fp_train<e.target_fp and e.fn_train<e.target_fn and\
-  not e.steps_to_target:
-    print('Experiment complete!')
-    e.steps_to_target=len(e.epochs.fp_otf)
-    e._w_model=e.w_model
-
-def plot_epochs(experiments,stats=None,scale_log=True,
-                by_experiment=False,see=True):
-  if stats is None:
-    stats=vars(experiments[0].epochs)
-
-  if by_experiment:
-    [plot_epochs([e],stats=stats,see=see,by_experiment=False)\
-     for e in experiments]
-  elif isinstance(stats,list|dict):
-    for stat in stats:
-      plot_epochs(experiments,stats=stat,see=see)
-  else:
-    if see:
-      plot([],label=f_to_str(('stat','lr','reg','tgt_fp','tgt_fn')))
-    for e in experiments:
-      plot(vars(e.epochs)[stats],label=desc_e(stats,e))
-    if see:
-      if scale_log:
-        yscale('log')
-      title(stats)
-      legend()
-      show()
-
-def init_experiments(a,ke,mode,epochs,imp='mlp'):
-  k1,k2,k3,k4,k5,k6=ke.emit_key(6)
-  if mode in['rbd24','rbd24j']:
-    (a.x_train,a.y_train),\
-    (a.x_test,a.y_test),\
-    (_,a.x_columns)=rbd24(rescale_log=not a.rbd24_no_rescale_log,
-                          preproc=not a.rbd24_no_preproc,
-                          categorical=not a.rbd24_no_categorical,
-                          single_dataset=a.rbd24_single_dataset)
-    a.p=sum(a.y_train)/len(a.y_train)
-    a.p_test=sum(a.y_test)/len(a.y_test)
-    a.in_dim=len(a.x_train[0])
-    if epochs:
-      a.epoch_num=0
-      a.offset=inf
-      #a.x_train,a.y_train=shuffle_xy(k1,a.x_train,a.y_train)
-
-  if mode=='mnist':
-    from tensorflow.keras.datasets import mnist
-    (a.x_train,a.y_train),(a.x_test,a.y_test)=mnist.load_data()
-    y_ones_train=a.y_train==1 #1 detector
-    y_ones_test=a.y_test==1 #1 detector
-    a.in_dim=784
-    a.x_train_pos=reshape(a.x_train[y_ones_train],(-1,a.in_dim))
-    a.x_train_neg=reshape(a.x_train[~y_ones_train],(-1,a.in_dim))
-
-    a.x_test_pos=reshape(a.x_test[y_ones_test],(-1,a.in_dim))
-    a.x_test_neg=reshape(a.x_test[~y_ones_test],(-1,a.in_dim))
-
-  if mode=='all':
-    a.target_shape=[2]+[16]*8+[1]
-
-  elif mode=='unsw':
-    (a.x_train,a.y_train),(a.x_train,a.y_train),_=unsw(csv_train=a.unsw_train,
-                                                       csv_test=a.unsw_test)
-
-  a.n_rows_train,a.n_rows_test=len(a.y_train),len(a.y_test)
-
-  #elif a.mode=='all':
-  #  a.target_mult_a=.75
-  #  a.target_mult_b=2.
-  #
-  #  a.w_target=init_layers(k1,a.target_shape,a.target_mult_a,a.target_mult_b)
-
-  if a.implementation=='linear':
-    a.model_shape=[a.in_dim,1]
-
-  '''
-  if a.fm:
-    a.model_shape=[a.in_dim]*a.fm#+[1]
-  '''
-  if imp=='resnet':
-    a.model_shape=[a.in_dim]+([a.resnet_dim]*a.resnet)
-  else:
-    a.model_shape=[a.in_dim]+a.model_inner_dims+[1]
-
-  a.w_model_init=init_layers(k2,a.model_shape,a.initialisation,a.mult_a,
-                             sqrt_normalise=a.sqrt_normalise_a,
-                             orthonormalise=a.orthonormalise)
-
-  if mode=='unsw':
-    a.imbalances=(a.y_train.value_counts()+a.y_test.value_counts())/\
-                  (len(df_train)+len(df_test))
-    a.cats={float(p):s for p,s in zip(a.imbalances,a.y_train.value_counts().index)}
-    a.imbalances=a.imbalances[a.imbalances>a.unsw_cat_thresh]
-  
-  if mode in ['unsw','gmm','mnist','rbd24']:
-    a.thresholds={float(p):0. for p in a.imbalances}
-  #else:
-  #  print('Finding thresholds...')
-  #  
-  #  thresholding_sample_size=int(1/(a.threshold_accuracy_tolerance**2*\
-  #                                  a.imbalance_min))
-  #  x_thresholding=sample_x(thresholding_sample_size,k3)
-  #  
-  #  y_t_cts=f(a.w_target[0],a.w_target[1],x_thresholding).flatten()
-  #  y_t_cts_sorted=y_t_cts.sort()
-  #  a.thresholds={float(p):y_t_cts_sorted[-int(p*len(y_t_cts_sorted))]\
-  #                for p in a.imbalances}
-  #  
-  #  print('Imbalances and thresholds')
-  #  for i,t in a.thresholds.items(): print(i,t)
-  
-  a.loop_master_key=k4
-  a.step=0
-
-  #if a.mode=='all':
-  #  a.targets=list(zip(a.fpfn_ratios,a.target_fns))
-  #  experiments=[mk_experiment(p,a.thresholds[p],fpfn_ratio,target_fn,a.lr,a)\
-  #               for p in a.imbalances for (fpfn_ratio,target_fn) in a.targets\
-  #               for lr in a.lrs]
-  #elif a.mode=='adaptive_lr':
-  #  experiments=[mk_experiment(.1,a.thresholds[.1],1.,.01,lr,a) for\
-  #               lr in a.lrs]
-  if mode in ['unsw','gmm','mnist','rbd24']:
-    a.imbalances=None
-    experiments=[mk_experiment(a.p,0.,t_fp,t_fn,lr,a,a.mode,reg=reg)\
-                 for t_fp,t_fn in a.target_fpfns for lr in a.lrs for reg in a.regs]
-  elif mode=='rbd24j':
-    a.imbalances=None
-    experiments=[mk_experiment(a.p,0.,t_fp,t_fn,lr,a,'rbd24j',reg=reg,adfpfn=True)\
-                 for t_fp,t_fn in a.target_fpfns for lr in a.lrs for reg in a.regs]
-  a.n_active_experiments=len(experiments)
-  #elif a.mode in ['imbalances']:
-  #  experiments=[mk_experiment(float(p),float(a.thresholds[float(p)]),fpfn_ratio,
-  #                             float(p*target_fn),a.lr,a)\
-  #               for p in a.imbalances for fpfn_ratio in a.fpfn_ratios\
-  #               for target_fn in a.target_fns]
-
-  if mode=='gmm':
-    min_dist=0
-    while min_dist<a.gmm_min_dist:
-      a.means=2*a.x_max*uniform(k5,(2*a.n_gaussians,a.in_dim))-a.x_max
-      min_dist=min([jsm((A-B)**2) for b,A in enumerate(a.means) for B in a.means[b+1:]])
-    a.variances=2*a.x_max*uniform(k6,2*a.n_gaussians)*a.gmm_spread #hmm
-  return experiments
-
 @jit
 def shuffle_xy(k,x,y):
   shuff=permutation(k,len(y))
   xy=x[shuff],y[shuff]
   return xy
-
-def get_xy_jit(X,Y,start,bs,k,new_epoch):
-  end=start+bs
-  if new_epoch:
-    new_epoch=True
-    k1,k=split(k)
-    X,Y=shuffle_xy(k1,X,Y)
-    start=0
-    end=bs
-  return (X,Y),(X[start:end],Y[start:end]),end,new_epoch
-get_xy_jit=jit(get_xy_jit,static_argnames='new_epoch')
-
-def get_xy(a,bs,k,imbs=None):
-  if type(imbs)==float:
-    ret_single=imbs
-    imbs=[imbs]
-  else:
-    ret_single=False
-
-  if a.mode=='gmm':
-    ret=dict()
-    for p in imbs:
-      probs=array(([(1.-p)/a.n_gaussians]*a.n_gaussians)+\
-                  ([p/a.n_gaussians]*a.n_gaussians))
-      mix=choice(k,2*a.n_gaussians,shape=(bs,),p=probs)
-      y=mix>=a.n_gaussians
-      k1,k=split(k)
-      z=normal(k1,shape=(bs,a.in_dim))
-      if a.gmm_compensate_variances:
-        z/=(-2*log(p))**.5
-      x=z*a.variances[mix,None]+a.means[mix]
-      ret[float(p)]=x,y
-  elif a.mode=='rbd24':
-    if a.epochs: #epochs: sample randomly shuffled dataset without replacement
-      next_offset=a.offset+a.bs
-      if next_offset>len(a.y_train): #new epoch
-        a.epoch_num+=1
-        print('Start of epoch',a.epoch_num)
-        print('Number of rows in training data:',a.n_rows_train)
-        if a.rbd24_no_shuffle:
-          if a.epoch_num>1:
-            print('END OF TIME')
-        else:
-          k1,k=split(k)
-          a.x_train,a.y_train=shuffle_xy(k1,a.x_train,a.y_train)
-        a.offset=0
-        next_offset=a.bs
-      ret={float(a.p):(a.x_train[a.offset:next_offset],
-                       a.y_train[a.offset:next_offset])}
-      a.offset=next_offset
-    else: #sample without replacement
-      k1,k=split(k)
-      batch_indices=choice(k1,len(a.y_train),shape=(a.bs,))
-      ret={float(a.p):(a.x_train[batch_indices],
-                      array(a.y_train[batch_indices]))}
-
-  elif a.mode=='unsw':
-    k1,k=split(k)
-    batch_indices=choice(k1,len(a.y_train),shape=(a.bs,))
-    ret={float(p):(a.x_train[batch_indices],
-                   array(a.y_train[batch_indices]==a.cats[p])) for p in a.imbalances}
-  elif a.mode=='mnist': #force imbalance of mnist dataset
-    k1,k2,k3,k4,k=split(k,5)
-    n_pos=[int(binomial(kk,a.bs,p)) for kk,p in zip(split(k1,a.n_imb),a.imbalances)]
-    x_pos=[choice(kk,a.x_train_pos,shape=(np,)) for kk,np in\
-           zip(split(k2,a.n_imb),n_pos)]
-    x_neg=[choice(kk,a.x_train_neg,shape=(a.bs-np,)) for kk,np in\
-           zip(split(k3,a.n_imb),n_pos)]
-    x_all=[(xn if not len(xp) else(xp if not len(xn) else concatenate([xp,xn]))) for\
-           xp,xn in zip(x_pos,x_neg)]
-    perms=[permutation(kk,a.bs) for kk in split(k4,a.n_imb)]
-
-    ret={p:(x[perm],perm<np) for p,x,np,perm in zip(a.imbalances,x_all,n_pos,perms)}
-  else:
-    ret=dict()
-    for p in imbs:
-      k1,k=split(k)
-      x=sample_x(a.bs,k1)
-      ret[float(p)]=x,f(a.w_target[0],a.w_target[1],x).flatten()
-
-  return ret[ret_single] if ret_single else ret
-
-@jit
-def evaluate_fp_fn(bs,avg_rate,target_fp,target_fn,y_p,y_t,fp,fn):
-  FP=jsm(y_p&(~y_t))/bs #Stop jax weirdness after ADC
-  FN=jsm(y_t&(~y_p))/bs
-  cost=maximum(FP/target_fp,FN/target_fn)
-  fp_amnt=avg_rate*minimum(1,bs*fp)
-  fn_amnt=avg_rate*minimum(1,bs*fn)
-  fp*=(1-fp_amnt)
-  fp+=fp_amnt*FP
-  fn*=(1-fn_amnt)
-  fn+=fn_amnt*FN
-  return FP,FN,cost,fp,fn
-
-
-def even_indices(li):
-  l=len(li)
-  return [li[2*i] for i in range(l//2)]
-
-def update_history(e):
-  if not e.step%e.history.resolution: #for plotting purposes
-    e.history.FP.append(e.FP)
-    e.history.FN.append(e.FN)
-    e.history.lr.append(e.lr)
-    e.history.w.append(e.w_l2)
-    e.history.dw.append(e.dw_l2)
-    e.history.cost.append(e.cost)
-    e.history.loss_vals.append(e.loss_val)
-    e.history.l+=1
-    if e.history.l>e.history_len:
-      e.history.resolution*=2
-      e.history.FP=even_indices(e.history.FP)
-      e.history.FN=even_indices(e.history.FN)
-      e.history.lr=even_indices(e.history.lr)
-      e.history.cost=even_indices(e.history.cost)
-      e.history.w=even_indices(e.history.dw)
-      e.history.dw=even_indices(e.history.dw)
-      e.history.loss_vals=even_indices(e.history.loss_vals)
-      e.history.l//=2
-  if e.fp<e.target_tolerance*e.target_fp and\
-     e.fn<e.target_tolerance*e.target_fn and\
-     not e.steps_to_target:
-       e.steps_to_target=e.step
-       e.report_done=True
-    
-@jit
-def U_V_scale(fp,fn,target_fp,target_fn,pn): #only update if still going
-  U,V=pn*fp/target_fp,fn/target_fn
-  return U,V
-  #UpV=(U+V)**2
-  #return U/UpV,V/UpV
-    
-@jit
-def U_V_l2(fp,fn,target_fp,target_fn,pn): #only update if still going
-  U,V=(pn*fp)**2/target_fp,(fn/target_fn)**2
-  UpV=(U+V)**.5
-  return U/UpV,V/UpV
-
-@jit
-def U_V_sm(fp,fn,target_fp,target_fn,pn): #only update if still going
-  return softmax(array([fp/target_fp,fn/(pn*target_fn)]))
  
-
-def compute_U_V(fp,fn,target_fp,target_fn,p,sm=False,p_scale=.5,scale_before_sm=True):
-  pn=p**p_scale
-  U=fp/target_fp
-  V=fn/target_fn
-  if sm:
-    if scale_before_sm:
-      return softmax(array([U,V/pn]))
-    else:
-      U,V=softmax(array([U,V]))
-  V/=pn
-  UpV=U+V
-  #if UpV>0:#Should be fine, moving average never hits 0
-  U/=UpV
-  V/=UpV
-  return U,V
-compute_U_V=jit(compute_U_V,static_argnames=['sm','scale_before_sm'])
-
-def update_lrs(a,experiments,k): 
-  k1,k2,k3=split(k,3)
-  experiments=sorted(experiments,key=lambda x:x.cost)
-  goodnesses=array([1/(1e-8+e.cost) for e in experiments])
-  e_lr=v_lr=0.
-  for e,g in zip(experiments,goodnesses):
-    print('lr,un-normalised goodnesses=',e.lr,g)
-    le_lr+=log10(e.lr)
-    lv_lr+=(log10(e.lr))**2
-  le_lr/=len(experiments)
-  lv_lr/=len(experiments)
-  lv_lr-=le_le**2
-  print('E(log(lr)),V(log(lr))=',le_lr,lv_lr)
-  goodnesses/=jsm(goodnesses)
-  experiment_indices=array(range(len(experiments)))
-  e=experiments[-1]
-  parent=experiments[int(choice(k1,experiment_indices,p=goodnesses))]
-  e.lr=parent.lr
-  w=lambda x,y,z:(x*z,y/z)
-  if parent.lr>a.lr_max: rule=lambda x,y:(x,y*exp(-abs(normal(k2))))
-  elif parent.lr<a.lr_min: rule=lambda x,y:(x,y*exp(abs(normal(k2))))
-  else: rule=lambda x,y:w(x,y,exp(normal(k2)))
-  parent.lr,e.lr=rule(parent.lr,e.lr)
-
-  if uniform(k3)<e.cost/(1e-8+parent.cost)-1:
-    print('Weight copying')
-    e.w_model=([v.copy() for v in parent.w_model[0]],
-               [v.copy() for v in parent.w_model[1]])
-    e.ad_m=parent.ad_m.copy()
-    e.ad_v=parent.ad_v.copy()
-    e.fp=float(parent.fp)
-    e.fn=float(parent.fn)
-  a.lrs=array([e.lr for e in experiments])
-  return experiments
-
 def ewma(a,b,rate):return (1-rate)*a+rate*b
 
 def ad_diff(m,v,eps):return m/(v**.5+eps)
@@ -1445,517 +286,6 @@ def dict_grad(dw,s,c):
   s['w']=upd_grad(s['w'],dw,c['lr'],c['reg'])
   return s
 
-#@jit
-def update_weights(a,e,upd):#,start=None,end=None):
-  if a.initialisation=='casewise_linear':
-    wm=list(e.w_model[0]),list(e.w_model[1])
-  else:
-    wm=e.w_model
-  if a.adam:
-    wm,e.ad_v,e.ad_m,e.w_l2,e.dw_l2=upd_adam_getl2(wm,e.ad_v,e.ad_m,upd,
-                                                   a.beta1,a.beta2,e.lr)
-  else:
-    wm,e.w_l2,e.dw_l2=upd_grad(wm,upd,e.lr)
-
-  if a.no_bias:
-    wm=wm[0],[0. for b in wm[1]]
-
-  if a.initialisation=='casewise_linear':
-    e.w_model=array(wm[0]),array(wm[1])
-  else:
-    e.w_model=wm
-
-def plot_stopping_times(experiments,fd_tex,report_dir):
-  for e in experiments: e.fpfn_target=float(e.fpfn_target)
-  completed_experiments=[e for e in experiments if e.steps_to_target]
-  try:
-    fpfn_targets=list(set([e.fpfn_targets for e in experiments]))
-    for rat in fpfn_targets:
-      x=[log10(e.p) for e in completed_experiments if e.fpfn_target==rat]
-      y=[log10(e.steps_to_target) for e in completed_experiments if\
-         e.fpfn_target==rat]
-      plot(x,y)
-      title('Stopping times for target fp/fn='+f_to_str(rat))
-      xlabel('log(imbalance)')
-      ylabel('log(Stopping step)')
-      if fd_tex:
-        savefig(report_dir+'/stopping_times_'+str(rat)+'.png',dpi=500)
-        close()
-        print('\n\\begin{figure}[H]',file=fd_tex)
-        print('\\centering',file=fd_tex)
-        print('\\includegraphics[width=.9\\textwidth]'
-              '{stopping_times_'+str(rat)+'.png}',file=fd_tex)
-        print('\\end{figure}',file=fd_tex)
-      else:
-        show()
-  except AttributeError:
-    print('fpfn ratios not found, skipping stopping time analysis')
-
-def plot_2d(experiments,fd_tex,a,imp,line,k):
-  if fd_tex:
-    print('\\subsection{2d visualisation of classifications}',file=fd_tex)
-    print('Here a 2d region is learned.\\\\',file=fd_tex)
-  plot_num=0
-  for e in experiments:
-    if a.mode=='gmm':
-      x_t,y_t=get_xy(a,e.p,a.gmm_scatter_samples,k)
-      col_mat=[[1.,1,1],[0,0,0]]#fp,fn,tp,tn
-      labs=['Predict +','Predict -']
-      x_0_max=jmx(x_t[:,0])
-      x_0_min=-jmx(-x_t[:,0])
-      x_1_max=jmx(x_t[:,1])
-      x_1_min=-jmx(-x_t[:,1])
-    else:
-      x_0_max=x_1_max=a.x_max
-      x_0_min=x_1_min=-a.x_max
-    x=cartesian([linspace(x_0_min,x_0_max,num=a.res),
-                 linspace(x_1_min,x_1_max,num=a.res)])
-    x_split=array_split(x,a.n_splits_img)
-    y_p=concat([(imp(e.w_model,_x)>0).flatten() for\
-                _x in x_split])
-    y_p=flip(y_p.reshape(a.res,a.res),axis=1) #?!?!?!
-
-    cm=None
-    if 'b' in line: #draw boundary
-      cols=abs(convolve(y_p,array([[1,1,1],[1,-8,1],[1,1,1]]))).T
-      cols/=-(jmx(cols)+jmx(-cols))
-      cols+=jmx(-cols)
-      cm='gray'
-    else:
-      if a.mode=='gmm':
-        regions=array([y_p,~y_p]).T
-      else:
-        y_t=concat([f(a.w_target[0],a.w_target[1],_x)>e.thresh for _x in x_split])\
-            .reshape(a.res,a.res)
-        fp_img=(y_p&~y_t)
-        fn_img=(~y_p&y_t)
-        tp_img=(y_p&y_t)
-        tn_img=(~y_p&~y_t)
-        regions=array([fp_img,fn_img,tp_img,tn_img]).T
-        col_mat=[[1.,0,0],[0,1,0],[1,1,1],[0,0,0]]#fp,fn,tp,tn
-        labs=['FP','FN','TP','TN']
-      cols=regions.dot(array(col_mat))
-    imshow(cols,extent=[x_0_min,x_0_max,x_1_min,x_1_max],cmap=cm)
-    handles=[Patch(color=c,label=s) for c,s in zip(col_mat,labs)]
-    if a.mode=='gmm':
-      x_0,x_1=tuple(x_t.T)
-      y_p_s=f(e.w_model,x_t,act=act).flatten()>0
-      scatter(x_0[y_t&y_p_s],x_1[y_t&y_p_s],c='darkgreen',s=1,label='TP')
-      scatter(x_0[y_t&~y_p_s],x_1[y_t&~y_p_s],c='palegreen',s=1,label='FP')
-      scatter(x_0[~y_t&~y_p_s],x_1[~y_t&~y_p_s],c='cyan',s=1,label='TN')
-      scatter(x_0[~y_t&y_p_s],x_1[~y_t&y_p_s],c='blue',s=1,label='FN')
-      handles+=[Patch(color=c,label=s) for c,s in\
-                zip(['blue','palegreen','darkgreen','cyan'],['FP','FN','TP','TN'])]
-    leg(h=handles,l='lower left')
-    title('p='+f_to_str(e.p,p=False)+',target_fp='+f_to_str(e.target_fp,p=False)+\
-          ',target_fn='+f_to_str(e.target_fn,p=False)+',lr='+f_to_str(e.lr,p=False))
-    if fd_tex:
-      if not plot_num%9:
-        print('\\begin{figure}',file=fd_tex)
-        print('\\centering',file=fd_tex)
-      plot_num+=1
-      img_name=exp_to_str(e)+'.png'
-      savefig(a.report_dir+'/'+img_name,dpi=500)
-      print('\\begin{subfigure}{.33\\textwidth}',file=fd_tex)
-      print('\\centering',file=fd_tex)
-      print('\\includegraphics[width=.9\\linewidth,scale=1]{'+img_name+'}',
-            file=fd_tex)
-      print('\\end{subfigure}%',file=fd_tex)
-      print('\\hfill',file=fd_tex)
-      if not plot_num%9:
-        print('\\end{figure}',file=fd_tex)
-      close()
-    else:
-      show()
-  if fd_tex and plot_num%9: print('\\end{figure}',file=fd_tex)
-
-get_cost=lambda e:log10(1e-8+array(e.history.cost))
-get_lr=lambda e:e.history.lr
-get_dw=lambda e:log10(1e-8+array(e.history.dw))
-def plot_historical_statistics(experiments,fd_tex,a,smoothing=100):
-  if fd_tex:
-    print('\\subsection{Historical statistics}',file=fd_tex)
-  stats=[(get_cost,'log(eps+max(fp/target_fp,fn/target_fn))','Loss'),
-         (get_dw,'log(eps+dw)','Change_in_weights')]
-  if a.mode=='adaptive_lr':
-    stats.append((get_lr,'log(lr)','Learning_rate'))
-  for get_var,yl,desc in stats:
-    for e in experiments:
-      arr=get_var(e)
-      if smoothing:
-        ker=ones(smoothing)/smoothing
-        arr=convolve(array(arr,dtype=float),ker,'same')
-      if a.mode=='unsw':
-        lab=a.cats[e.p]
-      else:
-        lab=fpfnp_lab(e)
-      plot(arr,label=lab,alpha=.5)
-    xlabel('Step number *'+str(e.history.resolution))
-    ylabel(yl)
-    title(desc.replace('_',' '))
-    leg()
-    if fd_tex:
-      savefig(a.report_dir+'/'+desc+'.png',dpi=500)
-      close()
-      print('\n\\begin{figure}[H]',file=fd_tex)
-      print('\\centering',file=fd_tex)
-      print('\\includegraphics[width=.9\\textwidth]{'+desc+'.png}',file=fd_tex)
-      print('\\end{figure}',file=fd_tex)
-    else:
-      show()
-  for e in experiments:
-    conv_len=min(int(a.step**.5),int(1/e.p))
-    ker=ones(conv_len)/conv_len
-    smoothed_fp=convolve(array(e.history.FP,dtype=float),ker,'valid')
-    smoothed_fn=convolve(array(e.history.FN,dtype=float),ker,'valid')
-    plot(log10(smoothed_fp),log10(smoothed_fn),label=fpfnp_lab(e),alpha=.5)
-    xlabel('log(fp)')
-    ylabel('log(fn)')
-    title('FP versus FN rate')
-  leg()
-  if fd_tex:
-    savefig(a.report_dir+'/phase.png',dpi=500)
-    close()
-    print('\n\\begin{figure}[H]',file=fd_tex)
-    print('\\centering',file=fd_tex)
-    print('\\includegraphics[width=.9\\textwidth]{phase.png}',file=fd_tex)
-    print('\\end{figure}',file=fd_tex)
-  else:
-    show()
-
-def plot_fpfn_scatter(experiments,fd_tex,a):
-  fp_perf=[e.fp/e.target_fp for e in experiments]
-  fn_perf=[e.fn/e.target_fn for e in experiments]
-  sc=scatter(fp_perf,fn_perf)#,c=colours)#,s=sizes)
-  if a.mode=='all': gca().add_artist(cl)
-  xlabel('fp/target_fp')
-  ylabel('fn/target_fn')
-  if fd_tex:
-    savefig(a.report_dir+'/scatter.png',dpi=500)
-    close()
-    print('\\subsection{Comparing performance}',file=fd_tex)
-    print('\n\\begin{figure}[H]',file=fd_tex)
-    print('\\centering',file=fd_tex)
-    print('\\includegraphics[width=.9\\textwidth]{scatter.png}',file=fd_tex)
-    print('\\end{figure}',file=fd_tex)
-  else:
-    show()
-
-def epoch_stats(e):
-  return {'done':e.steps_to_target if e.steps_to_target else ' no',
-          'p_trn':e.p,'p_test':e.p_test,'fpn_tg':e.fpfn_target,
-          'fpn_trn':e.fpfn_train,'fpn_tst':e.fpfn_test,'fpn_otf':e.fpfn_otf,
-          'div_trn':e.div_train,'div_tst':e.div_test,'div_otf':e.div_otf,
-          'fp_tg':e.target_fp,'fn_tg':e.target_fn,
-          'fp_trn': e.fp_train,'fn_trn':e.fn_train,
-          'fp_otf':e.fp_otf,'fn_otf':e.fn_otf,
-          'w_l2':e.w_l2,'log(pn)':log10(e.pn),
-          'lr':e.lr,'reg':e.reg,'bs':e.bs}
-
-def rm_unique_stats(stats,by):
-  unique_stats={}
-  for k in [l for l in stats[0] if not(l in by)]:
-    st=(s[k] for s in stats)
-    if hasattr(stats[0][k],'item'):
-      st=(s.item() for s in st)
-    vs=list(set(st))
-    if len(vs)==1:
-      unique_stats[k]=vs[0]
-  [s.pop(k) for k in unique_stats for s in stats]
-  return unique_stats
-
-def gts():
-  try:
-    return get_terminal_size().columns
-  except:
-    return 10000
-
-def show_unique_stats(stats,trunc=True,ess_only=False,by=[],ts=SimpleNamespace(get_timestep=lambda x:None),
-                      prec=3,essential=lambda l:True,term_size=gts(),flatten_pid=True):
-  if flatten_pid:
-    stats=[{**s['pid'],**{k:v for k,v in s.items() if k!='pid'}} for s in stats]
-  unique_stats=rm_unique_stats(stats,by) if len(stats)>1 else False
-  ts.get_timestep('rmunique')
-  ret=''
-  if unique_stats:
-    ret='Unique stats:'+'\n'+\
-         (', '.join([k+':'+f_to_str(v,prec=prec,lj=False) for k,v in unique_stats.items()]))
-  labs=by+[s for s in list(stats[0]) if not(s in by)]
-  ts.get_timestep('sort')
-  col_width=max(prec+5,max([len(l) for l in labs]))+1 #.e-bc is 5 chars
-  n_stats=len(labs)
-  n_max=term_size//col_width if trunc else n_stats
-  if ess_only or (n_max<n_stats and ess_only is None):
-    labs=[l for l in labs if not(essential(l))]
-  labs=labs[:n_max]
-  ts.get_timestep('labs')
-  return ret+'\n'+f_to_str(labs,prec=prec,lj=col_width)+'\n'+\
-         '\n'.join([f_to_str(s,prec=prec,lj=col_width) for s in\
-                    sorted([[t[l] for l in labs] for t in stats])])
-  
-def report_epochs(a,experiments,ts,line,imp,k,prec=3,by='div_trn',
-                  trunc=True,div_only=None):
-  k1,k2=split(k)
-  stats=[epoch_stats(e) for e in experiments]
-  show_unique_stats(stats,trunc=trunc,ess_only=div_only,by=by,
-                    prec=prec,essential=lambda l:not((l[0]=='f')and(l[2]=='_')))
-  ts.report(p=True)
-  if ':' in line:
-    l=line.split(':')
-    if len(l)<3:
-      print('Invalid command')
-      return
-    if l[0]=='f':
-      ty=float
-    elif line[0]=='i':
-      ty=int
-    vars(a)[l[1]]=ty(l[2])
-    print('a.'+line[1]+'->'+str(ty(l[2])))
-    return
-  elif '?' in line:
-    query_var=line.split('?')[0]
-    va=vars(a)
-    if query_var in va:
-      print('a.'+query_var,':',va[query_var])
-    else:
-      print('"',line.split('?')[0],'" not in a')
-    return
-  elif '!' in line:
-    query_var=line.split('!')[0]
-    found=False
-    for i,e in enumerate(experiments):
-      ve=vars(e)
-      if query_var in ve:
-        found=True
-        print('experiment_'+str(i)+'.'+query_var,':',ve[query_var])
-    if not found:
-      print('"',line.split('?')[0],'" not in any experiment')
-    return
-  elif '*' in line:
-    print('a variables:')
-    [print(v) for v in vars(a).keys()]
-    return
-  if 'p' in line:
-    plot_epochs(experiments)
-    for e in experiments:
-      plot(e.epochs.fp_test,e.epochs.fn_test)
-    title('fp_test vs fn_test by epoch')
-    show()
-  if 'c' in line:#Completed tasks
-    print(f_to_str(['lr','reg','p','p_test','tgt_fp','tgt_fn','fp_otf','fn_otf',
-                    'fp_trn','fn_trn','fp_tst','fn_tst','w_l2','done']))
-    for e in sorted([eee for eee in experiments if eee.steps_to_target],
-                    key=lambda o:o.reg):
-      stt=e.steps_to_target-1
-      ee=e.epochs
-      print(f_to_str([e.lr,e.reg,e.p,e.p_test,e.target_fp,e.target_fn,
-                      ee.fp_otf[stt],ee.fn_otf[stt],ee.fp_train[stt],ee.fn_train[stt],
-                      ee.fp_test[stt],ee.fn_test[stt],ee.w_l2[stt],stt]))
-    for e in sorted([ee for ee in experiments if not ee.steps_to_target],
-                    key=lambda o:o.reg):
-      print(f_to_str([e.lr,e.reg,e.p,e.p_test,e.target_fp,e.target_fn,e.fp,e.fn,
-                      e.fp_train,e.fn_train,e.fp_test,e.fn_test,e.w_l2,' no']))
-
-  if 'x' in line:
-    print('Bye!')
-    exit()
-  if 'i' in line:
-    print(mod_desc(a))
-
-def mod_desc(a):
-  return\
-  '- Model shape:\n'+('->'.join([str(l) for l in a.model_shape]))+\
-  '\n- Activation: '+a.activation+'\n'+\
-  '- Implementation: '+a.implementation+'\n'+\
-  '- Model initialisation: '+str(a.initialisation)+'\n'\
-  '- Matrix weight multiplier: '+str(a.mult_a)+'\n'\
-  '- Sqrt variance correction:'+str(a.sqrt_normalise_a)+'\n'\
-  '- Batch size:'+str(a.bs)+'\n'\
-  '- learning rate(s):'+f_to_str(a.lrs)
-
-def report_progress(a,experiments,ts,line,imp,k):
-  try:
-    k1,k2=split(k)
-    print(f_to_str(['lr','reg','p','tgt_fp','tgt_fn','fp_otf','fn_otf',
-                    'fp_train','fn_train','fp_test','fn_test','done']))
-    for e in experiments:
-      print(f_to_str([e.lr,e.reg,e.p,e.target_fp,e.target_fn,e.fp,e.fn,
-                      e.fp_train,e.fn_train,e.fp_test,e.fn_test,
-                      (e.steps_to_target if e.steps_to_target else 'no')]))
-
-    if ':' in line:
-      l=line.split(':')
-      if len(l)<3:
-        print('Invalid command')
-        return
-      if l[0]=='f':
-        ty=float
-      elif line[0]=='i':
-        ty=int
-      vars(a)[l[1]]=ty(l[2])
-      print('a.'+line[1]+'->'+str(ty(l[2])))
-      return
-    elif '?' in line:
-      query_var=line.split('?')[0]
-      va=vars(a)
-      if query_var in va:
-        print('a.'+query_var,':',va[query_var])
-      else:
-        print('"',line.split('?')[0],'" not in a')
-      return
-    elif '!' in line:
-      query_var=line.split('!')[0]
-      found=False
-      for i,e in enumerate(experiments):
-        ve=vars(e)
-        if query_var in ve:
-          found=True
-          print('experiment_'+str(i)+'.'+query_var,':',ve[query_var])
-      if not found:
-        print('"',line.split('?')[0],'" not in any experiment')
-      return
-    elif '*' in line:
-      print('a variables:')
-      [print(v) for v in vars(a).keys()]
-      return
-
-    fd_tex=False
-    if 'e' in line and a.mode in ['mnist','rbd24']:
-      print('evaluating experiments...')
-      for e in experiments:
-        x_train_pos=a.x_train[a.y_train]
-        x_train_neg=a.x_train[~a.y_train]
-        x_test_pos=a.x_test[a.y_test]
-        x_test_neg=a.x_test[~a.y_test]
-        print()
-        print('lr,reg,P_train(+),P_test(+):',e.lr,e.reg,e.p,e.p_test)
-        print('fp_otf,fn_otf:',f_to_str(e.fp),f_to_str(e.fn))
-        print('target_fp,target_fn:',
-              f_to_str(e.target_fp),f_to_str(e.target_fn))
-        print('fp_train,fn_train:',
-              f_to_str(sum([nsm(f(e.w_model,x_train_neg[i:i+a.bs])>0) for\
-                            i in range(0,len(x_train_neg),a.bs)])/len(a.x_train)),
-              f_to_str(sum([nsm(f(e.w_model,x_train_pos[i:i+a.bs])<=0) for\
-                            i in range(0,len(x_train_pos),a.bs)])/len(a.x_train)))
-        print('fp_test,fn_test:',
-              f_to_str(sum([nsm(f(e.w_model,x_test_neg[i:i+a.bs])>0) for\
-                            i in range(0,len(x_test_neg),a.bs)])/len(a.x_test)),
-              f_to_str(sum([nsm(f(e.w_model,x_test_pos[i:i+a.bs])<=0) for\
-                            i in range(0,len(x_test_pos),a.bs)])/len(a.x_test)))
-    if 'r' in line:
-      line+='clist'
-      a.report_dir=a.outf+'_report'
-      fd_tex=open(a.outf+'_report/report.tex','w')
-      print('\\documentclass[landscape]{article}\n'
-            '\\usepackage[margin=0.7in]{geometry}\n'
-            '\\usepackage[utf8]{inputenc}\n'
-            '\\usepackage{graphicx}\n'
-            '\\usepackage{float}\n'
-            '\\usepackage{caption}\n'
-            '\\usepackage{subcaption}\n'
-            '\\usepackage{amsmath,amssymb,amsfonts,amsthm}\n'
-            '\n'
-            '\\title{Experiment ensemble report: '+a.mode+'}\n'
-            '\\author{George Lee}\n'
-            '\n'
-            '\\begin{document}\n'
-            '\\maketitle\n'
-            'Report for ensemble labelled '+a.outf.replace('_','\\_')+'\n'
-            '\\subsection{Performance after '+str(a.step)+' steps}',file=fd_tex)
-      
-      with open(a.out_dir+'/performance.csv','w') as fd_csv:
-        w=writer(fd_csv)
-        n_fps=len(a.fpfn_targets)
-        row=['imbalance','target_fps']+['']*(n_fps-1)+['target_fn','fp']+\
-            ['']*(n_fps-1)+['fn']+['']*(n_fps-1)+['steps_to_target']
-        if a.mode=='unsw':
-          row=['attack_cat']+row
-        w.writerow(row)
-        if fd_tex:
-          conf_fill='r'*n_fps
-          ct='l' if a.mode=='unsw' else ''
-          print('\\begin{tabular}{l'+ct+'|'+conf_fill+'|r'+(('|'+conf_fill)*4)+'}',
-                file=fd_tex)
-          print(' & '.join(row).replace('_',' ')+'\\\\',file=fd_tex)
-          print('\\hline',file=fd_tex)
-        for p in a.imbalances:
-          tgt_fps=[]
-          report_fps=[]
-          report_fns=[]
-          steps_to_target=[]
-          for e in [e for e in experiments if e.p==p]:
-            tgt_fps.append(f_to_str(e.target_fp))
-            fp_hist=e.history.FP[-int(10/e.p**2):]
-            fn_hist=e.history.FN[-int(10/e.p**2):]
-            if a.mode=='mnist':
-              y_ones_test=a.y_test==1 #1 detector
-
-              report_fns.append(f_to_str(e.p*nsm(f(e.w_model,
-                                                   a.x_test_pos)<=0)/\
-                                         (.1*len(a.x_test))))
-              report_fps.append(f_to_str((1-e.p)*nsm(f(e.w_model,
-                                                       a.x_test_neg)>0)/\
-                                         ((1-.1)*len(a.x_test))))
-            else:
-              report_fps.append(f_to_str(sum(fp_hist)/(e.bs*len(fp_hist))))
-              report_fns.append(f_to_str(sum(fn_hist)/(e.bs*len(fn_hist))))
-            steps_to_target.append(str(e.steps_to_target) if e.steps_to_target else '-')
-          row=[f_to_str(p)]+tgt_fps+[f_to_str(p/10)]+report_fps+report_fns+steps_to_target
-          if a.mode=='unsw':
-            row=[a.cats[p]]+row
-          w.writerow(row)
-          if fd_tex:
-            print('&'.join(row)+'\\\\',file=fd_tex)
-    if fd_tex:
-      print('\\end{tabular}\n'
-            '\\subsection{Timing analysis of update step}\n'
-            'Distinct steps in the algorithm taking on average:\\\\\n'
-            '\\begin{tabular}{r|r}\n'
-            'step&$\\log(\\overline{\\texttt{T}_\\texttt{step}})$\\\\\n',file=fd_tex)
-
-    print('Timing:')
-    tsr,tsrx=ts.report()
-    print(tsr)
-    if fd_tex:print(tsrx,file=fd_tex)
-
-    if a.in_dim==2 and 'c' in line:
-      plot_2d(experiments,fd_tex,a,imp,line,k1)
-
-    if 'i' in line:
-      model_desc=mod_desc(a)
-      print(model_desc)
-      if fd_tex:
-        print('\\subsection{Model parameters}',file=fd_tex)
-        print('Here the batch size was set to '+str(a.bs)+'.\\\\',file=fd_tex)
-        print('\\texttt{'+(model_desc.replace('\n','}\\\\\n\\texttt{'))+'}\\\\',
-              file=fd_tex)
-
-    if 's' in line and a.mode=='all':
-      plot_fpfn_scatter(experiments,fd_tex,a)
-    if 't' in line:
-      plot_stopping_times(experiments,fd_tex,a.report_dir)
-    if 'l' in line:
-      plot_historical_statistics(experiments,fd_tex,a)
-    if fd_tex:
-      print('\\end{document}',file=fd_tex,flush=True)
-      fd_tex.close()
-    if 'x' in line:
-      print('Bye!')
-      exit()
-  except Exception as e:
-    print('Error reporting on progress:')
-    print(e)
-    print(format_exc())
-
-def save_ensemble(a,experiments,ke,ts):
-  ens_file=Path(a.out_dir+'/ensemble.pkl')
-  if ens_file.is_file():
-    ens_file.rename(ens_file.with_suffix('.pkl.bak'))
-  with open(ens_file,'wb') as fd:
-    a.parent_keys=ke.parents
-    a.time_avgs=ts.time_avgs
-    dump((a,experiments),fd)
-
 def dl_rbd24(data_dir=str(Path.home())+'/data',
              data_url='https://zenodo.org/api/records/13787591/files-archive',
              rm_redundant=True,large_rescale_factor=10):
@@ -1980,7 +310,7 @@ def dl_rbd24(data_dir=str(Path.home())+'/data',
 def unsw(csv_train=Path.home()/'data'/'UNSW_NB15_training-set.csv',
          csv_test=Path.home()/'data'/'UNSW_NB15_testing-set.csv',
          rescale='log',numeric_only=False,verbose=False,
-         random_split=False,lab_cat=False):
+         random_split=None,lab_cat=False):
   _df_train=read_csv(csv_train)
   _df_test=read_csv(csv_test)
   if lab_cat:
@@ -2014,7 +344,7 @@ def unsw(csv_train=Path.home()/'data'/'UNSW_NB15_training-set.csv',
   #if verbose:
   #  print('x_train.min(),x_test.min():',x_train.min(),x_test.min())
   #  print('x_train.max(),x_test.max():',x_train.max(),x_test.max())
-  if random_split:
+  if not(random_split is None):
     x_train,x_test,y_train,y_test=train_test_split(concat([x_train,x_test]),concat([y_train,y_test]),
                                                    test_size=.3,random_state=random_split)
   x_train=x_train.__array__().astype(float)
@@ -2039,7 +369,7 @@ def unsw(csv_train=Path.home()/'data'/'UNSW_NB15_training-set.csv',
     print('Common cols:',*common_cols)
   return (x_train,y_train),(x_test,y_test),(_df_train,_df_test),(sc if rescale=='standard' else rescale)
 
-def rbd24(preproc=True,split_test_train=True,rescale='log',single_dataset=False,random_split=False,
+def rbd24(preproc=True,split_test_train=True,rescale='log',single_dataset=False,random_split=None,
           raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl',categorical=True,
           processed_pickle_file=str(Path.home())+'/data/rbd24/rbd24_proc.pkl',verbose=False):
   if split_test_train and preproc and rescale=='log' and\
@@ -2075,13 +405,13 @@ def rbd24(preproc=True,split_test_train=True,rescale='log',single_dataset=False,
   x_cols=x.columns
   x=x.__array__().astype(float)
   y=df.label.__array__().astype(bool)
-  if random_split:
-    x_train,x_test,y_train,y_test=train_test_split(x,y,test_size=.3,random_state=random_split)
-  else:
+  if random_split is None:
     l=len(y)
     split_point=int(l*.7)
     x_train,x_test=x[:split_point],x[split_point:]
     y_train,y_test=y[:split_point],y[split_point:]
+  else:
+    x_train,x_test,y_train,y_test=train_test_split(x,y,test_size=.3,random_state=random_split)
   if split_test_train and preproc and rescale=='log' and not single_dataset:
     if verbose:print('Saving processed log rescaled pickle...')
     with open(processed_pickle_file,'wb') as fd:
@@ -2093,7 +423,7 @@ def rbd24(preproc=True,split_test_train=True,rescale='log',single_dataset=False,
     x_test=sc.transform(x_test)
   return (x_train,y_train),(x_test,y_test),(df,sc)
 
-def load_ds(dataset,rescale='standard',verbose=False,random_split=0,categorical=True,
+def load_ds(dataset,rescale='standard',verbose=False,random_split=None,categorical=True,
             single_dataset=None,lab_cat=False):
   if dataset=='unsw':
     (X_trn,Y_trn),(X_tst,Y_tst),_,sc=unsw(rescale=rescale,verbose=verbose,
@@ -2274,35 +604,6 @@ def min_dist(X,Y=None):
           return m,x,y
     return m,x,y
 
-def mk_exp_nn(lr,reg,in_dim,start_dim,end_dim,depth,tfp,tfn,p,beta1,beta2,
-              initialisation,lrp,k,mk_beta0):#=lambda p,tfp,tfn:p**-.5):
-  sh=[in_dim]+list(geomspace(start_dim,end_dim,depth+1,dtype=int))+[1]
-  #Large beta: suppress fn more, small beta:suppress fp more.
-  beta=mk_beta0(p,tfp,tfn)#1+(tfp-tfn)/p#(p+tfp)/(p+tfn) #Note typo in work of Rijsbergen
-  print('Initial beta:',beta)
-  ret={'state':{'w':init_layers(sh,initialisation,k=k),
-                'm':init_layers(sh,'zeros'),
-                'v':init_layers(sh,'zeros'),'t':0},
-       'const':{'beta':beta,'tfpfn':(tfp/tfn)**.5,#'vbeta':0,#**.5,#target_fpfn,
-                'tfp':tfp,'tfn':tfn,'beta1':beta1,'beta2':beta2,
-                'lr':lr,'reg':reg*lr,'eps':1e-8,'p_train':p},
-       'shape':sh}
-  if isinstance(lrp,dict):
-    ret['const']['pid']={**lrp,'pdiv':0,'idiv':0,'ddiv':0}
-  else:
-    ret['const']['lrp']=lrp
-  return ret
-
-def mk_exps(targ_fpfns,in_dim,initialisation,p,k,tfpfns=[(.1,.01)],lrs=[1e-3],
-            regs=[.1],start_dims=[128],end_dims=[8],depths=[2],mk_beta0=lambda p,tfp,tfn:(tfp/tfn),#**2,
-            beta1s=[.9],beta2s=[.999],lrps=[{'i':0.,'p':.01,'d':0.}]):
-  params=[(lr,reg,in_dim,start_dim,end_dim,depth,
-           tfp,tfn,p,beta1,beta2,initialisation,lrp) for\
-           lr in lrs for reg in regs for start_dim in start_dims for\
-           end_dim in end_dims for depth in depths for tfp,tfn in tfpfns for\
-           beta1 in beta1s for beta2 in beta2s for lrp in lrps]
-  return [mk_exp_nn(*param,l,mk_beta0=mk_beta0) for param,l in zip(params,split(k,len(params)))]
-
 def binsearch_step(r,tfpfn,y,yp_smooth):
   a,b=r
   mid=(a+b)/2
@@ -2428,7 +729,6 @@ def mk_nn_epochs(act,bs,batchnorm=False):
   while still benefitting from jax's jit functionality.
   '''
 
-  header='lr,reg,lrfpfn,tfp,tfn,fp_train,fn_train,fp_test,fn_test\n'
   _forward=lambda w,x:forward(w,x,act,batchnorm=batchnorm,transpose=True)
   def _loss(w,x,y,bet):
     yp=_forward(w,x)
@@ -2453,6 +753,8 @@ def mk_nn_epochs(act,bs,batchnorm=False):
     X,Y=shuffle_xy(k,X_trn,Y_trn)
     return X[0:last].reshape(n_batches,bs,-1),Y[0:last].reshape(n_batches,bs)
 
+  get_reshuffled=jit(get_reshuffled,static_argnames=['n_batches','bs','last'])
+
   @jit
   def _get_preds_thresh(w,tfpfn,X_trn,Y_trn,X_tst,Y_tst):
     yps=forward(w,X_trn,act,transpose=True,get_transform=batchnorm,batchnorm=batchnorm)
@@ -2471,12 +773,7 @@ def mk_nn_epochs(act,bs,batchnorm=False):
             'fp_tsh':((~Y_trn)&(Yp_trn_thresh)).mean(),'fn_tsh':((Y_trn)&(~Yp_trn_thresh)).mean(),
             'max':y_max,'min':y_min,'var':Yp_smooth_trn.var(),'thresh':thresh}
 
-  @jit
-  def _get_state(s):
-    return dict(wl2=l2(s['w']),mv=l2(s['m'])/l2(s['v']),t=s['t'])
-
   get_preds_thresh=vmap(_get_preds_thresh,(0,0,None,None,None,None),0)
-  get_state=vmap(_get_state)
 
   def _nn_epochs(ks,n_epochs,n_batches,bs,last,X_trn,Y_trn,X_tst,Y_tst,consts_hp,consts_adam,states,
                  verbose=True,ep_scale=0.):
@@ -2486,26 +783,18 @@ def mk_nn_epochs(act,bs,batchnorm=False):
     lrs=consts_adam['lr']
     regs=consts_adam['reg']
     tfpfns=tfps/tfns
-    res=dict(fp_trn=[],fn_trn=[],fp_tst=[],fn_tst=[])
     for epoch,k in enumerate(ks,1):
       X,Y=get_reshuffled(k,X_trn,Y_trn,n_batches,bs,last)
       states=steps(states,consts_adam,X,Y,consts_hp)
       preds=get_preds_thresh(states['w'],tfpfns,X_trn,Y_trn,X_tst,Y_tst)
-      [v.append(preds[l]) for l,v in res.items()]
       states['w'][-1][1]-=preds['thresh'].reshape(-1,1)#*.2
       consts_hp=set_bet(consts_hp,preds,epoch,ep_scale)
-      #if verbose and not(epoch%10):
-      #  print('============','epoch',epoch,'============')
-      #  l2stats=get_state(states)
-      #  [f_to_str([v]+list(l2stats[v]),p=True) for\
-      #   v in sorted(list(l2stats),key=lambda s:s[-2:]=='l2' and s[0]!='w')]
-      #  [f_to_str([stat]+list(v),p=True) for stat,v in consts_hp.items()]
-      #  [f_to_str([v]+list(consts_adam[v]),p=True) for v in ['lr','reg']]
-      #  [f_to_str([pr]+list(preds[pr]),p=True) for\
-      #   pr in sorted(list(preds),key=lambda s:s[-3:]=='trn')]
+      print('nn epoch',epoch)
+    #return res
+    return dict(fp_trn=preds['fp_trn'],fn_trn=preds['fn_trn'],
+                fp_tst=preds['fp_tst'],fn_tst=preds['fn_tst'])
 
-    return res
-  _nn_epochs=jit(_nn_epochs,static_argnames=['last','n_batches','bs'])
+  #_nn_epochs=jit(_nn_epochs,static_argnames=['last','n_batches','bs'])
 
   def nn_epochs(k,n_epochs,X_trn,Y_trn,X_tst,Y_tst,consts_hp,consts_adam,states,**kwa):
     n_batches=len(X_trn)//bs
@@ -2554,13 +843,10 @@ def init_states(k,init,lrfpfn,reg,p,tfps,tfns,mod_shape=None,in_dim=None,
     return consts_hp,consts_adam,states
 
 def get_threshes(tfpfns,yo,p):
-  if isinstance(ftpfns,tuple):
-    tfpfns=[tfpfn[0] for tfpfn in tfpfns]
-    n_thresh=len(tfpfns)
-    delta_p=1/len(yo)
-    i=0
-    fp=0
-    fn=p
+  delta_p=1/len(yo)
+  i=0
+  fp=0
+  fn=p
   for thresh,y in yo:
     if y:
       fn-=delta_p
@@ -2581,7 +867,14 @@ class ModelEvaluation:
                                'nn':[{'lr_ad':la,'reg':rl*la,'lrfpfn':lf}for la in [.0001] for\
                                      rl in [1e-3,1e-2] for lf in geomspace(.0002,.03,10)]}):
     self.directory=Path(directory)
+    if not self.directory.exists():
+      self.directory.mkdir()
+    #else:
+    #  print('Directory exists.  Continue? [y/N]')
+    #  if not 'y' in stdin.readline().lower():
+    #    exit()
     self.seed=seed
+    self.rs_seeds={}
     self.rng=default_rng(seed)
     self.rkg=KeyEmitter(self.rng.integers(2**32))
     self.varying_params=varying_params
@@ -2627,17 +920,25 @@ class ModelEvaluation:
     self.tfns={l:[t[1] for t in v] for l,v in self.targets.items()}
     self.n_targets=n_targets
 
-  def define_jobs(self,methods=['rf','nn'],resamplers=['']):
+  def define_jobs(self,methods=['rf','nn'],resamplers=['','SMOTETomek','SMOTEENN'],check_done=True):
     self.methods=methods
     self.resamplers=resamplers
     self.jobs=[(method,i,resampler) for resampler in resamplers for method in methods for i in\
                range(len(self.varying_params[method]))]
     self.n_complete=0
     self.n_remaining=len(self.jobs)
+    if check_done:
+      done_fp=self.directory/'done.csv'
+      if done_fp.exists():
+        with done_fp.open('r') as fd:
+          done_jobs=list(reader(fd))
+          self.jobs=[j for j in self.jobs if not j in done_jobs]
+          self.n_complete=len(done_jobs)
+          self.n_remaining-=self.n_complete
 
   def run_jobs(self,of=stdout):
     while self.n_remaining:
-      job=self.jobs[-1]
+      job=self.jobs.pop()
       if of: print('Initialising model:',job,file=of)
       self.init_model(job)
       if of: print('Benchmarking...',file=of)
@@ -2655,12 +956,38 @@ class ModelEvaluation:
     self.n_remaining-=1
 
   def resample(self,resampler):
-    match resampler:
-      case '':
-        self.X_trn_resamp,self.Y_trn_resamp=self.X_trn,self.Y_trn
-      case _:
-        raise NotImplementedError('Resampler',resampler,'not found')
+    rs_fp=(self.directory/(resampler+'.pkl'))
     self.resampler=resampler
+    if resampler and rs_fp.exists():
+      print('Loading data resampled by',resampler,'...')
+      with rs_fp.open('rb') as fd:
+        self.X_trn_resamp,self.Y_trn_resamp=load(fd)
+    else:
+      print('Resampling by',resampler,'...')
+      seed=self.rs_seeds[resampler]=self.rng.integers(2**32)
+
+      match resampler:
+        case '':
+          self.Y_trn_resamp=self.Y_trn
+          self.X_trn_resamp={l:self.X_trn for l in self.Y_trn}
+          return
+        case 'SMOTETomek':
+          self.Y_trn_resamp={}
+          self.X_trn_resamp={}
+          for l,Y in self.Y_trn.items():
+            sm=SMOTETomek(random_state=seed)
+            self.X_trn_resamp[l],self.Y_trn_resamp[l]=sm.fit_resample(self.X_trn,Y)
+        case 'SMOTEENN':
+          self.Y_trn_resamp={}
+          self.X_trn_resamp={}
+          for l,Y in self.Y_trn.items():
+            print('Resampling by SMOTEENN...')
+            sm=SMOTEENN(random_state=seed)
+            self.X_trn_resamp[l],self.Y_trn_resamp[l]=sm.fit_resample(self.X_trn,Y)
+        case _:
+          raise NotImplementedError('Resampler',resampler,'not found')
+      with rs_fp.open('wb') as fd:
+        dump((self.X_trn_resamp,self.Y_trn_resamp),fd)
 
   def init_model(self,job):
     method,i,resampler=job
@@ -2668,7 +995,7 @@ class ModelEvaluation:
     pm=self.fixed_params[method]
     match method:
       case 'rf':
-        j={l:{'rf':RandomForestRegressor(max_depth=param['d'],n_jobs=self.fixed_params['rf'],
+        j={l:{'rf':RandomForestRegressor(max_depth=param['d'],n_jobs=self.fixed_params['rf']['n_jobs'],
                                          random_state=self.rng.integers(2*32)),
               'thresholds':{}} for l in self.p_trn}
       case 'nn':
@@ -2689,13 +1016,14 @@ class ModelEvaluation:
     ms=self.fixed_params[method]
     res={}
     for l,reg in regressor.items():
-      res[l]={'trn':{},'tst':{},'tgt':{a:dict(fp=b,fn=c,fpfn=a) for a,b,c in self.targets[l]}}
-      tgts=self.targets[l]
+      print('Training for label',l,'...')
+      res[l]={'trn':{},'tst':{},'tgt':{c:dict(fp=a,fn=b,fpfn=c) for a,b,c in self.targets[l]}}
+      tgts=[c for (_,_,c) in self.targets[l]]
       match method:
         case 'rf':
-          reg['rf'].fit(self.X_trn_resamp,self.Y_trn_resamp[l])
+          reg['rf'].fit(self.X_trn_resamp[l],self.Y_trn_resamp[l])
           Yp_ordered=sorted(zip(reg['rf'].predict(self.X_trn),self.Y_trn[l]))
-          for tfpfn,thresh,fp,fn in get_threshes(self.targets[l],Yp_ordered,self.p_trn[l]):
+          for tfpfn,thresh,fp,fn in get_threshes(tgts,Yp_ordered,self.p_trn[l]):
             reg['thresholds'][tfpfn]=thresh
             res[l]['trn'][tfpfn]=dict(fp=fp,fn=fn,fpfn=fp/fn)
             Yp_tst=reg['rf'].predict(self.X_tst)>thresh
@@ -2704,7 +1032,7 @@ class ModelEvaluation:
             res[l]['tst'][tfpfn]=dict(fp=fpt,fn=fnt,fpfn=fpt/fnt)
 
         case 'nn':
-          f_arrs=self.func['nn'](self.rkg.emit_key(),ms['n_epochs'],self.X_trn_resamp,self.Y_trn_resamp[l],
+          f_arrs=self.func['nn'](self.rkg.emit_key(),ms['n_epochs'],self.X_trn_resamp[l],self.Y_trn_resamp[l],
                                  self.X_tst,self.Y_tst[l],reg['consts_hp'],reg['consts_adam'],
                                  reg['states'],verbose=False,ep_scale=0.)
           for stage in ['tst','trn']:
@@ -2732,18 +1060,19 @@ class ModelEvaluation:
 
     append_res=res_fp.exists()
     with res_fp.open('a' if append_res else 'w') as fd:
-      w=DictWriter(fd['method','parameter_index','resampler','fp_target','fn_target',
+      w=DictWriter(fd,['cat_lab','p','method','parameter_index','resampler','fp_target','fn_target',
                       'fp_train','fn_train','fp_test','fn_test'])
-      if not append_res:fd.writeheader()
-      [w.writerow(dict(method=method,parameter_index=i,resampler=resampler,
-                       **{k+lab:self.res[method,i,resampler][s][k] for k in ('fp','fn') for (lab,s) in\
-                       (('_target','tgt'),('_train','trn'),('_test','tst'))})) for (method,i,resampler) in\
-                       newly_done]
+      if not append_res:w.writeheader()
+      [w.writerow(dict(method=method,parameter_index=i,resampler=resampler,cat_lab=l,p=self.p_trn[l],
+                       **{k+lab:self.res[method,i,resampler][l][s][tfpfn][k] for k in ('fp','fn') for\
+                       (lab,s) in (('_target','tgt'),('_train','trn'),('_test','tst'))})) for\
+                       (method,i,resampler) in newly_done for l in self.p_trn\
+                       for _,_,tfpfn in self.targets[l]]
 
-    with done_fp.open('w' if new else 'a') as fd:
+    with done_fp.open('a' if append_done else 'w') as fd:
       w=writer(fd)
       [w.writerow(r) for r in newly_done]
     if not param_fp.exists():
       with param_fp.open('w') as fd:
-        dumps({'fixed':self.fixed_params,'varying':self.varying_params,
-               'methods':self.methods,'resamplers':self.resamplers},fd)
+        jump({'fixed':self.fixed_params,'varying':self.varying_params,
+              'methods':self.methods,'resamplers':self.resamplers},fd)
