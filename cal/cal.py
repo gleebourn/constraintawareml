@@ -10,14 +10,13 @@ from select import select
 from sys import stdin,stdout
 from time import perf_counter
 from json import dump as jump
-from numpy import inf,unique as npunique,array as nparr,min as nmn,number,\
+from numpy import inf,unique as npunique,array as nparr,min as nmn,number,zeros as npzer,\
                   max as nmx,sum as nsm,log10 as npl10,round as rnd,geomspace
 from numpy.random import default_rng #Only used for deterministic routines
 from sklearn.preprocessing import StandardScaler
-from jax.numpy import array,zeros,log,log10,maximum,minimum,pad,\
-                      concat,exp,ones,linspace,array_split,reshape,corrcoef,eye,\
-                      concatenate,unique,cov,expand_dims,identity,\
-                      diag,average,triu_indices,sum as jsm,max as jmx
+from jax.numpy import array,zeros,log,log10,maximum,minimum,\
+                      concat,exp,ones,linspace,array_split,reshape,eye,\
+                      concatenate,sum as jsm,max as jmx
 from jax.nn import tanh,softmax
 from jax.random import uniform,normal,split,key,choice,binomial,permutation
 from jax.tree import map as jma,reduce as jrd
@@ -26,14 +25,13 @@ from jax.lax import scan,while_loop,switch
 from jax.lax.linalg import svd
 from sklearn.utils.extmath import cartesian
 from sklearn.model_selection import train_test_split
-from pandas import read_csv,concat
 from matplotlib.pyplot import imshow,legend,show,scatter,xlabel,ylabel,\
                               gca,plot,title,savefig,close,rcParams,yscale
 from matplotlib.patches import Patch
 rcParams['font.family'] = 'monospace'
-from pandas import read_pickle,read_parquet,concat,get_dummies
+from pandas import read_pickle,read_parquet,concat,get_dummies,read_csv
 from traceback import format_exc
-from sklearn.ensemble import RandomForestRegressor,GradientBoostingRegressor
+from sklearn.ensemble import RandomForestRegressor,HistGradientBoostingRegressor
 from csv import reader,writer,DictWriter
 from imblearn.combine import SMOTETomek,SMOTEENN
 from imblearn.over_sampling import SMOTE,ADASYN
@@ -97,7 +95,7 @@ class TimeStepper:
     tsrx+='\\end{tabular}'
     return tsr,tsrx
 
-def forward(w,x,act,batchnorm=False,get_transform=False,ll_act=False,transpose=True):
+def _forward(w,x,act,batchnorm=False,get_transform=False,ll_act=False,transpose=True):
   if get_transform:
     A=[]
     B=[]
@@ -129,6 +127,9 @@ def forward(w,x,act,batchnorm=False,get_transform=False,ll_act=False,transpose=T
       trans=w[0][:1]+A,w[1][:1]+[b-tb@ta for b,ta,tb in zip(w[1][1:],A,B)]
     return y,trans
   return y
+
+forward=jit(_forward,static_argnames=['batchnorm','get_transform','ll_act','transpose','act'])
+vorward=jit(vmap(_forward,(0,None,None),0),static_argnames=['act'])
 
 activations={'tanh':tanh,'softmax':softmax,'linear':jit(lambda x:x),
              'relu':jit(lambda x:maximum(x,.03*x))}
@@ -173,7 +174,7 @@ def l2(w):
 dl2=jit(value_and_grad(l2))
 
 def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n_par=None,bias=0.,
-                sqrt_normalise=False,orthonormalise=False,transpose=False):
+                sqrt_normalise=False,orthonormalise=False,transpose=True):
   n_steps=len(layer_dimensions)-1
   if initialisation in ['ones','zeros']:
     w_k,b_k=count(),count()
@@ -268,18 +269,11 @@ def _upd_adam_no_bias(dw,w,m,v,t,beta1,beta2,lr,reg,eps):
   return (w,m,v,t)
 upd_adam_no_bias=_upd_adam_no_bias
 
-def dict_adam_no_bias(dw,s,c):
-  w,m,v,t=upd_adam_no_bias(dw,**s,**c)
-  return dict(w=w,m=m,v=v,t=t)
-
-@jit
-def upd_grad(w,dw,lr,reg):
-  w=jma(lambda W,D:(1-reg)*(W-lr*D),w,dw)
-  return w
-
-def dict_grad(dw,s,c):
-  s['w']=upd_grad(s['w'],dw,c['lr'],c['reg'])
-  return s
+def dict_adam_no_bias(dw,state,consts):
+  state['w'],state['m'],state['v'],state['t']=upd_adam_no_bias(dw,state['w'],state['m'],state['v'],
+                                                               state['t'],consts['beta1'],consts['beta2'],
+                                                               consts['lr'],consts['reg'],consts['eps'])
+  return state
 
 def dl_rbd24(data_dir=str(Path.home())+'/data',
              data_url='https://zenodo.org/api/records/13787591/files-archive',
@@ -467,121 +461,6 @@ def preproc_rbd24(df,split_test_train=True,rm_redundant=True,check_large=False,
       df[c]=npl10(1+df[c].__array__())/10
   return df.sort_values('timestamp')
 
-gen=default_rng(1729) #only used for deterministic algorithm so not a problem for reprod
-def min_dist(X,Y=None):
-  if not Y is None:
-    ret_x_y=True
-    if len(Y)>len(X):
-      X,Y=Y,X
-      ret_x_y=False
-    if not len(Y):
-      return inf,None,None
-
-    X=nparr(X)
-    Y=nparr(Y)
-    if len(Y)==1:
-      m=inf
-      y=Y[0]
-      for x_cand in X:
-        m_cand=nsm((x_cand-y)**2)
-        if m_cand<m:
-          m,x=m_cand,x_cand
-          if not m:
-            return (m,x,y) if ret_x_y else (m,y,x)
-      return (m,x,y) if ret_x_y else (m,y,x)
-
-    X_c=gen.choice(X,X.shape[0])
-    Y_c=gen.choice(Y,X.shape[0])
-    dists=nsm((X_c-Y_c)**2,axis=1)
-    m=inf
-    for m_cand,x_cand,y_cand in zip(dists,X_c,Y_c):
-      if m_cand<m:
-        m,x,y=m_cand,x_cand,y_cand
-        if not m:
-          return (m,x,y) if ret_x_y else (m,y,x)
-    h={}
-    X_r=rnd(X/m)
-    Y_r=rnd(Y/m)
-    for x,x_r in zip(X,X_r):
-      x_r=tuple(x_r)
-      if x_r in h:
-        h[x_r][0].append(x)
-      else:
-        h[x_r]=[x],[]
-    for y,y_r in zip(Y,Y_r):
-      y_r=tuple(y_r)
-      if y_r in h:
-        h[y_r][1].append(y)
-      else:
-        h[x_r]=[],[y]
-    h_tups_arrs=[(t,nparr(t)) for t in h]
-    n_neighbs=len(h_tups_arrs)
-    for i in range(X.shape[1]):
-      h_tups_arrs.sort(key=lambda x:x[0][i])
-    moore_neighbs={k:(list(v[0]),list(v[1])) for k,v in h.items()}
-    for i,(i_tup,i_arr) in enumerate(h_tups_arrs):
-      for j in range(i+1,n_neighbs):
-        j_tup,j_arr=h_tups_arrs[j]
-        if nmx(abs(i_arr-j_arr))>1:
-          break
-        moore_neighbs[i_tup][0].extend(h[j_tup][0])
-        moore_neighbs[i_tup][1].extend(h[j_tup][1])
-        moore_neighbs[j_tup][0].extend(h[i_tup][0])
-        moore_neighbs[j_tup][1].extend(h[i_tup][1])
-    m=inf
-    for v in moore_neighbs.values():
-      m_cand,x_cand,y_cand=min_dist(*v)
-      if m_cand<m:
-        x,y,m=x_cand,y_cand,m_cand
-      if not m:
-        return (m,x,y) if ret_x_y else (m,y,x)
-    return (m,x,y) if ret_x_y else (m,y,x)
-  else:
-    n_pts=len(X)
-    if n_pts==1:
-      return inf,None,None
-    elif n_pts==2:
-      return nsm((nparr(X[0])-nparr(X[1]))**2),X[0],X[1]
-    X=nparr(X)
-    pair0=gen.choice(X.shape[0],X.shape[0])
-    pair1=(pair0+1+gen.choice(X.shape[0]-1,X.shape[0]))%X.shape[0]
-    X_c0=X[pair0]
-    X_c1=X[pair1]
-    dists=nsm((X_c0-X_c1)**2,axis=1)
-    m=inf
-    for m_cand,x_cand,y_cand in zip(dists,X_c0,X_c1):
-      if m_cand<m:
-        m,x,y=m_cand,x_cand,y_cand
-        if not m: #uh oh!
-          return m,x,y
-    h={}
-    X_r=rnd(X/m).astype(int)
-    for x,x_r in zip(X,X_r):
-      x_r=tuple(x_r)
-      if x_r in h:
-        h[x_r].append(x)
-      else:
-        h[x_r]=[x]
-    h_tups_arrs=[(t,nparr(t)) for t in h]
-    for i in range(X.shape[1]):
-      h_tups_arrs.sort(key=lambda x:x[0][i]) #stable sort so get nearby pts
-    moore_neighbs={k:list(v) for k,v in h.items()}
-    n_neighbs=len(h_tups_arrs)
-    for i,(i_tup,i_arr) in enumerate(h_tups_arrs):#Check Moore nhoods
-      for j in range(i+1,n_neighbs):
-        j_tup,j_arr=h_tups_arrs[j]
-        if nmx(abs(i_arr-j_arr))>1:
-          break
-        moore_neighbs[i_tup].extend(h[j_tup])
-        moore_neighbs[j_tup].extend(h[i_tup])
-    for v in moore_neighbs.values():
-      m_cand,x_cand,y_cand=min_dist(v)
-      if m_cand<m:
-        m,x,y=m_cand,x_cand,y_cand
-        if not m:
-          return m,x,y
-    return m,x,y
-
 def binsearch_step(r,tfpfn,y,yp_smooth):
   a,b=r
   mid=(a+b)/2
@@ -591,17 +470,16 @@ def binsearch_step(r,tfpfn,y,yp_smooth):
   return a*(~excess_fps)+excess_fps*mid,b*(excess_fps)+(~excess_fps)*mid,(fpfn-tfpfn)**2
 
 @jit
-def find_thresh(y,yp_smooth,tfpfn,adapthresh_tol):
+def search_thresh(y,yp_smooth,tfpfn,adapthresh_tol):
   yp_min_max=yp_smooth.min(),yp_smooth.max()
   thresh_range=while_loop(lambda r:(r[2]>adapthresh_tol)&(r[3]<1/adapthresh_tol),
                           lambda r:binsearch_step(r[:2],tfpfn,y,yp_smooth)+(r[3]+1,),
                           (*yp_min_max,1,0))[:2]
   return (thresh_range[0]+thresh_range[1])/2
 
-def _set_bet(cb,pred,epoch,ep_scale):
-  cb['bet']*=exp(cb['lrfpfn']*(-pred['fp_trn']/cb['tfp']+pred['fn_trn']/cb['tfn'])/epoch**ep_scale)
-  return cb
-set_bet=jit(vmap(_set_bet,(0,0,None,None),0))#,None
+def _set_bet(consts,fp,fn):
+  return exp(consts['lrfpfn']*(-fp/consts['tfp']+fn/consts['tfn']))
+set_bet=jit(vmap(_set_bet,(0,0,0),0))#,None
 
 def get_reshuffled(k,X_trn,Y_trn,n_batches,bs,last):
   X,Y=shuffle_xy(k,X_trn,Y_trn)
@@ -614,132 +492,118 @@ def loss(w,x,y,bet,act):
   return jsm((bet*y+(1-y)/bet)*(1-2*y)*yp)
 
 dl=grad(loss)
-def _upd(x,y,s,ca,cb,act):
-  return dict_adam_no_bias(dl(s['w'],x,y,cb['bet'],act),s,ca)
+def _upd(x,y,state,consts,act):
+  return dict_adam_no_bias(dl(state['w'],x,y,state['bet'],act),state,consts)
 
-upd=vmap(_upd,(None,None,0,0,0,None),0)
+upd=vmap(_upd,(None,None,0,0,None),0)
 
-def steps(states,consts_adam,X,Y,consts,act):
-  return scan(lambda states,xy:(upd(xy[0],xy[1],states,consts_adam,consts,act),0),states,(X,Y))[0]
-steps=jit(steps,static_argnames=['act'])
+def _steps(states,consts,X,Y,act):
+  return scan(lambda s,xy:(upd(xy[0],xy[1],s,consts,act),0),states,(X,Y))[0]
+steps=jit(_steps,static_argnames=['act'])
 
-def _get_preds_thresh(w,tfpfn,X_trn,Y_trn,X_tst,Y_tst,act):
-  yps=forward(w,X_trn,act)
-  Yp_smooth_trn=yps.flatten()
-  Yp_smooth_tst=forward(w,X_tst,act).flatten()
-  Yp_trn=Yp_smooth_trn>0.
-  Yp_tst=Yp_smooth_tst>0.
-  y_max=Yp_smooth_trn.max()
-  y_min=Yp_smooth_trn.min()
-  thresh=find_thresh(Y_trn,Yp_smooth_trn,tfpfn,1e-1)
-  Yp_trn_thresh=Yp_smooth_trn>thresh
-  return {'fp_trn':((~Y_trn)&(Yp_trn)).mean(),'fn_trn':((Y_trn)&(~Yp_trn)).mean(),
-          'fp_tst':((~Y_tst)&(Yp_tst)).mean(),'fn_tst':((Y_tst)&(~Yp_tst)).mean(),
-          'fp_tsh':((~Y_trn)&(Yp_trn_thresh)).mean(),'fn_tsh':((Y_trn)&(~Yp_trn_thresh)).mean(),
-          'max':y_max,'min':y_min,'var':Yp_smooth_trn.var(),'thresh':thresh}
+def _calc_thresh(w,tfpfn,X,Y,act,tol=1e-1):
+  yps=forward(w,X,act)
+  Yp_smooth=yps.flatten()
+  Yp=Yp_smooth>0.
+  Ypb=Yp_smooth>0
+  return search_thresh(Y,Yp_smooth,tfpfn,tol),(Ypb&~Y).mean(),(Y&~Ypb).mean()
 
-get_preds_thresh=jit(vmap(_get_preds_thresh,(0,0,None,None,None,None,None),0),static_argnames=['act'])
+calc_thresh=jit(vmap(_calc_thresh,(0,0,None,None,None),0),static_argnames=['act','tol'])
 
-def _nn_epochs(ks,n_epochs,n_batches,bs,last,X_trn,Y_trn,X_tst,Y_tst,X_rs,Y_rs,
-               consts_hp,consts_adam,states,act,verbose=False,ep_scale=0.):
-  tfps=consts_hp['tfp']
-  tfns=consts_hp['tfn']
-  lrfpfns=consts_hp['lrfpfn']
-  lrs=consts_adam['lr']
-  regs=consts_adam['reg']
+def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last):
+  tfps=consts['tfp']
+  tfns=consts['tfn']
+  lrfpfns=consts['lrfpfn']
+  lrs=consts['lr']
+  regs=consts['reg']
   tfpfns=tfps/tfns
   for epoch,k in enumerate(ks,1):
-    X,Y=get_reshuffled(k,X_rs,Y_rs,n_batches,bs,last)
-    states=steps(states,consts_adam,X,Y,consts_hp,act)
-    preds=get_preds_thresh(states['w'],tfpfns,X_trn,Y_trn,X_tst,Y_tst,act)
-    states['w'][-1][1]-=preds['thresh'].reshape(-1,1)#*.2
-    consts_hp=set_bet(consts_hp,preds,epoch,ep_scale)
+    X_b,Y_b=get_reshuffled(k,X,Y,n_batches,bs,last)
+    states=steps(states,consts,X_b,Y_b,act)
+    thresh,fp,fn=calc_thresh(states['w'],tfpfns,X_raw,Y_raw,act)
+    states['w'][-1][1]-=thresh.reshape(-1,1)
+    states['bet']*=set_bet(consts,fp,fn)
     print('nn epoch',epoch)
-  return dict(fp_trn=preds['fp_trn'],fn_trn=preds['fn_trn'],
-              fp_tst=preds['fp_tst'],fn_tst=preds['fn_tst'])
+  return states
 
-#_nn_epochs=jit(_nn_epochs,static_argnames=['n_epochs','n_batches','bs','last'])
+#_nn_epochs=jit(_nn_epochs,static_argnames=['n_epochs','n_batches','bs','last','act'])
 
-def nn_epochs(k,n_epochs,bs,X_trn,Y_trn,X_tst,Y_tst,consts_hp,consts_adam,states,act='relu',
-              X_rs=None,Y_rs=None,**kwa):
+def nn_epochs(k,n_epochs,bs,X,Y,consts,states,X_raw=None,Y_raw=None,act='relu'):
+  if X_raw is None:
+    X_raw,Y_raw=X,Y
   if isinstance(act,str):
     act=activations[act]
-  if X_rs is None:
-    X_rs,Y_rs=X_trn,Y_trn
-  n_batches=len(X_rs)//bs
+  n_batches=len(X)//bs
   last=n_batches*bs
   ks=split(k,n_epochs)
-  return _nn_epochs(ks,n_epochs,n_batches,bs,last,X_trn,Y_trn,
-                    X_tst,Y_tst,X_rs,Y_rs,consts_hp,consts_adam,states,act,**kwa)
+  return _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last)
 
+def vectorise_fl_ls(x,l):
+  if isinstance(x,list):
+    return nparr(x)
+  elif isinstance(x,float):
+    return ones(l)*x 
+  return x
 
-def init_states(k,init,lrfpfn,reg,p,tfps,tfns,mod_shape=None,in_dim=None,
-                start_width=None,end_width=None,depth=None,ret_dict=False,
-                lr=1e-4,beta1=.9,beta2=.999,eps=1e-8,bias=.1):
-  '''
-  Helper function for initialising constants and states for a collection of neural networks.
-
-  Parameters:
-  k::jax prng key or numerical: seed or key for generating model weights
-  mod_shape::list[int]: the size of each layer in the network
-  init::str: glorot_uniform or glorot_normal, the distribution for the weights
-  lrfpfn::float: the loss used here is adjusted do compensate for relative rates of fp vs fn.
-  This parameter controls the rate at which the weighting changes after each epoch.
-  reg::float: constant for L2 regularisation
-  p::float: the imbalance of the dataset - only used to set a prior guess for lrfpfn
-  tfps::list[float]: a list of target false positive rates
-  tfns::list[float]: a list of target false negative rates
-
-  Returns:
-  consts_hp,consts_adam,states: a tuple of dicts corresponding to the constants and states of the
-  neural networks, which can then be trained using nn_epochs()
-  '''
-  if mod_shape is None:
-    mod_shape=[in_dim]+list(geomspace(start_width,end_width,depth+1,dtype=int))+[1]
-  if isinstance(k,int|float):
-    k=key(k) #For initialising weights
-  n_par=len(tfps)
-  o=ones(n_par)
-  lrfpfn,reg,lr=(o*h for h in (lrfpfn,reg,lr))
-  beta1s,beta2s,epsilons,bets=(o*c for c in (beta1,beta2,eps,((1-p)/p)**.5))
-  consts_hp=dict(bet=bets,lrfpfn=lrfpfn,tfp=array(tfps),tfn=array(tfns))
-  consts_adam=dict(beta1=beta1s,beta2=beta2s,lr=lr,reg=reg,eps=epsilons)
-  states=init_layers_adam(mod_shape,init,k=k,transpose=True,n_par=n_par,bias=bias)
-  if ret_dict:
-    return dict(consts_hp=consts_hp,consts_adam=consts_adam,states=states)
-  else:
-    return consts_hp,consts_adam,states
-
-def get_threshes(tfpfns,ypy,p):
-  tfpfns=sorted(tfpfns,key=lambda x:-x)
+def get_threshes(tfpfns,y,yp,p):
+  ypy=sorted(zip(yp,y))
+  tfpfns=sorted(tfpfns)
   delta_p=1/len(ypy)
-  i=0
-  fp=(1-p)
+  fp=1-p
   fn=0
   for thresh,y in ypy:
     if y:
       fn+=delta_p
     else:
       fp-=delta_p
-    if fp<tfpfns[0]*fn:
-      yield tfpfns[0],thresh,fp,fn
-      tfpfns=tfpfns[1:]
+    if fp<tfpfns[-1]*fn:
+      yield tfpfns[-1],thresh
+      tfpfns=tfpfns[:-1]
       if not tfpfns:
         break
 
 imbl_resamplers={'SMOTETomek':SMOTETomek,'SMOTEENN':SMOTEENN,'SMOTE':SMOTE,
                  'ADASYN':ADASYN,'NearMiss':NearMiss}
-skl={'RandomForestRegressor':RandomForestRegressor,'GradientBoostingRegressor':GradientBoostingRegressor}
+skl={'RandomForestRegressor':RandomForestRegressor,
+     'HistGradientBoostingRegressor':HistGradientBoostingRegressor}
+
+class SKL:
+  def __init__(self,skm,tfpfn,ska,p,p_resampled,seed=None):
+    if isinstance(skm,str):
+      skm=skl[skm]
+    if not seed is None:
+      ska['random_state']=seed
+
+    self.m=skm(**ska)
+    self.tfpfn=tfpfn
+    self.threshes=npzer(len(self.tfpfn))
+    self.p=p
+    self.p_resampled=p_resampled
+
+  def fit(self,X,Y,X_raw=None,Y_raw=None):
+    if X_raw is None:
+      X_raw,Y_raw=X,Y
+    self.m.fit(X,Y)
+    for tfpfn,thresh in get_threshes(self.tfpfn,Y_raw,self._smooth_predict(X_raw),self.p):
+      self.threshes[self.tfpfn==tfpfn]=thresh
+
+  def _smooth_predict(self,X):
+    return self.m.predict(X)
+
+  def predict(self,X):
+    return self._smooth_predict(X)>self.threshes.reshape(-1,1)
+
 
 class ModelEvaluation:
   def __init__(self,directory,ds='unsw',seed=1729,lab_cat=True,sds=False,categorical=True,out_f=None,
                fixed_params={'nn':dict(n_epochs=100,start_width=128,end_width=32,depth=2,n_par=8,bs=128,
                                        bias=.1,act='relu',init='glorot_normal',eps=1e-8,beta1=.9,beta2=.999),
                              'sk':{}},
-                             varying_params={'sk':[{'kwa':dict(**{'max_depth':i},**({'n_jobs':-1} if\
+                             varying_params={'sk':[{'ska':dict(max_depth=i,
+                                                               **({'n_jobs':-1} if\
                                                                rg=='RandomForestRegressor' else {})),\
                                                     'regressor':rg} for i in range(2,15,2) for rg in
-                                                   ('RandomForestRegressor','GradientBoostingRegressor')],
+                                                   ('RandomForestRegressor','HistGradientBoostingRegressor')],
                                'nn':[{'lr_ad':la,'reg':rl*la,'lrfpfn':lf}for la in [.0001] for\
                                      rl in [1e-2] for lf in geomspace(.0002,.03,4)]}):
     self.directory=Path(directory)
@@ -749,17 +613,16 @@ class ModelEvaluation:
     #  print('Directory exists.  Continue? [y/N]')
     #  if not 'y' in stdin.readline().lower():
     #    exit()
-    self.seed=seed
+    self.parent_seed=seed
     self.rs_seeds={}
     self.rng=default_rng(seed)
-    self.rkg=KeyEmitter(self.rng.integers(2**32))
     self.varying_params=varying_params
     self.fixed_params=fixed_params
     if out_f is None:
       out_f=ds+'_'+'_'+('lc_' if lab_cat else '')+'s_'+str(seed)+'_model_res'
     self.out_f=out_f
     if isinstance(ds,str):
-      self.X_trn,Y_trn,self.X_tst,Y_tst,self.sc=load_ds(ds,random_split=self.rng.integers(2**32),
+      self.X_trn,Y_trn,self.X_tst,Y_tst,self.sc=load_ds(ds,random_split=self.seed(),
                                                         lab_cat=lab_cat,single_dataset=sds)
     else:
       self.X_trn,Y_trn,self.X_tst,Y_tst,self.sc=ds
@@ -771,13 +634,15 @@ class ModelEvaluation:
       self.Y_trn={'all':Y_trn}
       self.Y_tst={'all':Y_tst}
 
-    print('shapes: X_trn:',self.X_trn.shape,'X_tst:',self.X_tst.shape)
     self.p_trn={l:yt.mean() for l,yt in self.Y_trn.items()}
     self.p_tst={l:yt.mean() for l,yt in self.Y_tst.items()}
     self.regressors={}
     self.thresholds={}
     self.res={}
     self.resample('')
+
+  def seed(self):
+    return self.rng.integers(2**32)
   
   def set_targets(self,tfps=None,tfns=None,n_targets=8,min_tfpfn=1.,max_tfpfn=100.,e0=.1):
     if tfps is None:
@@ -790,8 +655,9 @@ class ModelEvaluation:
       n_targets=len(tfp0s)
       self.targets={l:[(tfp0*p,tfn0*p,tfp0/tfn0) for (tfp0,tfn0) in zip(tfp0s,tfn0s)] for\
                     l,p in self.p_trn.items()}
-    self.tfps={l:[t[0] for t in v] for l,v in self.targets.items()}
-    self.tfns={l:[t[1] for t in v] for l,v in self.targets.items()}
+    self.tfps={l:nparr([t[0] for t in v]) for l,v in self.targets.items()}
+    self.tfns={l:nparr([t[1] for t in v]) for l,v in self.targets.items()}
+    self.tfpfns={l:nparr([t[2] for t in v]) for l,v in self.targets.items()}
     self.n_targets=n_targets
 
   def define_jobs(self,methods=['nn','sk'],resamplers=['']+list(imbl_resamplers),check_done=True):
@@ -837,7 +703,7 @@ class ModelEvaluation:
       self.update_results(job)
       if of: print('Removing job...',file=of)
       self.rm_job(job)
-      if of: print(self.n_complete,'experiments with',self.n_remaining,'to go...',file=of)
+      if of: print(self.n_complete,'experiments completed with',self.n_remaining,'to go...',file=of)
 
   def rm_job(self,job):
     self.regressors.pop(job)
@@ -848,56 +714,47 @@ class ModelEvaluation:
   def resample(self,resampler):
     rs_fp=(self.directory/(resampler+'.pkl'))
     self.resampler=resampler
-    if resampler and rs_fp.exists():
-      print('Loading data resampled by',resampler,'...')
-      with rs_fp.open('rb') as fd:
-        self.X_trn_resamp,self.Y_trn_resamp=load(fd)
+    if resampler:
+      if rs_fp.exists():
+        print('Resampling by',resampler,'...')
+        print('Loading data resampled by',resampler,'...')
+        with rs_fp.open('rb') as fd:
+          self.X_trn_resamp,self.Y_trn_resamp=load(fd)
+      else:
+        self.Y_trn_resamp={}
+        self.X_trn_resamp={}
+        for l,Y in self.Y_trn.items():
+          seed=self.seed()
+          try:
+            sm=imbl_resamplers[resampler](random_state=seed)
+          except:
+            print(resampler,'doesn\'t take a random seed...')
+            sm=imbl_resamplers[resampler]()
+          self.X_trn_resamp[l],self.Y_trn_resamp[l]=sm.fit_resample(self.X_trn,Y)
+        with rs_fp.open('wb') as fd:
+          dump((self.X_trn_resamp,self.Y_trn_resamp),fd)
     else:
-      print('Resampling by',resampler,'...')
-      seed=self.rs_seeds[resampler]=self.rng.integers(2**32)
+      self.Y_trn_resamp=self.Y_trn
+      self.X_trn_resamp={l:self.X_trn for l in self.Y_trn}
+      print('No resampling...')
 
-      match resampler:
-        case '':
-          self.Y_trn_resamp=self.Y_trn
-          self.X_trn_resamp={l:self.X_trn for l in self.Y_trn}
-          return
-        case resampler if resampler in imbl_resamplers:
-          self.Y_trn_resamp={}
-          self.X_trn_resamp={}
-          for l,Y in self.Y_trn.items():
-            try:
-              sm=imbl_resamplers[resampler](random_state=seed)
-            except:
-              print(resampler,'doesn\'t take a random seed...')
-              sm=imbl_resamplers[resampler]()
-            self.X_trn_resamp[l],self.Y_trn_resamp[l]=sm.fit_resample(self.X_trn,Y)
-        case _:
-          raise NotImplementedError('Resampler',resampler,'not found')
-      with rs_fp.open('wb') as fd:
-        dump((self.X_trn_resamp,self.Y_trn_resamp),fd)
+    self.p_resampled={l:Y.mean() for l,Y in self.Y_trn_resamp.items()}
     print('#Training rows:',len(self.X_trn),'~~>')
     [print(k,':',len(x)) for k,x in self.Y_trn_resamp.items()]
 
   def init_model(self,job):
     method,i,resampler=job
-    param=self.varying_params[method][i]
-    pm=self.fixed_params[method]
+    pv=self.varying_params[method][i]
+    pf=self.fixed_params[method]
     match method:
       case 'sk':
-        j={l:{'sk':skl[self.varying_params['sk'][i]['regressor']](random_state=self.rng.integers(2*32),
-                                                                  **self.varying_params['sk'][i]['kwa']),
-              'thresholds':{}} for l in self.p_trn}
-      #case 'rf':
-      #  j={l:{'rf':RandomForestRegressor(max_depth=param['d'],n_jobs=self.fixed_params['rf']['n_jobs'],
-      #                                   random_state=self.rng.integers(2*32)),
-      #        'thresholds':{}} for l in self.p_trn}
+        j={l:SKL(skl[pv['regressor']],self.tfpfns[l],pv['ska'],p,self.p_resampled[l],
+                 seed=self.seed()) for l,p in self.p_trn.items()}
       case 'nn':
-        j={l:init_states(self.rkg.emit_key(),pm['init'],param['lrfpfn'],param['reg'],p,
-                         self.tfps[l],self.tfns[l],in_dim=self.X_trn.shape[1],
-                         start_width=pm['start_width'],end_width=pm['end_width'],
-                         depth=pm['depth'],lr=param['lr_ad'],beta1=pm['beta1'],beta2=pm['beta2'],
-                         eps=pm['eps'],bias=pm['bias'],ret_dict=True)\
-           for l,p in self.p_trn.items()}
+        j={l:NNPar(self.seed(),p,self.tfps[l],self.tfns[l],p_resampled=self.p_resampled[l],
+                   init=pf['init'],lrfpfn=pv['lrfpfn'],reg=pv['reg'],start_width=pf['start_width'],
+                   end_width=pf['end_width'],depth=pf['depth'],lr=pv['lr_ad'],beta1=pf['beta1'],
+                   beta2=pf['beta2'],eps=pf['eps'],bias=pf['bias']) for l,p in self.p_trn.items()}
       case _:
         raise NotImplementedError('Method',method,'not found')
     self.regressors[job]=j
@@ -910,32 +767,16 @@ class ModelEvaluation:
     res={}
     for l,reg in regressor.items():
       print('Training for label',l,'...')
-      res[l]={'trn':{},'tst':{},'tgt':{c:dict(fp=a,fn=b,fpfn=c) for a,b,c in self.targets[l]}}
-      tgts=[c for (_,_,c) in self.targets[l]]
-      match method:
-        case 'sk':
-          reg['sk'].fit(self.X_trn_resamp[l],self.Y_trn_resamp[l])
-          Yp_ordered=sorted(zip(reg['sk'].predict(self.X_trn),self.Y_trn[l]))
-          for tfpfn,thresh,fp,fn in get_threshes(tgts,Yp_ordered,self.p_trn[l]):
-            reg['thresholds'][tfpfn]=thresh
-            res[l]['trn'][tfpfn]=dict(fp=fp,fn=fn,fpfn=fp/fn)
-            Yp_tst=reg['sk'].predict(self.X_tst)>thresh
-            fpt=((~self.Y_tst[l])&Yp_tst).mean()
-            fnt=(self.Y_tst[l]&~Yp_tst).mean()
-            res[l]['tst'][tfpfn]=dict(fp=fpt,fn=fnt,fpfn=fpt/fnt)
+      r={'trn':{},'tst':{},'tgt':{targs[2]:dict(zip(('fp','fn','fpfn'),targs)) for targs in self.targets[l]}}
+      reg.fit(self.X_trn_resamp[l],self.Y_trn_resamp[l],X_raw=self.X_trn,Y_raw=self.Y_trn[l])
 
-        case 'nn':
-          f_arrs=nn_epochs(self.rkg.emit_key(),ms['n_epochs'],ms['bs'],self.X_trn,self.Y_trn[l],
-                           self.X_tst,self.Y_tst[l],reg['consts_hp'],reg['consts_adam'],
-                           reg['states'],activations[self.fixed_params['nn']['act']],
-                           X_rs=self.X_trn_resamp[l],Y_rs=self.Y_trn_resamp[l])
-          for stage in ['tst','trn']:
-            fp_ar=f_arrs['fp_'+stage]
-            fn_ar=f_arrs['fn_'+stage]
-            for tfpfn,fp,fn in zip(tgts,fp_ar,fn_ar):
-              res[l][stage][tfpfn]=dict(fp=fp,fn=fn,fpfn=fp/fn)
-        case _:
-          raise NotImplementedError('Method',method,'not found')
+      for stage,X,Y in [('tst',self.X_tst,self.Y_tst[l]),('trn',self.X_trn,self.Y_trn[l])]:
+        Yp=reg.predict(X)
+        fps=(Yp&~Y).mean(axis=1)
+        fns=((~Yp)&Y).mean(axis=1)
+        for tfpfn,fp,fn in zip(self.tfpfns[l],fps,fns):
+          r[stage][tfpfn]=dict(fp=fp,fn=fn,fpfn=fp/fn)
+      res[l]=r
     self.res[job]=res
 
   def update_results(self,single=False):
@@ -972,8 +813,51 @@ class ModelEvaluation:
         jump({'fixed':self.fixed_params,'methods':self.methods,'resamplers':self.resamplers},fd)
     if not param_vp.exists():
       with param_vp.open('w') as fd:
-        w=DictWriter(fd,['param_index','method']+sum([list(self.varying_params[m][0]) for m in self.methods],[]))
+        w=DictWriter(fd,['param_index','method']+\
+                        sum([list(self.varying_params[m][0]) for m in self.methods],[]))
         w.writeheader()
         for m in self.methods:
           [w.writerow(dict(param_index=i,method=m,**vps)) for i,vps in enumerate(self.varying_params[m])]
 
+class NNPar:
+  def __init__(self,seed,p,tfp,tfn,p_resampled=None,lrfpfn=.03,reg=1e-6,mod_shape=None,
+               in_dim=None,bet=None,start_width=None,end_width=None,depth=None,bs=128,
+               act='relu',init='glorot_normal',n_epochs=100,lr=1e-4,beta1=.9,beta2=.999,
+               eps=1e-8,bias=.1,acc=.1,min_tfpfn=1,max_tfpfn=100):
+    self.n_par=len(tfp)
+    self.p=p
+    self.p_resampled=p if p_resampled is None else p_resampled
+    if bet is None:
+      bet=((1-self.p_resampled)/self.p_resampled)**.5
+    self.bias=bias
+    self.mod_shape0=list(geomspace(start_width,end_width,depth+1,dtype=int))+[1] if\
+                         mod_shape is None else mod_shape
+    self.ke=KeyEmitter(seed)
+    lrfpfn,reg,lr,beta1,beta2,eps,tfp,tfn,self.bet=(vectorise_fl_ls(x,self.n_par) for x in\
+                                                    (lrfpfn,reg,lr,beta1,beta2,eps,tfp,tfn,bet))
+
+    self.tfp_actual=tfp
+    self.tfn_actual=tfn
+    self.bs=bs
+
+    self.init=init
+    self.n_epochs=n_epochs
+    self.consts=dict(lrfpfn=lrfpfn,tfp=tfp*(1-self.p_resampled)/(1-self.p),tfn=tfn*self.p_resampled/self.p,
+                     beta1=beta1,beta2=beta2,lr=lr,reg=reg,eps=eps)
+    self.act=act
+    self.states=None
+  
+  def init_states(self,in_dim):
+    if self.p_resampled:
+      self.states=dict(bet=self.bet,**init_layers_adam([in_dim]+self.mod_shape0,self.init,
+                                                       k=self.ke.emit_key(),n_par=self.n_par,bias=self.bias))
+
+  def fit(self,X,Y,X_raw=None,Y_raw=None):
+    if not self.states:
+      self.init_states(X.shape[1])
+    self.states=nn_epochs(self.ke.emit_key(),self.n_epochs,self.bs,X,Y,self.consts,self.states,
+                          X_raw=X_raw,Y_raw=Y_raw,act=self.act)
+
+  def predict(self,X):
+    Yp=vorward(self.states['w'],X,activations[self.act])
+    return Yp.reshape(Yp.shape[:-1])>0
