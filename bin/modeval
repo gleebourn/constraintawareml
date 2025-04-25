@@ -4,8 +4,9 @@ from os.path import dirname,abspath
 from sys import path,argv
 path.append(dirname(dirname(abspath(__file__))))
 from cal.cal import ModelEvaluation
+#from argparse import ArgumentParser
 
 m=ModelEvaluation(argv[1])
 m.set_targets()
-m.define_jobs()
+m.define_jobs()#resamplers=[''])
 m.run_jobs()

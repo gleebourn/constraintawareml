@@ -33,9 +33,11 @@ from matplotlib.patches import Patch
 rcParams['font.family'] = 'monospace'
 from pandas import read_pickle,read_parquet,concat,get_dummies
 from traceback import format_exc
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor,GradientBoostingRegressor
 from csv import reader,writer,DictWriter
 from imblearn.combine import SMOTETomek,SMOTEENN
+from imblearn.over_sampling import SMOTE,ADASYN
+from imblearn.under_sampling import NearMiss
 
 def set_jax_cache():
   config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
@@ -95,7 +97,7 @@ class TimeStepper:
     tsrx+='\\end{tabular}'
     return tsr,tsrx
 
-def forward(w,x,act,batchnorm=True,get_transform=False,ll_act=False,transpose=False):
+def forward(w,x,act,batchnorm=False,get_transform=False,ll_act=False,transpose=True):
   if get_transform:
     A=[]
     B=[]
@@ -129,7 +131,6 @@ def forward(w,x,act,batchnorm=True,get_transform=False,ll_act=False,transpose=Fa
   return y
 
 activations={'tanh':tanh,'softmax':softmax,'linear':jit(lambda x:x),
-             #'relu':jit(lambda x:minimum(1,maximum(-1,x)))}
              'relu':jit(lambda x:maximum(x,.03*x))}
 
 def select_initialisation(imp,act):
@@ -206,11 +207,6 @@ def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n_par=None,bias
       case 'glorot_normal':
         A.append(((2/(d_i+d_o))**.5)*normal(shape=e_dims+(d_i,d_o),key=k)*mult_a)
         B.append(zeros(e_dims+(d_o,))+bias)
-      case 'casewise_linear':
-        A=ones(e_dims+(d_i,d_i))
-        #A=zeros((d_i,d_i))
-        B=zeros(shape=(e_dims+(d_i,))+bias)
-        return [A,B]
       case _:
         raise Exception('Unknown initialisation: '+initialisation)
   if orthonormalise:
@@ -270,7 +266,6 @@ def _upd_adam_no_bias(dw,w,m,v,t,beta1,beta2,lr,reg,eps):
   t+=1
   w=jma(lambda W,M,V:(1-reg)*(W-lr*ad_diff(M/(1-beta1**t),V/(1-beta2**t),eps)),w,m,v)
   return (w,m,v,t)
-#upd_adam_no_bias=jit(_upd_adam_no_bias,static_argnames='ret_dict')
 upd_adam_no_bias=_upd_adam_no_bias
 
 def dict_adam_no_bias(dw,s,c):
@@ -341,9 +336,6 @@ def unsw(csv_train=Path.home()/'data'/'UNSW_NB15_training-set.csv',
   common_cols=list(train_cols&test_cols)
   x_test=x_test[common_cols]
   x_train=x_train[common_cols]
-  #if verbose:
-  #  print('x_train.min(),x_test.min():',x_train.min(),x_test.min())
-  #  print('x_train.max(),x_test.max():',x_train.max(),x_test.max())
   if not(random_split is None):
     x_train,x_test,y_train,y_test=train_test_split(concat([x_train,x_test]),concat([y_train,y_test]),
                                                    test_size=.3,random_state=random_split)
@@ -435,8 +427,8 @@ def load_ds(dataset,rescale='standard',verbose=False,random_split=None,categoric
                                              categorical=categorical,single_dataset=single_dataset)
   return X_trn,Y_trn,X_tst,Y_tst,sc
 
-def preproc_rbd24(df,split_test_train=True,rm_redundant=True,plot_xvals=False,
-                  check_large=False,check_redundant=False,rescale_log=True,verbose=False):
+def preproc_rbd24(df,split_test_train=True,rm_redundant=True,check_large=False,
+                  check_redundant=False,rescale_log=True,verbose=False):
   n_cols=len(df.columns)
   if rm_redundant: check_redundant=True
   if rescale_log: check_large=True
@@ -473,18 +465,7 @@ def preproc_rbd24(df,split_test_train=True,rm_redundant=True,plot_xvals=False,
       print('Largest value:',max_logs,'>',10)
     for c in large_cols:
       df[c]=npl10(1+df[c].__array__())/10
-  if plot_xvals:
-    plot_uniques(df)
   return df.sort_values('timestamp')
-
-def plot_uniques(df):
-  for col in [c for c in df.columns if df.dtypes[c] in [float,int]]:
-    vals=unique(df[col].__array__())
-    if len(vals)>2000:
-      vals=vals[::len(vals)//2000]
-    title('Unique values for '+col)
-    plot(linspace(0,1,len(vals)),vals)
-  show()
 
 gen=default_rng(1729) #only used for deterministic algorithm so not a problem for reprod
 def min_dist(X,Y=None):
@@ -547,7 +528,6 @@ def min_dist(X,Y=None):
         moore_neighbs[i_tup][1].extend(h[j_tup][1])
         moore_neighbs[j_tup][0].extend(h[i_tup][0])
         moore_neighbs[j_tup][1].extend(h[i_tup][1])
-
     m=inf
     for v in moore_neighbs.values():
       m_cand,x_cand,y_cand=min_dist(*v)
@@ -556,7 +536,6 @@ def min_dist(X,Y=None):
       if not m:
         return (m,x,y) if ret_x_y else (m,y,x)
     return (m,x,y) if ret_x_y else (m,y,x)
-
   else:
     n_pts=len(X)
     if n_pts==1:
@@ -575,7 +554,6 @@ def min_dist(X,Y=None):
         m,x,y=m_cand,x_cand,y_cand
         if not m: #uh oh!
           return m,x,y
-
     h={}
     X_r=rnd(X/m).astype(int)
     for x,x_r in zip(X,X_r):
@@ -612,9 +590,6 @@ def binsearch_step(r,tfpfn,y,yp_smooth):
   excess_fps=fpfn>tfpfn
   return a*(~excess_fps)+excess_fps*mid,b*(excess_fps)+(~excess_fps)*mid,(fpfn-tfpfn)**2
 
-def fp_fn_bin(y,yp):
-  return [(yp&~y).mean(),(y&~yp).mean()]
-
 @jit
 def find_thresh(y,yp_smooth,tfpfn,adapthresh_tol):
   yp_min_max=yp_smooth.min(),yp_smooth.max()
@@ -623,187 +598,80 @@ def find_thresh(y,yp_smooth,tfpfn,adapthresh_tol):
                           (*yp_min_max,1,0))[:2]
   return (thresh_range[0]+thresh_range[1])/2
 
-def bench_state(s,c,x,y,x_test,y_test,imp,adapthresh_tol,batchnorm):
-  b={}
-  if batchnorm:
-    yp_smooth,w=imp(s['w'],x,batchnorm=True,get_transform=True)
-    test_kwa={'batchnorm':False,'get_transform':False}
-  else:
-    w=s['w']
-    yp_smooth=imp(w,x)
-    test_kwa={}
-  b['fp_trn'],b['fn_trn']=fp_fn_bin(y,yp_smooth>0)
-  b['fpfn']=b['fp_trn']/b['fn_trn']
-  b['fp_tfp']=b['fp_trn']/c['tfp']
-  b['fn_tfn']=b['fn_trn']/c['tfn']
-  if adapthresh_tol:
-    b['dbl']=find_thresh(y,yp_smooth,c['tfpfn'],adapthresh_tol)
-    b['fp_dbl'],b['fn_dbl']=fp_fn_bin(y,yp_smooth>0)#GET IT THE RIGHT WAY ROUND!!!!
-  b['fp_test'],b['fn_test']=fp_fn_bin(y_test,imp(w,x_test,**test_kwa)>0)
-  return b,w
+def _set_bet(cb,pred,epoch,ep_scale):
+  cb['bet']*=exp(cb['lrfpfn']*(-pred['fp_trn']/cb['tfp']+pred['fn_trn']/cb['tfn'])/epoch**ep_scale)
+  return cb
+set_bet=jit(vmap(_set_bet,(0,0,None,None),0))#,None
 
-def bench_states(states,consts,x,y,x_test,y_test,imp,adapthresh_tol,batchnorm=True):
-  return tuple(zip(*[bench_state(s,c,x,y,x_test,y_test,imp,adapthresh_tol,batchnorm) for\
-                    s,c in zip(states,consts)]))
+def get_reshuffled(k,X_trn,Y_trn,n_batches,bs,last):
+  X,Y=shuffle_xy(k,X_trn,Y_trn)
+  return X[0:last].reshape(n_batches,bs,-1),Y[0:last].reshape(n_batches,bs)
 
-def norms_state(s,prefix=''):
-  ret={prefix+'al2':l2(s['w'][0])**.5,prefix+'bl2':l2(s['w'][1])**.5}
-  if 'v' in s:
-    ret[prefix+'vl2']=l2(s['v'])**.5
-    ret[prefix+'ml2']=l2(s['m'])**.2
-  return ret
+get_reshuffled=jit(get_reshuffled,static_argnames=['n_batches','bs','last'])
 
-def norms_states(states,rs_ws=None):
-  ret=[norms_state(s) for s in states]
-  return [{**r,**norms_state({'w':s},prefix='rs_')} for r,s in zip(ret,rs_ws)] if rs_ws else ret
-  
-def exp_step(s,c,dlo,x,y,*k):
-  dw=dlo(s['w'],x,y,1/c['beta'],c['beta'],*k)
-  w,m,v,t=upd_adam_no_bias(s['w'],s['m'],s['v'],s['t'],dw,
-                           c['beta1'],c['beta2'],c['lr'],c['reg'],c['eps'])
-  return {'w':w,'m':m,'v':v,'t':t}
+def loss(w,x,y,bet,act):
+  yp=forward(w,x,act)
+  return jsm((bet*y+(1-y)/bet)*(1-2*y)*yp)
 
-exps_step=lambda states,consts,dlo,x,y,*k:[exp_step(*sck[:2],dlo,x,y,*sck[2:])\
-                                           for sck in zip(states,consts,*k)]
+dl=grad(loss)
+def _upd(x,y,s,ca,cb,act):
+  return dict_adam_no_bias(dl(s['w'],x,y,cb['bet'],act),s,ca)
 
-def exps_steps(states,consts,dlo,X_b,Y_b,*ks):
-  return scan(lambda states,xyk:(exps_step(states,consts,dlo,*xyk),0),
-              states,(X_b,Y_b)+ks)[0]
+upd=vmap(_upd,(None,None,0,0,0,None),0)
 
-def epoch(states,consts,dlo,X,Y,n_batches,bs,k0,*k1):
-  X,Y=shuffle_xy(k0,X,Y)
-  X_b,Y_b=X[:n_batches*bs].reshape(n_batches,bs,-1),Y[:n_batches*bs].reshape(n_batches,bs)
-  return exps_steps(states,consts,dlo,X_b,Y_b,*(split(k,(n_batches,len(states))) for k in k1))
+def steps(states,consts_adam,X,Y,consts,act):
+  return scan(lambda states,xy:(upd(xy[0],xy[1],states,consts_adam,consts,act),0),states,(X,Y))[0]
+steps=jit(steps,static_argnames=['act'])
 
-def mk_epochs(imp,n_batches,bs,lo,X_train,Y_train,X_test,Y_test,pids=False,
-              batchnorm=True,dropout=False,adapthresh_tol=1e-3):
-  dlo=grad(lo)
+def _get_preds_thresh(w,tfpfn,X_trn,Y_trn,X_tst,Y_tst,act):
+  yps=forward(w,X_trn,act)
+  Yp_smooth_trn=yps.flatten()
+  Yp_smooth_tst=forward(w,X_tst,act).flatten()
+  Yp_trn=Yp_smooth_trn>0.
+  Yp_tst=Yp_smooth_tst>0.
+  y_max=Yp_smooth_trn.max()
+  y_min=Yp_smooth_trn.min()
+  thresh=find_thresh(Y_trn,Yp_smooth_trn,tfpfn,1e-1)
+  Yp_trn_thresh=Yp_smooth_trn>thresh
+  return {'fp_trn':((~Y_trn)&(Yp_trn)).mean(),'fn_trn':((Y_trn)&(~Yp_trn)).mean(),
+          'fp_tst':((~Y_tst)&(Yp_tst)).mean(),'fn_tst':((Y_tst)&(~Yp_tst)).mean(),
+          'fp_tsh':((~Y_trn)&(Yp_trn_thresh)).mean(),'fn_tsh':((Y_trn)&(~Yp_trn_thresh)).mean(),
+          'max':y_max,'min':y_min,'var':Yp_smooth_trn.var(),'thresh':thresh}
 
-  _epoch=jit(lambda states,consts,*ks:epoch(states,consts,dlo,X_train,Y_train,n_batches,bs,*ks))
-  _bench_states=jit(lambda states,consts:bench_states(states,consts,X_train,Y_train,X_test,Y_test,
-                                                      imp,adapthresh_tol,batchnorm=batchnorm))
+get_preds_thresh=jit(vmap(_get_preds_thresh,(0,0,None,None,None,None,None),0),static_argnames=['act'])
 
-  @jit
-  def upd_post_epoch(states,benches,consts):
-    for s,b,c in  zip(states,benches,consts):
-      if adapthresh_tol:
-        s['w'][1][-1]-=b['dbl'] 
-      miss_fp=b['fp_trn']*c['tfpfn']**-.5
-      miss_fn=b['fn_trn']*c['tfpfn']**.5
-      fpfn_err=tanh(b['fp_trn']/c['tfp'])-tanh(b['fn_trn']/c['tfn'])
-      if pids:
-        pid=c['pid']
-        pid['idiv']+=fpfn_err
-        pid['ddiv']=fpfn_err-pid['pdiv']
-        pid['pdiv']=fpfn_err
-        c['beta']*=exp(-(pid['i']*pid['idiv']+pid['p']*fpfn_err+pid['d']*pid['ddiv']))
-      else:
-        c['beta']*=exp(-c['lrp']*fpfn_err)
-    return states,consts
+def _nn_epochs(ks,n_epochs,n_batches,bs,last,X_trn,Y_trn,X_tst,Y_tst,X_rs,Y_rs,
+               consts_hp,consts_adam,states,act,verbose=False,ep_scale=0.):
+  tfps=consts_hp['tfp']
+  tfns=consts_hp['tfn']
+  lrfpfns=consts_hp['lrfpfn']
+  lrs=consts_adam['lr']
+  regs=consts_adam['reg']
+  tfpfns=tfps/tfns
+  for epoch,k in enumerate(ks,1):
+    X,Y=get_reshuffled(k,X_rs,Y_rs,n_batches,bs,last)
+    states=steps(states,consts_adam,X,Y,consts_hp,act)
+    preds=get_preds_thresh(states['w'],tfpfns,X_trn,Y_trn,X_tst,Y_tst,act)
+    states['w'][-1][1]-=preds['thresh'].reshape(-1,1)#*.2
+    consts_hp=set_bet(consts_hp,preds,epoch,ep_scale)
+    print('nn epoch',epoch)
+  return dict(fp_trn=preds['fp_trn'],fn_trn=preds['fn_trn'],
+              fp_tst=preds['fp_tst'],fn_tst=preds['fn_tst'])
 
-  @jit
-  def _epochs(states,consts,ks):
-    benches_all=[]
-    for l in ks:
-      if dropout:
-        ll=split(l)
-      else:
-        ll=(l,)
-      states=_epoch(states,consts,*ll)
-      benches,rs_ws=_bench_states(states,consts)
-      states,consts=upd_post_epoch(states,benches,consts)
-      benches_all.append(benches)
-    l2_states=norms_states(states,rs_ws)
-    return states,l2_states,consts,benches_all
+#_nn_epochs=jit(_nn_epochs,static_argnames=['n_epochs','n_batches','bs','last'])
 
-  def epochs(states,consts,k,n_epochs):
-    ks=split(k,n_epochs)
-    return _epochs(states,consts,ks)
+def nn_epochs(k,n_epochs,bs,X_trn,Y_trn,X_tst,Y_tst,consts_hp,consts_adam,states,act='relu',
+              X_rs=None,Y_rs=None,**kwa):
+  if isinstance(act,str):
+    act=activations[act]
+  if X_rs is None:
+    X_rs,Y_rs=X_trn,Y_trn
+  n_batches=len(X_rs)//bs
+  last=n_batches*bs
+  ks=split(k,n_epochs)
+  return _nn_epochs(ks,n_epochs,n_batches,bs,last,X_trn,Y_trn,
+                    X_tst,Y_tst,X_rs,Y_rs,consts_hp,consts_adam,states,act,**kwa)
 
-  return epochs,dlo
-
-def mk_nn_epochs(act,bs,batchnorm=False):
-  '''
-  Returns a function which trains multiple neural networks.
-  This approach allows the user to provide a custom activation and batch size,
-  while still benefitting from jax's jit functionality.
-  '''
-
-  _forward=lambda w,x:forward(w,x,act,batchnorm=batchnorm,transpose=True)
-  def _loss(w,x,y,bet):
-    yp=_forward(w,x)
-    return jsm((bet*y+(1-y)/bet)*(1-2*y)*yp)
-
-  _dl=grad(_loss)
-  def _upd(x,y,s,ca,cb):
-    return dict_adam_no_bias(_dl(s['w'],x,y,cb['bet']),s,ca)
-
-  def _set_bet(cb,pred,epoch,ep_scale):
-    cb['bet']*=exp(cb['lrfpfn']*(-pred['fp_trn']/cb['tfp']+pred['fn_trn']/cb['tfn'])/epoch**ep_scale)
-    return cb
-
-  upd=vmap(_upd,(None,None,0,0,0),0)
-  set_bet=vmap(_set_bet,(0,0,None,None),0)#,None
-
-  @jit
-  def steps(states,consts_adam,X,Y,consts):
-    return scan(lambda states,xy:(upd(xy[0],xy[1],states,consts_adam,consts),0),states,(X,Y))[0]
-
-  def get_reshuffled(k,X_trn,Y_trn,n_batches,bs,last):
-    X,Y=shuffle_xy(k,X_trn,Y_trn)
-    return X[0:last].reshape(n_batches,bs,-1),Y[0:last].reshape(n_batches,bs)
-
-  get_reshuffled=jit(get_reshuffled,static_argnames=['n_batches','bs','last'])
-
-  @jit
-  def _get_preds_thresh(w,tfpfn,X_trn,Y_trn,X_tst,Y_tst):
-    yps=forward(w,X_trn,act,transpose=True,get_transform=batchnorm,batchnorm=batchnorm)
-    if batchnorm:
-      yps,w=yps
-    Yp_smooth_trn=yps.flatten()
-    Yp_smooth_tst=forward(w,X_tst,act,transpose=True,batchnorm=False).flatten()
-    Yp_trn=Yp_smooth_trn>0.
-    Yp_tst=Yp_smooth_tst>0.
-    y_max=Yp_smooth_trn.max()
-    y_min=Yp_smooth_trn.min()
-    thresh=find_thresh(Y_trn,Yp_smooth_trn,tfpfn,1e-1)
-    Yp_trn_thresh=Yp_smooth_trn>thresh
-    return {'fp_trn':((~Y_trn)&(Yp_trn)).mean(),'fn_trn':((Y_trn)&(~Yp_trn)).mean(),
-            'fp_tst':((~Y_tst)&(Yp_tst)).mean(),'fn_tst':((Y_tst)&(~Yp_tst)).mean(),
-            'fp_tsh':((~Y_trn)&(Yp_trn_thresh)).mean(),'fn_tsh':((Y_trn)&(~Yp_trn_thresh)).mean(),
-            'max':y_max,'min':y_min,'var':Yp_smooth_trn.var(),'thresh':thresh}
-
-  get_preds_thresh=vmap(_get_preds_thresh,(0,0,None,None,None,None),0)
-
-  def _nn_epochs(ks,n_epochs,n_batches,bs,last,X_trn,Y_trn,X_tst,Y_tst,consts_hp,consts_adam,states,
-                 verbose=True,ep_scale=0.):
-    tfps=consts_hp['tfp']
-    tfns=consts_hp['tfn']
-    lrfpfns=consts_hp['lrfpfn']
-    lrs=consts_adam['lr']
-    regs=consts_adam['reg']
-    tfpfns=tfps/tfns
-    for epoch,k in enumerate(ks,1):
-      X,Y=get_reshuffled(k,X_trn,Y_trn,n_batches,bs,last)
-      states=steps(states,consts_adam,X,Y,consts_hp)
-      preds=get_preds_thresh(states['w'],tfpfns,X_trn,Y_trn,X_tst,Y_tst)
-      states['w'][-1][1]-=preds['thresh'].reshape(-1,1)#*.2
-      consts_hp=set_bet(consts_hp,preds,epoch,ep_scale)
-      print('nn epoch',epoch)
-    #return res
-    return dict(fp_trn=preds['fp_trn'],fn_trn=preds['fn_trn'],
-                fp_tst=preds['fp_tst'],fn_tst=preds['fn_tst'])
-
-  #_nn_epochs=jit(_nn_epochs,static_argnames=['last','n_batches','bs'])
-
-  def nn_epochs(k,n_epochs,X_trn,Y_trn,X_tst,Y_tst,consts_hp,consts_adam,states,**kwa):
-    n_batches=len(X_trn)//bs
-    last=n_batches*bs
-    ks=split(k,n_epochs)
-    return _nn_epochs(ks,n_epochs,n_batches,bs,last,X_trn,Y_trn,
-                      X_tst,Y_tst,consts_hp,consts_adam,states,**kwa)
-
-  return nn_epochs
 
 def init_states(k,init,lrfpfn,reg,p,tfps,tfns,mod_shape=None,in_dim=None,
                 start_width=None,end_width=None,depth=None,ret_dict=False,
@@ -842,30 +710,38 @@ def init_states(k,init,lrfpfn,reg,p,tfps,tfns,mod_shape=None,in_dim=None,
   else:
     return consts_hp,consts_adam,states
 
-def get_threshes(tfpfns,yo,p):
-  delta_p=1/len(yo)
+def get_threshes(tfpfns,ypy,p):
+  tfpfns=sorted(tfpfns,key=lambda x:-x)
+  delta_p=1/len(ypy)
   i=0
-  fp=0
-  fn=p
-  for thresh,y in yo:
+  fp=(1-p)
+  fn=0
+  for thresh,y in ypy:
     if y:
-      fn-=delta_p
+      fn+=delta_p
     else:
-      fp+=delta_p
-    if fp/fn>tfpfns[i]:
-      yield tfpfns[i],thresh,fp,fn
-      i+=1
-      if i==n_thresh:
+      fp-=delta_p
+    if fp<tfpfns[0]*fn:
+      yield tfpfns[0],thresh,fp,fn
+      tfpfns=tfpfns[1:]
+      if not tfpfns:
         break
+
+imbl_resamplers={'SMOTETomek':SMOTETomek,'SMOTEENN':SMOTEENN,'SMOTE':SMOTE,
+                 'ADASYN':ADASYN,'NearMiss':NearMiss}
+skl={'RandomForestRegressor':RandomForestRegressor,'GradientBoostingRegressor':GradientBoostingRegressor}
 
 class ModelEvaluation:
   def __init__(self,directory,ds='unsw',seed=1729,lab_cat=True,sds=False,categorical=True,out_f=None,
                fixed_params={'nn':dict(n_epochs=100,start_width=128,end_width=32,depth=2,n_par=8,bs=128,
                                        bias=.1,act='relu',init='glorot_normal',eps=1e-8,beta1=.9,beta2=.999),
-                             'rf':dict(n_jobs=-1)},
-               varying_params={'rf':[{'d':i} for i in range(3,13)],
+                             'sk':{}},
+                             varying_params={'sk':[{'kwa':dict(**{'max_depth':i},**({'n_jobs':-1} if\
+                                                               rg=='RandomForestRegressor' else {})),\
+                                                    'regressor':rg} for i in range(2,15,2) for rg in
+                                                   ('RandomForestRegressor','GradientBoostingRegressor')],
                                'nn':[{'lr_ad':la,'reg':rl*la,'lrfpfn':lf}for la in [.0001] for\
-                                     rl in [1e-3,1e-2] for lf in geomspace(.0002,.03,10)]}):
+                                     rl in [1e-2] for lf in geomspace(.0002,.03,4)]}):
     self.directory=Path(directory)
     if not self.directory.exists():
       self.directory.mkdir()
@@ -896,13 +772,11 @@ class ModelEvaluation:
       self.Y_tst={'all':Y_tst}
 
     print('shapes: X_trn:',self.X_trn.shape,'X_tst:',self.X_tst.shape)
-
     self.p_trn={l:yt.mean() for l,yt in self.Y_trn.items()}
     self.p_tst={l:yt.mean() for l,yt in self.Y_tst.items()}
     self.regressors={}
     self.thresholds={}
     self.res={}
-    self.func={'nn':mk_nn_epochs(activations[self.fixed_params['nn']['act']],self.fixed_params['nn']['bs'])}
     self.resample('')
   
   def set_targets(self,tfps=None,tfns=None,n_targets=8,min_tfpfn=1.,max_tfpfn=100.,e0=.1):
@@ -920,26 +794,42 @@ class ModelEvaluation:
     self.tfns={l:[t[1] for t in v] for l,v in self.targets.items()}
     self.n_targets=n_targets
 
-  def define_jobs(self,methods=['rf','nn'],resamplers=['','SMOTETomek','SMOTEENN'],check_done=True):
+  def define_jobs(self,methods=['nn','sk'],resamplers=['']+list(imbl_resamplers),check_done=True):
     self.methods=methods
     self.resamplers=resamplers
     self.jobs=[(method,i,resampler) for resampler in resamplers for method in methods for i in\
                range(len(self.varying_params[method]))]
     self.n_complete=0
     self.n_remaining=len(self.jobs)
+    print('Scheduled',self.n_remaining,'jobs:')
+    [print(*j) for j in self.jobs]
     if check_done:
       done_fp=self.directory/'done.csv'
       if done_fp.exists():
         with done_fp.open('r') as fd:
-          done_jobs=list(reader(fd))
+          done_jobs=[(r[0],int(r[1]),r[2]) for r in reader(fd)]
           self.jobs=[j for j in self.jobs if not j in done_jobs]
           self.n_complete=len(done_jobs)
+          print('Already completed:')
+          [print(*dj) for dj in done_jobs]
+          print('Still to complete:')
+          [print(*j) for j in self.jobs]
           self.n_remaining-=self.n_complete
 
   def run_jobs(self,of=stdout):
     while self.n_remaining:
       job=self.jobs.pop()
-      if of: print('Initialising model:',job,file=of)
+      if of:
+        m,i,rs=job
+        rs=rs or 'none'
+        print('Initialising model...',file=of)
+        print('method:',m,file=of)
+        print('method index:',i,file=of)
+        print('resampling:',rs,file=of)
+        print('Globally fixed parameters:',file=of)
+        [print(k,v) for k,v in self.fixed_params[m].items()]
+        print('Locally fixed parameters:',file=of)
+        [print(k,v) for k,v in self.varying_params[m][i].items()]
       self.init_model(job)
       if of: print('Benchmarking...',file=of)
       self.benchmark_model(job)
@@ -971,33 +861,36 @@ class ModelEvaluation:
           self.Y_trn_resamp=self.Y_trn
           self.X_trn_resamp={l:self.X_trn for l in self.Y_trn}
           return
-        case 'SMOTETomek':
+        case resampler if resampler in imbl_resamplers:
           self.Y_trn_resamp={}
           self.X_trn_resamp={}
           for l,Y in self.Y_trn.items():
-            sm=SMOTETomek(random_state=seed)
-            self.X_trn_resamp[l],self.Y_trn_resamp[l]=sm.fit_resample(self.X_trn,Y)
-        case 'SMOTEENN':
-          self.Y_trn_resamp={}
-          self.X_trn_resamp={}
-          for l,Y in self.Y_trn.items():
-            print('Resampling by SMOTEENN...')
-            sm=SMOTEENN(random_state=seed)
+            try:
+              sm=imbl_resamplers[resampler](random_state=seed)
+            except:
+              print(resampler,'doesn\'t take a random seed...')
+              sm=imbl_resamplers[resampler]()
             self.X_trn_resamp[l],self.Y_trn_resamp[l]=sm.fit_resample(self.X_trn,Y)
         case _:
           raise NotImplementedError('Resampler',resampler,'not found')
       with rs_fp.open('wb') as fd:
         dump((self.X_trn_resamp,self.Y_trn_resamp),fd)
+    print('#Training rows:',len(self.X_trn),'~~>')
+    [print(k,':',len(x)) for k,x in self.Y_trn_resamp.items()]
 
   def init_model(self,job):
     method,i,resampler=job
     param=self.varying_params[method][i]
     pm=self.fixed_params[method]
     match method:
-      case 'rf':
-        j={l:{'rf':RandomForestRegressor(max_depth=param['d'],n_jobs=self.fixed_params['rf']['n_jobs'],
-                                         random_state=self.rng.integers(2*32)),
+      case 'sk':
+        j={l:{'sk':skl[self.varying_params['sk'][i]['regressor']](random_state=self.rng.integers(2*32),
+                                                                  **self.varying_params['sk'][i]['kwa']),
               'thresholds':{}} for l in self.p_trn}
+      #case 'rf':
+      #  j={l:{'rf':RandomForestRegressor(max_depth=param['d'],n_jobs=self.fixed_params['rf']['n_jobs'],
+      #                                   random_state=self.rng.integers(2*32)),
+      #        'thresholds':{}} for l in self.p_trn}
       case 'nn':
         j={l:init_states(self.rkg.emit_key(),pm['init'],param['lrfpfn'],param['reg'],p,
                          self.tfps[l],self.tfns[l],in_dim=self.X_trn.shape[1],
@@ -1020,21 +913,22 @@ class ModelEvaluation:
       res[l]={'trn':{},'tst':{},'tgt':{c:dict(fp=a,fn=b,fpfn=c) for a,b,c in self.targets[l]}}
       tgts=[c for (_,_,c) in self.targets[l]]
       match method:
-        case 'rf':
-          reg['rf'].fit(self.X_trn_resamp[l],self.Y_trn_resamp[l])
-          Yp_ordered=sorted(zip(reg['rf'].predict(self.X_trn),self.Y_trn[l]))
+        case 'sk':
+          reg['sk'].fit(self.X_trn_resamp[l],self.Y_trn_resamp[l])
+          Yp_ordered=sorted(zip(reg['sk'].predict(self.X_trn),self.Y_trn[l]))
           for tfpfn,thresh,fp,fn in get_threshes(tgts,Yp_ordered,self.p_trn[l]):
             reg['thresholds'][tfpfn]=thresh
             res[l]['trn'][tfpfn]=dict(fp=fp,fn=fn,fpfn=fp/fn)
-            Yp_tst=reg['rf'].predict(self.X_tst)>thresh
-            fpt=((~self.Y_tst)&Yp_tst).mean()
-            fnt=(self.Y_tst&~Yp_tst).mean()
+            Yp_tst=reg['sk'].predict(self.X_tst)>thresh
+            fpt=((~self.Y_tst[l])&Yp_tst).mean()
+            fnt=(self.Y_tst[l]&~Yp_tst).mean()
             res[l]['tst'][tfpfn]=dict(fp=fpt,fn=fnt,fpfn=fpt/fnt)
 
         case 'nn':
-          f_arrs=self.func['nn'](self.rkg.emit_key(),ms['n_epochs'],self.X_trn_resamp[l],self.Y_trn_resamp[l],
-                                 self.X_tst,self.Y_tst[l],reg['consts_hp'],reg['consts_adam'],
-                                 reg['states'],verbose=False,ep_scale=0.)
+          f_arrs=nn_epochs(self.rkg.emit_key(),ms['n_epochs'],ms['bs'],self.X_trn,self.Y_trn[l],
+                           self.X_tst,self.Y_tst[l],reg['consts_hp'],reg['consts_adam'],
+                           reg['states'],activations[self.fixed_params['nn']['act']],
+                           X_rs=self.X_trn_resamp[l],Y_rs=self.Y_trn_resamp[l])
           for stage in ['tst','trn']:
             fp_ar=f_arrs['fp_'+stage]
             fn_ar=f_arrs['fn_'+stage]
@@ -1047,7 +941,8 @@ class ModelEvaluation:
   def update_results(self,single=False):
     done_fp=self.directory/'done.csv'
     res_fp=self.directory/'res.csv'
-    param_fp=self.directory/'params.json'
+    param_js=self.directory/'fixed_params.json'
+    param_vp=self.directory/'varying_params.csv'
     append_done=done_fp.exists()
     if single:
       newly_done={single}
@@ -1072,7 +967,13 @@ class ModelEvaluation:
     with done_fp.open('a' if append_done else 'w') as fd:
       w=writer(fd)
       [w.writerow(r) for r in newly_done]
-    if not param_fp.exists():
-      with param_fp.open('w') as fd:
-        jump({'fixed':self.fixed_params,'varying':self.varying_params,
-              'methods':self.methods,'resamplers':self.resamplers},fd)
+    if not param_js.exists():
+      with param_js.open('w') as fd:
+        jump({'fixed':self.fixed_params,'methods':self.methods,'resamplers':self.resamplers},fd)
+    if not param_vp.exists():
+      with param_vp.open('w') as fd:
+        w=DictWriter(fd,['param_index','method']+sum([list(self.varying_params[m][0]) for m in self.methods],[]))
+        w.writeheader()
+        for m in self.methods:
+          [w.writerow(dict(param_index=i,method=m,**vps)) for i,vps in enumerate(self.varying_params[m])]
+

@@ -13,6 +13,8 @@
 *.pkl
 *.out
 *.pdf
+*.json
 *_report
 b/*
 doc/snippets/*
+mod*
