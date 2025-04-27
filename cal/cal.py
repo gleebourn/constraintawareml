@@ -19,10 +19,12 @@ class ModelEvaluation:
                              'sk':{}},methods=['sk','nn'],
                varying_params={'sk':[{'ska':dict(max_depth=i,
                                                  **({'n_jobs':-1} if rg=='RandomForestRegressor' else {})),\
-                                      'regressor':rg} for i in range(2,15,2) for rg in
+                                      'regressor':rg} for i in range(12,15,2) for rg in
                                      ('RandomForestRegressor','HistGradientBoostingRegressor')],
-                               'nn':[{'lr_ad':la,'reg':rl*la,'lrfpfn':lf}for la in [.0001] for\
-                                     rl in [1e-2] for lf in geomspace(.0002,.03,4)]}):
+                               #'nn':[{'lr_ad':la,'reg':rl*la,'lrfpfn':lf,'bias':b}for la in [.0001] for\
+                               #      rl in [1e-2] for lf in geomspace(.0002,.03,4) for b in [-.1,0.,.1]]}):
+                               'nn':[{'lr_ad':la,'reg':rl*la,'lrfpfn':lf,'bias':b}for la in [.0001,.00001] for\
+                                     rl in [1e-2] for lf in [.004,.005,.006] for b in [-.1,0.,.1]]}):
     if directory is None:
       directory='modeval_'+(ds if isinstance(ds,str) else 'cust')
     self.directory=Path(directory)
@@ -39,8 +41,6 @@ class ModelEvaluation:
     self.done_fp=self.res_dir/'done.csv'
     self.done_fp=self.res_dir/'done.csv'
     self.res_fp=self.res_dir/'res.csv'
-    self.header=['cat_lab','p','method','param_index','resampler','fp_target','fn_target',
-                 'fp_train','fn_train','fp_test','fn_test']
     self.fp_fp=self.res_dir/'fixed_params.json'
     self.vp_fp=self.res_dir/'varying_params.csv'
     self.header=[]
@@ -176,7 +176,7 @@ class ModelEvaluation:
         r={l:NNPar(self.seed(),p,self.tfps[l],self.tfns[l],p_resampled=self.rs.get_p(l),init=pf['init'],
                    lrfpfn=pv['lrfpfn'],reg=pv['reg'],start_width=pf['start_width'],end_width=pf['end_width'],
                    depth=pf['depth'],lr=pv['lr_ad'],beta1=pf['beta1'],beta2=pf['beta2'],eps=pf['eps'],
-                   bias=pf['bias'],logf=self.logf) for l,p in self.p_trn.items()}
+                   bias=pv['bias'],logf=self.logf) for l,p in self.p_trn.items()}
       case _:
         raise NotImplementedError('Method',method,'not found')
     self.regressors.append((job,r))

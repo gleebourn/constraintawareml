@@ -25,40 +25,49 @@ class KeyEmitter:
     self.parents[parent]=keys[0]
     return keys[1] if n is None else keys[1:]
 
-def _forward(w,x,act,batchnorm=False,get_transform=False,ll_act=False,transpose=True):
-  if get_transform:
-    A=[]
-    B=[]
-  if transpose:
-    l=w[:-1]
-    al,bl=w[-1]
-  else:
-    l=zip(w[0][:-1],w[1][:-1])
-    al=w[0][-1]
-    bl=w[1][-1]
+#def _forward(w,x,act,batchnorm=False,get_transform=False,ll_act=False,transpose=True):
+#  if get_transform:
+#    A=[]
+#    B=[]
+#  if transpose:
+#    l=w[:-1]
+#    al,bl=w[-1]
+#  else:
+#    l=zip(w[0][:-1],w[1][:-1])
+#    al=w[0][-1]
+#    bl=w[1][-1]
+#  for a,b in l:
+#    x=act(x@a+b)
+#    if batchnorm:
+#      ta=(1e-8+x.var(axis=0))**-.5
+#      tb=x.mean(axis=0)#*ta
+#      if get_transform:
+#        A.append(ta)
+#        B.append(tb)
+#      x=(x-tb)*ta
+#  y=x@al+bl
+#  if ll_act:
+#    y=act(y)
+#  if get_transform:
+#    if transpose:
+#      A=[a*(ta.reshape(-1,1)) for (a,_),ta in zip(w[1:],A)]
+#      trans=w[:1]+[(ta,b-tb@ta) for (_,b),ta,tb in zip(w[1:],A,B)]
+#    else:
+#      A=[a*(ta.reshape(-1,1)) for a,ta in zip(w[0][1:],A)]
+#      trans=w[0][:1]+A,w[1][:1]+[b-tb@ta for b,ta,tb in zip(w[1][1:],A,B)]
+#    return y,trans
+#  return y
+
+def _forward(w,x,act):
+  l=w[:-1]
+  al,bl=w[-1]
   for a,b in l:
     x=act(x@a+b)
-    if batchnorm:
-      ta=(1e-8+x.var(axis=0))**-.5
-      tb=x.mean(axis=0)#*ta
-      if get_transform:
-        A.append(ta)
-        B.append(tb)
-      x=(x-tb)*ta
   y=x@al+bl
-  if ll_act:
-    y=act(y)
-  if get_transform:
-    if transpose:
-      A=[a*(ta.reshape(-1,1)) for (a,_),ta in zip(w[1:],A)]
-      trans=w[:1]+[(ta,b-tb@ta) for (_,b),ta,tb in zip(w[1:],A,B)]
-    else:
-      A=[a*(ta.reshape(-1,1)) for a,ta in zip(w[0][1:],A)]
-      trans=w[0][:1]+A,w[1][:1]+[b-tb@ta for b,ta,tb in zip(w[1][1:],A,B)]
-    return y,trans
   return y
 
-forward=jit(_forward,static_argnames=['batchnorm','get_transform','ll_act','transpose','act'])
+#forward=jit(_forward,static_argnames=['batchnorm','get_transform','ll_act','transpose','act'])
+forward=jit(_forward,static_argnames=['act'])
 vorward=jit(vmap(_forward,(0,None,None),0),static_argnames=['act'])
 
 activations={'tanh':tanh,'softmax':softmax,'linear':jit(lambda x:x),
