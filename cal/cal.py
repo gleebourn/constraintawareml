@@ -11,20 +11,24 @@ from cal.rs import Resampler,resamplers
 from cal.dl import load_ds
 from cal.ts import TimeStepper
 
+def dict_to_tup(d):
+  return tuple(sorted(d.items()))
+
+def tup_to_dict(t):
+  return {k:v for k,v in t}
+
 class ModelEvaluation:
   def __init__(self,directory=None,ds='unsw',seed=1729,lab_cat=True,sds=False,
-               categorical=True,out_f=None,reload_prev=None,vp_in_res=True,fp_in_res=True,
-               fixed_params={'nn':dict(n_epochs=100,start_width=128,end_width=32,depth=2,bs=128,bias=.1,
-                                       act='relu',init='glorot_normal',eps=1e-8,beta1=.9,beta2=.999),
-                             'sk':{}},methods=['sk','nn'],
-               varying_params={'sk':[{'ska':dict(max_depth=i,
-                                                 **({'n_jobs':-1} if rg=='RandomForestRegressor' else {})),\
-                                      'regressor':rg} for i in range(12,15,2) for rg in
-                                     ('RandomForestRegressor','HistGradientBoostingRegressor')],
-                               #'nn':[{'lr_ad':la,'reg':rl*la,'lrfpfn':lf,'bias':b}for la in [.0001] for\
-                               #      rl in [1e-2] for lf in geomspace(.0002,.03,4) for b in [-.1,0.,.1]]}):
-                               'nn':[{'lr_ad':la,'reg':rl*la,'lrfpfn':lf,'bias':b}for la in [.0001,.00001] for\
-                                     rl in [1e-2] for lf in [.004,.005,.006] for b in [-.1,0.,.1]]}):
+               categorical=True,out_f=None,reload_prev=None,methods=['sk','nn'],
+               params={'sk':[dict(max_depth=i,regressor=rg,
+                                  **({'n_jobs':-1} if rg=='RandomForestRegressor' else {}))\
+                             for i in range(12,15,2) for rg in
+                             ('RandomForestRegressor','HistGradientBoostingRegressor')],
+                       'nn':[dict(lr_ad=la,reg=rl*la,lrfpfn=lf,bias=b,n_epochs=100,start_width=128,
+                                  end_width=32,depth=2,bs=128,act='relu',init='glorot_normal',
+                                  eps=1e-8,beta1=.9,beta2=.999,layer_norm=layer_norm)\
+                             for la in [.0001,.001] for rl in [1e-2] for lf in [.004,.005,.006]\
+                             for b in [-.1,0.,.1] for layer_norm in [True,False]]}):
     if directory is None:
       directory='modeval_'+(ds if isinstance(ds,str) else 'cust')
     self.directory=Path(directory)
@@ -38,19 +42,8 @@ class ModelEvaluation:
     self.res_dir=dir_n
     if not self.res_dir.exists():
       self.res_dir.mkdir()
-    self.done_fp=self.res_dir/'done.csv'
-    self.done_fp=self.res_dir/'done.csv'
     self.res_fp=self.res_dir/'res.csv'
-    self.fp_fp=self.res_dir/'fixed_params.json'
-    self.vp_fp=self.res_dir/'varying_params.csv'
     self.header=[]
-    self.excluded_cols=[]
-    if vp_in_res:
-      self.excluded_cols+=['fixed_params']
-    else:
-      self.excluded_cols+=['param_index']
-    if not fp_in_res:
-      self.excluded_cols+=['fixed_params']
     self.logf=(self.res_dir/'modeval.log').open('w')
     self.parent_seed=seed
     self.rs_seeds={}
@@ -75,17 +68,15 @@ class ModelEvaluation:
 
     self.p_trn={l:yt.mean() for l,yt in self.Y_trn.items()}
     self.p_tst={l:yt.mean() for l,yt in self.Y_tst.items()}
-    self.regressors=[]
-    self.thresholds={}
-    self.res=[]
+    self.regressors={}
+    self.benchmarked={}
     self.rs=Resampler(self.X_trn,self.Y_trn,self.directory,self.ds_name,
                       self.seed(),p=self.p_trn,logf=self.logf)
     self.n_complete=0
-    self.varying_params=varying_params
-    self.fixed_params=fixed_params
+    self.params=params
     self.methods=[]
-    self.resamplers=[]
-    self.jobs=[]
+    self.resamplers=set()
+    self.jobs=set()
   
   def log(self,*a):
     print(*a,file=self.logf,flush=True)
@@ -109,88 +100,72 @@ class ModelEvaluation:
     self.tfpfns={l:array([t[2] for t in v]) for l,v in self.targets.items()}
     self.n_targets=n_targets
 
-  def define_jobs(self,methods=['nn','sk'],resamplers=['']+list(resamplers),varying_params=None,
-                  check_done=True,jobs=None):
-    if jobs is None:
-      if varying_params is None:
-        varying_params=self.varying_params
-      jobs=[(method,resampler,vp) for resampler in resamplers\
-            for method in methods for vp in varying_params[method]]
-      new_jobs=[j for j in jobs if not j in self.jobs]
-    self.methods+=[j[0] for j in new_jobs if not j[0] in self.methods]
-    self.resamplers+=[j[1] for j in new_jobs if not j[2] in self.resamplers]
+  def define_jobs(self,methods=['nn','sk'],resamplers=list(resamplers)+[''],params=None):
+    if params is None:
+      params=self.params
     for m in methods:
-      vp_existing=self.varying_params.pop(m,[])
-      self.varying_params[m]=vp_existing+[job[2] for job in jobs if not job[2] in vp_existing]
-    self.jobs+=new_jobs
+      for pmd in params[m]:
+        pmt=dict_to_tup(pmd)
+        [self.jobs.add((m,pmt,rs)) for rs in resamplers]
+    self.methods=[j[0] for j in self.jobs]
+    self.params={m:[tup_to_dict(j[1]) for j in self.jobs if j[0]==m]}
+    self.resamplers=list({j[2] for j in self.jobs})
     self.n_remaining=len(self.jobs)
-    self.log('Scheduled',self.n_remaining,'jobs:')
-    [self.log(*j) for j in self.jobs]
-    if check_done and self.done_fp.exists():
-      with self.done_fp.open('r') as fd:
-        done_jobs=[r for r in reader(fd)]
-        self.jobs=[j for j in self.jobs if not j in done_jobs]
-        self.n_complete=len(done_jobs)
-        self.log('Already completed:')
-        [self.log(*dj) for dj in done_jobs]
-        self.log('Still to complete:')
-        [self.log(*j) for j in self.jobs]
-        self.n_remaining=len(self.jobs)
+    self.log(self.n_remaining,'jobs to perform:')
+    [self.log(m,rs,'params:',tup_to_dict(pmt)) for m,pmt,rs in self.jobs]
 
   def run_jobs(self):
-    while self.n_remaining:
-      job=self.jobs.pop()
-      m,rs,vp=job
+    for job in self.jobs:
+      m,pmt,rs=job
       rs=rs or 'none'
       self.log('Initialising model...')
       self.log('method:',m)
-      self.log('method index:',self.varying_params[m].index(vp))
       self.log('resampling:',rs)
-      self.log('Globally fixed parameters:')
-      [self.log(k,v) for k,v in self.fixed_params[m].items()]
-      self.log('Locally fixed parameters:')
-      [self.log(k,v) for k,v in vp.items()]
-      self.init_model(job)
+      self.log('Parameters:')
+      [self.log(k,v) for k,v in pmt]
+      self.init_job(job)
       self.log('Benchmarking...')
-      self.benchmark_model(job)
+      self.benchmark_job(job)
       self.log('Updating results...')
-      self.update_results(job)
+      self.update_results()
       self.log('Removing job...')
       self.rm_job(job)
       self.log(self.n_complete,'experiments completed with',self.n_remaining,'to go...')
+    self.log('Completed all jobs!')
+    return
 
   def rm_job(self,job):
-    self.regressors=[jr for jr in self.regressors if not jr[0]==job]
-    self.res=[jr for jr in self.res if not jr[0]==job]
+    self.regressors.pop(job)
+    self.benchmarked.pop(job)
     self.n_complete+=1
     self.n_remaining-=1
 
-  def init_model(self,job):
-    method,resampler,pv=job
-    pf=self.fixed_params[method]
+  def init_job(self,job):
+    method,pmt,rs=job
+    pm=tup_to_dict(pmt)
     match method:
       case 'sk':
-        r={l:SKL(pv['regressor'],self.tfpfns[l],pv['ska'],p,self.rs.get_p(l),
-                 seed=self.seed()) for l,p in self.p_trn.items()}
+        r={l:SKL(pm['regressor'],self.tfpfns[l],{k:v for k,v in pm.items() if k!='regressor'},
+                 p,seed=self.seed()) for l,p in self.p_trn.items()}
       case 'nn':
-        r={l:NNPar(self.seed(),p,self.tfps[l],self.tfns[l],p_resampled=self.rs.get_p(l),init=pf['init'],
-                   lrfpfn=pv['lrfpfn'],reg=pv['reg'],start_width=pf['start_width'],end_width=pf['end_width'],
-                   depth=pf['depth'],lr=pv['lr_ad'],beta1=pf['beta1'],beta2=pf['beta2'],eps=pf['eps'],
-                   bias=pv['bias'],logf=self.logf) for l,p in self.p_trn.items()}
+        r={l:NNPar(self.seed(),p,self.tfps[l],self.tfns[l],p_resampled=self.rs.get_p(l,rs),init=pm['init'],
+                   lrfpfn=pm['lrfpfn'],reg=pm['reg'],start_width=pm['start_width'],end_width=pm['end_width'],
+                   depth=pm['depth'],lr=pm['lr_ad'],beta1=pm['beta1'],beta2=pm['beta2'],eps=pm['eps'],
+                   n_epochs=pm['n_epochs'],bias=pm['bias'],logf=self.logf,layer_norm=pm['layer_norm'])\
+           for l,p in self.p_trn.items()}
       case _:
         raise NotImplementedError('Method',method,'not found')
-    self.regressors.append((job,r))
+    self.regressors[job]=r
 
-  def benchmark_model(self,job):
-    method,resampler,_=job
+  def benchmark_job(self,job):
+    method,_,resampler=job
     self.rs.set_resampler(resampler)
-    regressor=next(r for j,r in self.regressors if j==job)
-    ms=self.fixed_params[method]
+    regressor=self.regressors[job]
     res={}
     for l,reg in regressor.items():
       self.log('Training for label',l,'...')
       r={'trn':{},'tst':{},'tgt':{targs[2]:dict(zip(('fp','fn','fpfn'),targs)) for targs in self.targets[l]}}
-      reg.fit(*self.rs.get_resampled(l),X_raw=self.X_trn[l],Y_raw=self.Y_trn[l])
+      reg.fit(*self.rs.get_resampled(l,resampler),X_raw=self.X_trn[l],Y_raw=self.Y_trn[l])
 
       for stage,X,Y in [('tst',self.X_tst[l],self.Y_tst[l]),('trn',self.X_trn[l],self.Y_trn[l])]:
         Yp=reg.predict(X)
@@ -199,49 +174,25 @@ class ModelEvaluation:
         for tfpfn,fp,fn in zip(self.tfpfns[l],fps,fns):
           r[stage][tfpfn]=dict(fp=fp,fn=fn,fpfn=fp/fn)
       res[l]=r
-    self.res.append((job,res))
+    self.benchmarked[job]=res
   
-  def res_to_row(self,method,resampler,vp,l,tfpfn):
-    res=next(r[l] for j,r in self.res if j==(method,resampler,vp))
-    ret=dict(method=method,resampler=resampler,cat_lab=l,p=self.p_trn[l],
-             **{'varying_params':vp,'param_index':self.varying_params[method].index(vp),
-                'fixed_params':self.fixed_params[method]})
+  def res_to_row(self,job,l,tfpfn):
+    method,pmt,resampler=job
+    res=self.benchmarked[job]
+    ret=dict(method=method,resampler=resampler,cat_lab=l,p=self.p_trn[l],params=tup_to_dict(pmt))
     ret.update({k+lab:res[s][tfpfn][k] for k in ('fp','fn') for (lab,s) in\
                 (('_target','tgt'),('_train','trn'),('_test','tst'))})
     return ret
 
-  def update_results(self,single=False):
-    append_done=self.done_fp.exists()
-    if single:
-      newly_done=[single]
-    elif append:
-      with self.done_fp.open('r') as fd:
-        previously_done=list(reader(fd))
-        print(previously_done)
-      newly_done=[r for r in self.res if not r in previously_done]
-    else:
-      newly_done=self.res
+  def update_results(self,jobs=None):
+    to_update=self.benchmarked if jobs is None else {j for j in self.benchmarked if j in jobs}
 
     append_res=self.res_fp.exists()
     with self.res_fp.open('a' if append_res else 'w') as fd:
-      rows=[self.res_to_row(method,resampler,vp,l,tfpfn) for (method,resampler,vp) in newly_done for\
+      rows=[self.res_to_row(job,l,tfpfn) for job in to_update for\
             l in self.p_trn for _,_,tfpfn in self.targets[l]]
       if not self.header:
         self.header=sorted(list(rows[0]),key=lambda s:s[::-1])
-        [self.header.remove(c) for c in self.excluded_cols]
       w=DictWriter(fd,self.header,extrasaction='ignore')
       if not append_res:w.writeheader()
       w.writerows(rows)
-
-    with self.done_fp.open('a' if append_done else 'w') as fd:
-      w=writer(fd)
-      [w.writerow(r) for r in newly_done]
-    with self.fp_fp.open('w') as fd:
-      jump({'fixed':self.fixed_params,'methods':self.methods,'resamplers':self.resamplers},fd)
-    if not self.vp_fp.exists():
-      with self.vp_fp.open('w') as fd:
-        w=DictWriter(fd,['param_index','method']+\
-                        sum([list(self.varying_params[m][0]) for m in self.methods],[]))
-        w.writeheader()
-        for m in self.methods:
-          [w.writerow(dict(param_index=i,method=m,**vps)) for i,vps in enumerate(self.varying_params[m])]

@@ -25,49 +25,19 @@ class KeyEmitter:
     self.parents[parent]=keys[0]
     return keys[1] if n is None else keys[1:]
 
-#def _forward(w,x,act,batchnorm=False,get_transform=False,ll_act=False,transpose=True):
-#  if get_transform:
-#    A=[]
-#    B=[]
-#  if transpose:
-#    l=w[:-1]
-#    al,bl=w[-1]
-#  else:
-#    l=zip(w[0][:-1],w[1][:-1])
-#    al=w[0][-1]
-#    bl=w[1][-1]
-#  for a,b in l:
-#    x=act(x@a+b)
-#    if batchnorm:
-#      ta=(1e-8+x.var(axis=0))**-.5
-#      tb=x.mean(axis=0)#*ta
-#      if get_transform:
-#        A.append(ta)
-#        B.append(tb)
-#      x=(x-tb)*ta
-#  y=x@al+bl
-#  if ll_act:
-#    y=act(y)
-#  if get_transform:
-#    if transpose:
-#      A=[a*(ta.reshape(-1,1)) for (a,_),ta in zip(w[1:],A)]
-#      trans=w[:1]+[(ta,b-tb@ta) for (_,b),ta,tb in zip(w[1:],A,B)]
-#    else:
-#      A=[a*(ta.reshape(-1,1)) for a,ta in zip(w[0][1:],A)]
-#      trans=w[0][:1]+A,w[1][:1]+[b-tb@ta for b,ta,tb in zip(w[1][1:],A,B)]
-#    return y,trans
-#  return y
-
-def _forward(w,x,act):
+def _forward(w,x,act,layer_norm=False):
   l=w[:-1]
-  al,bl=w[-1]
-  for a,b in l:
-    x=act(x@a+b)
-  y=x@al+bl
+  abl=w[-1]
+  for ab in l:
+    z=x@ab[0]
+    if layer_norm:
+      z=ab[2]*((z-z.mean(axis=-1))/(1e-8+z.var(axis=-1)**.5))
+    x=act(z+ab[1])
+  y=x@abl[0]+abl[1]
   return y
 
 #forward=jit(_forward,static_argnames=['batchnorm','get_transform','ll_act','transpose','act'])
-forward=jit(_forward,static_argnames=['act'])
+forward=jit(_forward,static_argnames=['act','layer_norm'])
 vorward=jit(vmap(_forward,(0,None,None),0),static_argnames=['act'])
 
 activations={'tanh':tanh,'softmax':softmax,'linear':jit(lambda x:x),
@@ -89,7 +59,7 @@ def select_initialisation(imp,act):
         return 'glorot_uniform'
 
 def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n_par=None,bias=0.,
-                sqrt_normalise=False,orthonormalise=False,transpose=True):
+                sqrt_normalise=False,orthonormalise=False,transpose=True,layer_norm=False):
   n_steps=len(layer_dimensions)-1
   if initialisation in ['ones','zeros']:
     w_k,b_k=count(),count()
@@ -100,6 +70,7 @@ def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n_par=None,bias
   wb=[]
   A=[]
   B=[]
+  G=[]
   if n_par is None:
     e_dims=tuple()
   else:
@@ -125,6 +96,8 @@ def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n_par=None,bias
         B.append(zeros(e_dims+(d_o,))+bias)
       case _:
         raise Exception('Unknown initialisation: '+initialisation)
+    if layer_norm:
+      G.append(ones(e_dims+(d_o,)))
   if orthonormalise:
     for i,(d_i,d_o) in enumerate(layer_dimensions,layer_dimensions[1:]):
       if n>1: raise Exception('Not yet done this')
@@ -136,10 +109,13 @@ def init_layers(layer_dimensions,initialisation,k=None,mult_a=1.,n_par=None,bias
     if n>1: raise Exception('Not yet done this')
     for i,d_i in enumerate(layer_dimensions[1:]):
       A[i]/=d_i**.5
+  AB=[A,B]
+  if layer_norm:
+    AB.append(G)
   if transpose:
-    return list([a,b] for a,b in zip(A,B))
+    return list(list(ab) for ab in zip(*AB))
   else:
-    return [A,B]
+    return AB
 
 def init_layers_adam(*a,**kwa):
   w=init_layers(*a,**kwa)
@@ -230,16 +206,26 @@ def _steps(states,consts,X,Y,act):
   return scan(lambda s,xy:(upd(xy[0],xy[1],s,consts,act),0),states,(X,Y))[0]
 steps=jit(_steps,static_argnames=['act'])
 
-def _calc_thresh(w,tfpfn,X,Y,act,tol=1e-1):
+def _y_smooth_fp_fn(w,X,Y,act):
   yps=forward(w,X,act)
   Yp_smooth=yps.flatten()
   Yp=Yp_smooth>0.
   Ypb=Yp_smooth>0
-  return search_thresh(Y,Yp_smooth,tfpfn,tol),(Ypb&~Y).mean(),(Y&~Ypb).mean()
+  fp,fn=(Ypb&~Y).mean(),(Y&~Ypb).mean()
+  return Yp_smooth,fp,fn
+
+y_smooth_fp_fn=jit(_y_smooth_fp_fn,static_argnames=['act'])
+
+calc_fp_fn=lambda w,X,Y,act:y_smooth_fp_fn(w,X,Y,act)[1:]
+
+def _calc_thresh(w,tfpfn,X,Y,act,tol=1e-1):
+  Yp_smooth,fp,fn=y_smooth_fp_fn(w,X,Y,act)
+  return search_thresh(Y,Yp_smooth,tfpfn,tol),fp,fn
 
 calc_thresh=jit(vmap(_calc_thresh,(0,0,None,None,None),0),static_argnames=['act','tol'])
 
-def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,logf=None):
+def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
+               logf=None,adap_thresh=True,layer_norm=False):
   tfps=consts['tfp']
   tfns=consts['tfn']
   lrfpfns=consts['lrfpfn']
@@ -249,15 +235,19 @@ def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,l
   for epoch,k in enumerate(ks,1):
     X_b,Y_b=get_reshuffled(k,X,Y,n_batches,bs,last)
     states=steps(states,consts,X_b,Y_b,act)
-    thresh,fp,fn=calc_thresh(states['w'],tfpfns,X_raw,Y_raw,act)
-    states['w'][-1][1]-=thresh.reshape(-1,1)
+    if adap_thresh:
+      thresh,fp,fn=calc_thresh(states['w'],tfpfns,X_raw,Y_raw,act)
+      states['w'][-1][1]-=thresh.reshape(-1,1)
+    else:
+      fp,fn=calc_fp_fn(states['w'],X_raw,Y_raw,act)
     states['bet']*=set_bet(consts,fp,fn)
     print('nn epoch',epoch,file=logf)
   return states
 
 #_nn_epochs=jit(_nn_epochs,static_argnames=['n_epochs','n_batches','bs','last','act'])
 
-def nn_epochs(k,n_epochs,bs,X,Y,consts,states,X_raw=None,Y_raw=None,act='relu',logf=None):
+def nn_epochs(k,n_epochs,bs,X,Y,consts,states,X_raw=None,Y_raw=None,
+              act='relu',adap_thresh=True,logf=None,layer_norm=False):
   if X_raw is None:
     X_raw,Y_raw=X,Y
   if isinstance(act,str):
@@ -265,7 +255,8 @@ def nn_epochs(k,n_epochs,bs,X,Y,consts,states,X_raw=None,Y_raw=None,act='relu',l
   n_batches=len(X)//bs
   last=n_batches*bs
   ks=split(k,n_epochs)
-  return _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,logf=logf)
+  return _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
+                    logf=logf,layer_norm=layer_norm)
 
 def vectorise_fl_ls(x,l):
   if isinstance(x,list):
@@ -275,42 +266,66 @@ def vectorise_fl_ls(x,l):
   return x
 
 class NNPar:
-  def __init__(self,seed,p,tfp,tfn,p_resampled=None,lrfpfn=.03,reg=1e-6,mod_shape=None,
+  def __init__(self,seed,p,tfp,tfn,p_resampled=None,lrfpfn=.03,reg=1e-6,inner_dims=None,
                in_dim=None,bet=None,start_width=None,end_width=None,depth=None,bs=128,
                act='relu',init='glorot_normal',n_epochs=100,lr=1e-4,beta1=.9,beta2=.999,
-               eps=1e-8,bias=.1,acc=.1,min_tfpfn=1,max_tfpfn=100,logf=None):
+               eps=1e-8,bias=.1,acc=.1,min_tfpfn=1,max_tfpfn=100,logf=None,n_par=None,
+               adap_thresh=True,layer_norm=False):
     self.logf=logf
-    self.n_par=len(tfp)
     self.p=p
     self.p_resampled=p if p_resampled is None else p_resampled
     if bet is None:
       bet=((1-self.p_resampled)/self.p_resampled)**.5
-    self.bias=bias
-    self.mod_shape0=list(geomspace(start_width,end_width,depth+1,dtype=int))+[1] if\
-                         mod_shape is None else mod_shape
+    self.inner_dims=list(geomspace(start_width,end_width,depth+1,dtype=int)) if\
+                         inner_dims is None else inner_dims
     self.ke=KeyEmitter(seed)
-    lrfpfn,reg,lr,beta1,beta2,eps,tfp,tfn,self.bet=(vectorise_fl_ls(x,self.n_par) for x in\
-                                                    (lrfpfn,reg,lr,beta1,beta2,eps,tfp,tfn,bet))
-    self.tfp_actual=tfp
-    self.tfn_actual=tfn
-    self.bs=bs
-    self.init=init
+
     self.n_epochs=n_epochs
-    self.consts=dict(lrfpfn=lrfpfn,tfp=tfp*(1-self.p_resampled)/(1-self.p),tfn=tfn*self.p_resampled/self.p,
-                     beta1=beta1,beta2=beta2,lr=lr,reg=reg,eps=eps)
+    self.init=init
+    self.bias=bias
+    #consts
+    self.lrfpfn=lrfpfn
+    self.reg=reg
+    self.lr=lr
+    self.beta1=beta1
+    self.beta2=beta2
+    self.eps=eps
+    self.tfp=tfp
+    self.tfn=tfn
+    self.bs=bs
+    #states
+    self.bet=bet
     self.act=act
+    self.adap_thresh=adap_thresh
+    self.layer_norm=layer_norm
+
     self.states=None
+    self.consts=None
+    self.n_par=n_par
   
-  def init_states(self,in_dim):
-    if self.p_resampled:
-      self.states=dict(bet=self.bet,**init_layers_adam([in_dim]+self.mod_shape0,self.init,
-                                                       k=self.ke.emit_key(),n_par=self.n_par,bias=self.bias))
+  def get_states(self):
+    return self.states
+
+  def set_consts_states(self,in_dim):
+    self.in_dim=in_dim
+    self.mod_shape=[self.in_dim]+self.inner_dims+[1]
+    if self.consts is None:
+      consts=dict(lrfpfn=self.lrfpfn,tfp=self.tfp*(1-self.p_resampled)/(1-self.p),
+                  tfn=self.tfn*self.p_resampled/self.p,beta1=self.beta1,beta2=self.beta2,
+                  lr=self.lr,reg=self.reg,eps=self.eps)
+      if self.n_par is None:
+        self.n_par=max((len(x) if hasattr(x,'__len__') else 1 for x in consts.values()))
+      self.consts={k:vectorise_fl_ls(v,self.n_par) for k,v in consts.items()}
+    if self.states is None:
+      self.states=dict(bet=vectorise_fl_ls(self.bet,self.n_par),
+                       **init_layers_adam(self.mod_shape,self.init,k=self.ke.emit_key(),
+                                     n_par=self.n_par,bias=self.bias))
 
   def fit(self,X,Y,X_raw=None,Y_raw=None):
-    if not self.states:
-      self.init_states(X.shape[1])
+    self.set_consts_states(len(X[0]))
     self.states=nn_epochs(self.ke.emit_key(),self.n_epochs,self.bs,X,Y,self.consts,self.states,
-                          X_raw=X_raw,Y_raw=Y_raw,act=self.act,logf=self.logf)
+                          X_raw=X_raw,Y_raw=Y_raw,act=self.act,logf=self.logf,
+                          adap_thresh=self.adap_thresh)
 
   def predict(self,X):
     Yp=vorward(self.states['w'],X,activations[self.act])

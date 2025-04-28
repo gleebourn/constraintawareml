@@ -22,7 +22,7 @@ skl={'RandomForestRegressor':RandomForestRegressor,
      'HistGradientBoostingRegressor':HistGradientBoostingRegressor}
 
 class SKL:
-  def __init__(self,skm,tfpfn,ska,p,p_resampled,seed=None):
+  def __init__(self,skm,tfpfn,ska,p,seed=None):
     if isinstance(skm,str):
       skm=skl[skm]
     if not seed is None:
@@ -32,7 +32,6 @@ class SKL:
     self.tfpfn=tfpfn
     self.threshes=zeros(len(self.tfpfn))
     self.p=p
-    self.p_resampled=p_resampled
 
   def fit(self,X,Y,X_raw=None,Y_raw=None):
     if X_raw is None:

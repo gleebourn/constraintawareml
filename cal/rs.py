@@ -5,30 +5,35 @@ from imblearn.over_sampling import SMOTE,ADASYN
 from imblearn.under_sampling import NearMiss
 from numpy.random import default_rng
 
-resamplers={'SMOTETomek':SMOTETomek,'SMOTEENN':SMOTEENN,'SMOTE':SMOTE,
-            'ADASYN':ADASYN,'NearMiss':NearMiss}
+#class NullResampler:
+#  def __init__(self):
+#    pass
+#  def fit_resample(X,Y):
+#    return X,Y
+
+resamplers={'NearMiss':NearMiss,'SMOTEENN':SMOTEENN,
+            'ADASYN':ADASYN,'SMOTE':SMOTE,'SMOTETomek':SMOTETomek}#,'':NullResampler}
 class Resampler:
   def __init__(self,X,Y,pkl_dir,ds_name,seed,logf=None,p=None):
     self.logf=logf
     self.X={'':{l:X for l in Y} if not isinstance(X,dict) else X}
     self.Y={'':Y}
     self.pkl_dir=Path(pkl_dir)
-    self.current=''
     self.rng=default_rng(seed=seed)
     self.p={} if p is None else {'':p}
     self.ds_name=ds_name
 
-  def get_resampled(self,l):
-    return self.X[self.current][l],self.Y[self.current][l]
+  def get_resampled(self,l,resampler):
+    self.set_resampler(resampler)
+    return self.X[resampler][l],self.Y[resampler][l]
 
-  def get_p(self,l,resampler=None):
-    resampler=self.current if resampler is None else resampler
+  def get_p(self,l,resampler):
+    self.set_resampler(resampler)
     if not resampler in self.p:
       self.p[resampler]={l:Y.mean() for l,Y in self.Y[resampler].items()}
     return self.p[resampler][l]
 
   def set_resampler(self,resampler):
-    self.current=resampler
     if resampler in self.X:
       return
     pkl=self.pkl_dir/(self.ds_name+'_'+resampler+'.pkl')
