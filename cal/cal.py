@@ -178,7 +178,7 @@ class ModelEvaluation:
   
   def res_to_row(self,job,l,tfpfn):
     method,pmt,resampler=job
-    res=self.benchmarked[job]
+    res=self.benchmarked[job][l]
     ret=dict(method=method,resampler=resampler,cat_lab=l,p=self.p_trn[l],params=tup_to_dict(pmt))
     ret.update({k+lab:res[s][tfpfn][k] for k in ('fp','fn') for (lab,s) in\
                 (('_target','tgt'),('_train','trn'),('_test','tst'))})
