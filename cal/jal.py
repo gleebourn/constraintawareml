@@ -4,9 +4,10 @@ from jax.numpy import array,zeros,array,exp,ones,eye,sum as jsm,maximum
 from jax.nn import tanh,softmax
 from jax.random import uniform,normal,split,key,choice,permutation
 from jax.tree import map as jma
-from jax import grad,value_and_grad,jit,vmap
+from jax import grad,jit,vmap
 from jax.lax import scan,while_loop
 from jax.lax.linalg import svd
+from jax.scipy.special import xlogy
 
 class KeyEmitter:
   def __init__(self,seed=1729,parents=['main','vis']):
@@ -182,9 +183,9 @@ def search_thresh(y,yp_smooth,tfpfn,adapthresh_tol):
                           (*yp_min_max,1,0))[:2]
   return (thresh_range[0]+thresh_range[1])/2
 
-def _set_bet(consts,fp,fn):
+def _set_lw(consts,fp,fn):
   return exp(consts['lrfpfn']*(-fp/consts['tfp']+fn/consts['tfn']))
-set_bet=jit(vmap(_set_bet,(0,0,0),0))#,None
+set_lw=jit(vmap(_set_lw,(0,0,0),0))#,None
 
 def get_reshuffled(k,X_trn,Y_trn,n_batches,bs,last):
   X,Y=shuffle_xy(k,X_trn,Y_trn)
@@ -192,13 +193,17 @@ def get_reshuffled(k,X_trn,Y_trn,n_batches,bs,last):
 
 get_reshuffled=jit(get_reshuffled,static_argnames=['n_batches','bs','last'])
 
-def loss(w,x,y,bet,act):
+def loss(w,x,y,lw,act):
   yp=forward(w,x,act)
-  return jsm((bet*y+(1-y)/bet)*(1-2*y)*yp)
+  return jsm((lw*y+(1-y)/lw)*(1-2*y)*yp)
+
+def ce(w,x,y,lw,act):
+  yp=act(forward(w,x,act))
+  return jsm(xlogy(lw*y,yp)+xlogy((1-y)/lw,1-yp))
 
 dl=grad(loss)
 def _upd(x,y,state,consts,act):
-  return dict_adam_no_bias(dl(state['w'],x,y,state['bet'],act),state,consts)
+  return dict_adam_no_bias(dl(state['w'],x,y,state['lw'],act),state,consts)
 
 upd=vmap(_upd,(None,None,0,0,None),0)
 
@@ -240,7 +245,7 @@ def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
       states['w'][-1][1]-=thresh.reshape(-1,1)
     else:
       fp,fn=calc_fp_fn(states['w'],X_raw,Y_raw,act)
-    states['bet']*=set_bet(consts,fp,fn)
+    states['lw']*=set_lw(consts,fp,fn)
     print('nn epoch',epoch,file=logf)
   return states
 
@@ -267,15 +272,15 @@ def vectorise_fl_ls(x,l):
 
 class NNPar:
   def __init__(self,seed,p,tfp,tfn,p_resampled=None,lrfpfn=.03,reg=1e-6,inner_dims=None,
-               in_dim=None,bet=None,start_width=None,end_width=None,depth=None,bs=128,
+               in_dim=None,lw=None,start_width=None,end_width=None,depth=None,bs=128,
                act='relu',init='glorot_normal',n_epochs=100,lr=1e-4,beta1=.9,beta2=.999,
                eps=1e-8,bias=.1,acc=.1,min_tfpfn=1,max_tfpfn=100,logf=None,n_par=None,
                adap_thresh=True,layer_norm=False):
     self.logf=logf
     self.p=p
     self.p_resampled=p if p_resampled is None else p_resampled
-    if bet is None:
-      bet=((1-self.p_resampled)/self.p_resampled)**.5
+    if lw is None:
+      lw=((1-self.p_resampled)/self.p_resampled)**.5
     self.inner_dims=list(geomspace(start_width,end_width,depth+1,dtype=int)) if\
                          inner_dims is None else inner_dims
     self.ke=KeyEmitter(seed)
@@ -294,7 +299,7 @@ class NNPar:
     self.tfn=tfn
     self.bs=bs
     #states
-    self.bet=bet
+    self.lw=lw
     self.act=act
     self.adap_thresh=adap_thresh
     self.layer_norm=layer_norm
@@ -317,7 +322,7 @@ class NNPar:
         self.n_par=max((len(x) if hasattr(x,'__len__') else 1 for x in consts.values()))
       self.consts={k:vectorise_fl_ls(v,self.n_par) for k,v in consts.items()}
     if self.states is None:
-      self.states=dict(bet=vectorise_fl_ls(self.bet,self.n_par),
+      self.states=dict(lw=vectorise_fl_ls(self.lw,self.n_par),
                        **init_layers_adam(self.mod_shape,self.init,k=self.ke.emit_key(),
                                      n_par=self.n_par,bias=self.bias))
 

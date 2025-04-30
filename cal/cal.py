@@ -1,4 +1,4 @@
-from itertools import count
+from itertools import count,product
 from pathlib import Path
 from time import perf_counter
 from json import dump as jump
@@ -6,7 +6,6 @@ from numpy import array,geomspace
 from numpy.random import default_rng #Only used for deterministic routines
 from csv import reader,writer,DictWriter
 from cal.kal import SKL
-from cal.jal import NNPar
 from cal.rs import Resampler,resamplers
 from cal.dl import load_ds
 from cal.ts import TimeStepper
@@ -22,13 +21,13 @@ class ModelEvaluation:
                categorical=True,out_f=None,reload_prev=None,methods=['sk','nn'],
                params={'sk':[dict(max_depth=i,regressor=rg,
                                   **({'n_jobs':-1} if rg=='RandomForestRegressor' else {}))\
-                             for i in range(12,15,2) for rg in
-                             ('RandomForestRegressor','HistGradientBoostingRegressor')],
-                       'nn':[dict(lr_ad=la,reg=rl*la,lrfpfn=lf,bias=b,n_epochs=100,start_width=128,
-                                  end_width=32,depth=2,bs=128,act='relu',init='glorot_normal',
+                             for i,rg in product([14],('RandomForestRegressor',
+                                                       'HistGradientBoostingRegressor')),
+                       'nn':[dict(lr_ad=la,reg=rl*la,lrfpfn=lf,bias=b,n_epochs=100,start_width=sw,
+                                  end_width=ew,depth=3,bs=128,act='relu',init='glorot_normal',
                                   eps=1e-8,beta1=.9,beta2=.999,layer_norm=layer_norm)\
-                             for la in [.0001,.001] for rl in [1e-2] for lf in [.004,.005,.006]\
-                             for b in [-.1,0.,.1] for layer_norm in [True,False]]}):
+                             for la,rl,lf,b,layer_norm,sw,ew in\
+                             priduct([.001],[1e-2],[.005],[0.],[False],[128],[32])]}):
     if directory is None:
       directory='modeval_'+(ds if isinstance(ds,str) else 'cust')
     self.directory=Path(directory)
