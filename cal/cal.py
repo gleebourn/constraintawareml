@@ -19,15 +19,15 @@ def tup_to_dict(t):
 class ModelEvaluation:
   def __init__(self,directory=None,ds='unsw',seed=1729,lab_cat=True,sds=False,
                categorical=True,out_f=None,reload_prev=None,methods=['sk','nn'],
-               params={'sk':[dict(max_depth=i,regressor=rg,
+               params={'nn':[dict(lr_ad=la,reg=rl*la,lrfpfn=lf,bias=b,times=(10,20,40,80,160),start_width=sw,
+                                  end_width=ew,depth=3,bs=128,act='relu',init='glorot_normal',eps=1e-8,
+                                  beta1=.9,beta2=.999,layer_norm=layer_norm) for la,rl,lf,b,layer_norm,sw,ew in\
+                             product([.001],[1e-2],[.005],[0.],[False],[128],[32])],
+                       'sk':[dict(max_depth=i,regressor=rg,
                                   **({'n_jobs':-1} if rg=='RandomForestRegressor' else {}))\
-                             for i,rg in product([14],('RandomForestRegressor',
-                                                       'HistGradientBoostingRegressor')),
-                       'nn':[dict(lr_ad=la,reg=rl*la,lrfpfn=lf,bias=b,n_epochs=100,start_width=sw,
-                                  end_width=ew,depth=3,bs=128,act='relu',init='glorot_normal',
-                                  eps=1e-8,beta1=.9,beta2=.999,layer_norm=layer_norm)\
-                             for la,rl,lf,b,layer_norm,sw,ew in\
-                             priduct([.001],[1e-2],[.005],[0.],[False],[128],[32])]}):
+                             for i,rg in product([14],['RandomForestRegressor'])]
+                                                      #'HistGradientBoostingRegressor')),
+                       }):
     if directory is None:
       directory='modeval_'+(ds if isinstance(ds,str) else 'cust')
     self.directory=Path(directory)
@@ -40,7 +40,7 @@ class ModelEvaluation:
       
     self.res_dir=dir_n
     if not self.res_dir.exists():
-      self.res_dir.mkdir()
+      self.res_dir.mkdir(parents=True)
     self.res_fp=self.res_dir/'res.csv'
     self.header=[]
     self.logf=(self.res_dir/'modeval.log').open('w')
@@ -147,10 +147,11 @@ class ModelEvaluation:
         r={l:SKL(pm['regressor'],self.tfpfns[l],{k:v for k,v in pm.items() if k!='regressor'},
                  p,seed=self.seed()) for l,p in self.p_trn.items()}
       case 'nn':
+        from cal.jal import NNPar
         r={l:NNPar(self.seed(),p,self.tfps[l],self.tfns[l],p_resampled=self.rs.get_p(l,rs),init=pm['init'],
                    lrfpfn=pm['lrfpfn'],reg=pm['reg'],start_width=pm['start_width'],end_width=pm['end_width'],
                    depth=pm['depth'],lr=pm['lr_ad'],beta1=pm['beta1'],beta2=pm['beta2'],eps=pm['eps'],
-                   n_epochs=pm['n_epochs'],bias=pm['bias'],logf=self.logf,layer_norm=pm['layer_norm'])\
+                   times=pm['times'],bias=pm['bias'],logf=self.logf,layer_norm=pm['layer_norm'])\
            for l,p in self.p_trn.items()}
       case _:
         raise NotImplementedError('Method',method,'not found')
@@ -160,36 +161,44 @@ class ModelEvaluation:
     method,_,resampler=job
     self.rs.set_resampler(resampler)
     regressor=self.regressors[job]
-    res={}
+    self.benchmarked[job]={}
     for l,reg in regressor.items():
+      times=reg.times
       self.log('Training for label',l,'...')
-      r={'trn':{},'tst':{},'tgt':{targs[2]:dict(zip(('fp','fn','fpfn'),targs)) for targs in self.targets[l]}}
       reg.fit(*self.rs.get_resampled(l,resampler),X_raw=self.X_trn[l],Y_raw=self.Y_trn[l])
+      r={t:{'trn':{},'tst':{},'tgt':{targs[2]:dict(zip(('fp','fn','fpfn'),targs))\
+            for targs in self.targets[l]}} for t in times}
 
       for stage,X,Y in [('tst',self.X_tst[l],self.Y_tst[l]),('trn',self.X_trn[l],self.Y_trn[l])]:
         Yp=reg.predict(X)
-        fps=(Yp&~Y).mean(axis=1)
-        fns=((~Yp)&Y).mean(axis=1)
-        for tfpfn,fp,fn in zip(self.tfpfns[l],fps,fns):
-          r[stage][tfpfn]=dict(fp=fp,fn=fn,fpfn=fp/fn)
-      res[l]=r
-    self.benchmarked[job]=res
+        fps={t:(yp&~Y).mean(axis=1) for t,yp in Yp.items()}
+        fns={t:((~yp)&Y).mean(axis=1) for t,yp in Yp.items()}
+        for t in reg.times:
+          for tfpfn,fp,fn in zip(self.tfpfns[l],fps[t],fns[t]):
+            r[t][stage][tfpfn]=dict(fp=fp,fn=fn,fpfn=fp/fn)
+      for t in times:
+        self.benchmarked[job][t]=self.benchmarked[job].pop(t,{})
+        self.benchmarked[job][t][l]=r[t]
   
-  def res_to_row(self,job,l,tfpfn):
+  def res_to_rows(self,job,l,tfpfn):
     method,pmt,resampler=job
-    res=self.benchmarked[job][l]
-    ret=dict(method=method,resampler=resampler,cat_lab=l,p=self.p_trn[l],params=tup_to_dict(pmt))
-    ret.update({k+lab:res[s][tfpfn][k] for k in ('fp','fn') for (lab,s) in\
-                (('_target','tgt'),('_train','trn'),('_test','tst'))})
-    return ret
+    rows=[]
+    for t,bm_t in self.benchmarked[job].items():
+      res=bm_t[l]
+      row=dict(method=method,resampler=resampler,cat_lab=l,p=self.p_trn[l],
+               params={'TIME':t,**tup_to_dict(pmt)})
+      row.update({k+lab:res[s][tfpfn][k] for k in ('fp','fn') for (lab,s) in\
+                  (('_target','tgt'),('_train','trn'),('_test','tst'))})
+      rows.append(row)
+    return rows
 
   def update_results(self,jobs=None):
     to_update=self.benchmarked if jobs is None else {j for j in self.benchmarked if j in jobs}
 
     append_res=self.res_fp.exists()
     with self.res_fp.open('a' if append_res else 'w') as fd:
-      rows=[self.res_to_row(job,l,tfpfn) for job in to_update for\
-            l in self.p_trn for _,_,tfpfn in self.targets[l]]
+      rows=sum([self.res_to_rows(job,l,tfpfn) for job in to_update for\
+                l in self.p_trn for _,_,tfpfn in self.targets[l]],[])
       if not self.header:
         self.header=sorted(list(rows[0]),key=lambda s:s[::-1])
       w=DictWriter(fd,self.header,extrasaction='ignore')

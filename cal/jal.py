@@ -1,7 +1,7 @@
 from itertools import count
 from numpy import geomspace
 from jax.numpy import array,zeros,array,exp,ones,eye,sum as jsm,maximum
-from jax.nn import tanh,softmax
+from jax.nn import tanh,softmax,relu
 from jax.random import uniform,normal,split,key,choice,permutation
 from jax.tree import map as jma
 from jax import grad,jit,vmap
@@ -42,7 +42,7 @@ forward=jit(_forward,static_argnames=['act','layer_norm'])
 vorward=jit(vmap(_forward,(0,None,None),0),static_argnames=['act'])
 
 activations={'tanh':tanh,'softmax':softmax,'linear':jit(lambda x:x),
-             'relu':jit(lambda x:maximum(x,.03*x))}
+             'relul':jit(lambda x:maximum(x,.03*x)),'relu':relu}
 
 def select_initialisation(imp,act):
   if imp in ['fm','resnet']:
@@ -273,7 +273,7 @@ def vectorise_fl_ls(x,l):
 class NNPar:
   def __init__(self,seed,p,tfp,tfn,p_resampled=None,lrfpfn=.03,reg=1e-6,inner_dims=None,
                in_dim=None,lw=None,start_width=None,end_width=None,depth=None,bs=128,
-               act='relu',init='glorot_normal',n_epochs=100,lr=1e-4,beta1=.9,beta2=.999,
+               act='relu',init='glorot_normal',times=100,lr=1e-4,beta1=.9,beta2=.999,
                eps=1e-8,bias=.1,acc=.1,min_tfpfn=1,max_tfpfn=100,logf=None,n_par=None,
                adap_thresh=True,layer_norm=False):
     self.logf=logf
@@ -285,7 +285,7 @@ class NNPar:
                          inner_dims is None else inner_dims
     self.ke=KeyEmitter(seed)
 
-    self.n_epochs=n_epochs
+    self.times=(times,) if isinstance(times,int) else times #epochs when weights will be saved
     self.init=init
     self.bias=bias
     #consts
@@ -305,6 +305,7 @@ class NNPar:
     self.layer_norm=layer_norm
 
     self.states=None
+    self.states_by_epoch={}
     self.consts=None
     self.n_par=n_par
   
@@ -328,10 +329,17 @@ class NNPar:
 
   def fit(self,X,Y,X_raw=None,Y_raw=None):
     self.set_consts_states(len(X[0]))
-    self.states=nn_epochs(self.ke.emit_key(),self.n_epochs,self.bs,X,Y,self.consts,self.states,
-                          X_raw=X_raw,Y_raw=Y_raw,act=self.act,logf=self.logf,
-                          adap_thresh=self.adap_thresh)
+    nl=0
+    for n in sorted(self.times):
+      self.states=nn_epochs(self.ke.emit_key(),n-nl,self.bs,X,Y,self.consts,
+                            self.states,X_raw=X_raw,
+                            Y_raw=Y_raw,act=self.act,logf=self.logf,
+                            adap_thresh=self.adap_thresh)
+      self.states_by_epoch[n]=self.states
 
   def predict(self,X):
-    Yp=vorward(self.states['w'],X,activations[self.act])
+    return {t:self._predict_single(X,t) for t in self.times}
+
+  def _predict_single(self,X,t):
+    Yp=vorward(self.states_by_epoch[t]['w'],X,activations[self.act])
     return Yp.reshape(Yp.shape[:-1])>0

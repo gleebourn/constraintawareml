@@ -32,6 +32,7 @@ class SKL:
     self.tfpfn=tfpfn
     self.threshes=zeros(len(self.tfpfn))
     self.p=p
+    self.times=[1]
 
   def fit(self,X,Y,X_raw=None,Y_raw=None):
     if X_raw is None:
@@ -44,5 +45,6 @@ class SKL:
     return self.m.predict(X)
 
   def predict(self,X):
-    return self._smooth_predict(X)>self.threshes.reshape(-1,1)
+    Yp=self._smooth_predict(X)>self.threshes.reshape(-1,1)
+    return {1:Yp}
 
