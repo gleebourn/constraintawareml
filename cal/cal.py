@@ -25,7 +25,7 @@ class ModelEvaluation:
                                   beta1=.9,beta2=.999,layer_norm=layer_norm) for la,rl,lf,b,layer_norm,sw,ew in\
                              product([.001],[1e-2],[.005],[0.],[False],[128],[32])],
                        'sk':[dict(max_depth=i,regressor=rg,
-                                  **({'class_weight':{True:1.,False:1.}} if rg=='RandomForestClassifier'\
+                                  **({'class_weight':(1.,1.)} if rg=='RandomForestClassifier'\
                                      else {}),
                                   **({'n_jobs':-1} if rg=='RandomForestRegressor' else {}))\
                              for i,rg in product([14],['RandomForestRegressor','RandomForestClassifier',
@@ -176,11 +176,11 @@ class ModelEvaluation:
 
       for stage,X,Y in [('tst',self.X_tst[l],self.Y_tst[l]),('trn',self.X_trn[l],self.Y_trn[l])]:
         Yp=reg.predict(X)
-        Yp_smooth=reg.predict_smooth(X)
+        Yp_smooth=reg.predict_smooth(X) if reg.type=='regressor' else None
         job_str=stage+'_'+str(job)+'_'+l
         h=str(hash(job_str))
         with (self.smooth_preds_dir/'hashtab.csv').open('a') as fd:
-          fd.write(job_str+','+h+'\n')
+          fd.write(job_str+','+str(self.tfpfns[l])+','+h+'\n')
 
         with (self.smooth_preds_dir/(h+'.pkl')).open('wb') as fd:
           dump((Y,Yp,Yp_smooth),fd)
@@ -188,7 +188,7 @@ class ModelEvaluation:
         fns={t:((~yp)&Y).mean(axis=1) for t,yp in Yp.items()}
         for t in times:
           for tfpfn,fp,fn in zip(self.tfpfns[l],fps[t],fns[t]):
-            r[t][stage][tfpfn]=dict(fp=fp,fn=fn,fpfn=fp/fn)
+            r[t][stage][tfpfn]=dict(fp=fp,fn=fn)
       for t in times:
         self.benchmarked[job][t]=self.benchmarked[job].pop(t,{})
         self.benchmarked[job][t][l]=r[t]
@@ -205,12 +205,10 @@ class ModelEvaluation:
       rows.append(row)
     return rows
 
-  def update_results(self,jobs=None):
-    to_update=self.benchmarked if jobs is None else {j for j in self.benchmarked if j in jobs}
-
+  def update_results(self):
     append_res=self.res_fp.exists()
     with self.res_fp.open('a' if append_res else 'w') as fd:
-      rows=sum([self.res_to_rows(job,l,tfpfn) for job in to_update for\
+      rows=sum([self.res_to_rows(job,l,tfpfn) for job in self.benchmarked for\
                 l in self.p_trn for _,_,tfpfn in self.targets[l]],[])
       if not self.header:
         self.header=sorted(list(rows[0]),key=lambda s:s[::-1])

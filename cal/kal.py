@@ -1,5 +1,5 @@
 from sklearn.ensemble import RandomForestRegressor,HistGradientBoostingRegressor,RandomForestClassifier
-from numpy import zeros
+from numpy import zeros,concatenate
 
 def get_threshes(tfpfns,y,yp,p):
   ypy=sorted(zip(yp,y))
@@ -31,7 +31,7 @@ class SKL:
 
     if 'class_weight' in ska: #Can investigate different power law weightings
       clw=ska['class_weight']
-      skas=[{**ska,'class_weight':{True:p**-clw[True]*tpn,False:(1-p)**-clw[False]/tpn}} for tpn in tfpfn]
+      skas=[{**ska,'class_weight':{True:p**-clw[1]*tpn,False:(1-p)**-clw[0]/tpn}} for tpn in tfpfn]
       self.type='classifier'
       self.m=[skm(**ska) for ska in skas]
     else:

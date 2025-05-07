@@ -37,7 +37,6 @@ def _forward(w,x,act,layer_norm=False):
   y=x@abl[0]+abl[1]
   return y
 
-#forward=jit(_forward,static_argnames=['batchnorm','get_transform','ll_act','transpose','act'])
 forward=jit(_forward,static_argnames=['act','layer_norm'])
 vorward=jit(vmap(_forward,(0,None,None),0),static_argnames=['act'])
 
@@ -134,25 +133,6 @@ def ewma(a,b,rate):return (1-rate)*a+rate*b
 
 def ad_diff(m,v,eps):return m/(v**.5+eps)
 
-def ad_fpfn(w,mp,vp,mn,vn,eps,lr,pn):
-  return  w-lr*(ad_diff(mp,vp,eps)/pn+ad_diff(mn,vn,eps)*pn)
-
-@jit
-def upd_ad_fpfn(w,mp,vp,mn,vn,dfp,dfn,beta1,beta2,lr,pn,reg,eps):
-  mp=jma(lambda old,upd:ewma(upd,old,beta1),mp,dfp)
-  vp=jma(lambda old,upd:ewma(upd**2,old,beta2),vp,dfp)
-  mn=jma(lambda old,upd:ewma(upd,old,beta1),mn,dfn)
-  vn=jma(lambda old,upd:ewma(upd**2,old,beta2),vn,dfn)
-  w=jma(lambda x,mP,vP,mN,vN:(1-reg)*(x-ad_fpfn(x,mP,vP,mN,vN,eps,lr,pn)),w,mp,vp,mn,vn)
-  return w,mp,vp,mn,vn
-
-@jit
-def upd_adam(w,m,v,dw,beta1,beta2,lr,reg,eps):
-  m=jma(lambda old,upd:ewma(upd,old,beta1),m,dw)
-  v=jma(lambda old,upd:ewma(upd**2,old,beta2),v,dw)
-  w=jma(lambda W,M,V:(1-reg)*(W-lr*ad_diff(M,V,eps)),w,m,v)
-  return w,m,v
-
 def _upd_adam_no_bias(dw,w,m,v,t,beta1,beta2,lr,reg,eps):
   m=jma(lambda old,upd:ewma(upd,old,beta1),m,dw)
   v=jma(lambda old,upd:ewma(upd**2,old,beta2),v,dw)
@@ -196,10 +176,6 @@ get_reshuffled=jit(get_reshuffled,static_argnames=['n_batches','bs','last'])
 def loss(w,x,y,lw,act):
   yp=forward(w,x,act)
   return jsm((lw*y+(1-y)/lw)*(1-2*y)*yp)
-
-def ce(w,x,y,lw,act):
-  yp=act(forward(w,x,act))
-  return jsm(xlogy(lw*y,yp)+xlogy((1-y)/lw,1-yp))
 
 dl=grad(loss)
 def _upd(x,y,state,consts,act):
@@ -249,8 +225,6 @@ def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
     print('nn epoch',epoch,file=logf,flush=True)
   return states
 
-#_nn_epochs=jit(_nn_epochs,static_argnames=['n_epochs','n_batches','bs','last','act'])
-
 def nn_epochs(k,n_epochs,bs,X,Y,consts,states,X_raw=None,Y_raw=None,act='relu',
               adap_thresh=True,logf=None,layer_norm=False,start_epoch=1):
   if X_raw is None:
@@ -277,6 +251,7 @@ class NNPar:
                eps=1e-8,bias=.1,acc=.1,min_tfpfn=1,max_tfpfn=100,logf=None,n_par=None,
                adap_thresh=True,layer_norm=False):
     self.logf=logf
+    self.type='regressor'
     self.p=p
     self.p_resampled=p if p_resampled is None else p_resampled
     if lw is None:
@@ -325,7 +300,7 @@ class NNPar:
     if self.states is None:
       self.states=dict(lw=vectorise_fl_ls(self.lw,self.n_par),
                        **init_layers_adam(self.mod_shape,self.init,k=self.ke.emit_key(),
-                                     n_par=self.n_par,bias=self.bias))
+                                          n_par=self.n_par,bias=self.bias))
 
   def fit(self,X,Y,X_raw=None,Y_raw=None):
     self.set_consts_states(len(X[0]))

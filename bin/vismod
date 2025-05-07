@@ -1,0 +1,44 @@
+#!/usr/bin/env python
+from pathlib import Path
+from os.path import dirname,abspath
+from sys import path,argv
+path.append(dirname(dirname(abspath(__file__))))
+from csv import reader,writer
+from pandas import read_csv
+from pickle import load,dump
+from matplotlib.pyplot import plot,show,title,xlabel,ylabel
+if len(argv)!=4:
+  print('Usage:',argv[0],'HASHTAB CSV_DIR LAB')
+  exit(1)
+ht_p=Path(argv[1])
+csv_p=Path(argv[2])
+
+with ht_p.open('r') as fd:
+  ls=fd.readlines()
+  ls=[m.split(',') for m in ls if argv[3] in m]
+  deets={l[-1][:-1]:','.join(l[:-1]) for l in ls}
+
+fs=list(csv_p.iterdir())
+fs=[f for f in fs if argv[3] in f.stem]
+fs_spl=[f.stem.split('_') for f in fs]
+params={}
+res={}
+for f in [f for (f,f_spl) in zip(fs,fs_spl) if f_spl[0]==argv[3] and f_spl[-2]=='128']:
+  for k,v in deets.items():
+    if k in f.stem:
+      params[f]=v
+      break
+  if not f in params:
+    raise Exception('Hash not found!')
+  with f.open('r') as fd:
+    res[f]=list(reader(fd))
+
+for f,r in res.items():
+  fp,fn=zip(*r[1:])
+  fp=[float(x)for x in fp]
+  fn=[float(x)for x in fn]
+  plot(fp,fn)
+  xlabel('FP')
+  ylabel('FN')
+  title(f.stem)
+  show()
