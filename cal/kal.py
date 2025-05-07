@@ -1,4 +1,4 @@
-from sklearn.ensemble import RandomForestRegressor,HistGradientBoostingRegressor
+from sklearn.ensemble import RandomForestRegressor,HistGradientBoostingRegressor,RandomForestClassifier
 from numpy import zeros
 
 def get_threshes(tfpfns,y,yp,p):
@@ -19,7 +19,8 @@ def get_threshes(tfpfns,y,yp,p):
         break
 
 skl={'RandomForestRegressor':RandomForestRegressor,
-     'HistGradientBoostingRegressor':HistGradientBoostingRegressor}
+     'HistGradientBoostingRegressor':HistGradientBoostingRegressor,
+     'RandomForestClassifier':RandomForestClassifier}
 
 class SKL:
   def __init__(self,skm,tfpfn,ska,p,seed=None):
@@ -28,7 +29,14 @@ class SKL:
     if not seed is None:
       ska['random_state']=seed
 
-    self.m=skm(**ska)
+    if 'class_weight' in ska: #Can investigate different power law weightings
+      clw=ska['class_weight']
+      skas=[{**ska,'class_weight':{True:p**-clw[True]*tpn,False:(1-p)**-clw[False]/tpn}} for tpn in tfpfn]
+      self.type='classifier'
+      self.m=[skm(**ska) for ska in skas]
+    else:
+      self.type='regressor'
+      self.m=skm(**ska)
     self.tfpfn=tfpfn
     self.threshes=zeros(len(self.tfpfn))
     self.p=p
@@ -37,13 +45,20 @@ class SKL:
   def fit(self,X,Y,X_raw=None,Y_raw=None):
     if X_raw is None:
       X_raw,Y_raw=X,Y
-    self.m.fit(X,Y)
-    for tfpfn,thresh in get_threshes(self.tfpfn,Y_raw,self.predict_smooth(X_raw)[1],self.p):
-      self.threshes[self.tfpfn==tfpfn]=thresh
+    if self.type=='regressor':
+      self.m.fit(X,Y)
+      for tfpfn,thresh in get_threshes(self.tfpfn,Y_raw,self.predict_smooth(X_raw)[1],self.p):
+        self.threshes[self.tfpfn==tfpfn]=thresh
+    else:
+      [n.fit(X,Y) for n in self.m]
 
   def predict_smooth(self,X):
+    if self.type=='classifier': raise Exception('No smooth output if the underlying sk model is a classifier')
     return {1:self.m.predict(X)}
 
   def predict(self,X):
-    return {1:self.predict_smooth(X)[1]>self.threshes.reshape(-1,1)}
+    if self.type=='regressor':
+      return {1:self.predict_smooth(X)[1]>self.threshes.reshape(-1,1)}
+    else:
+      return {1:concatenate([n.predict(X).reshape(1,-1) for n in self.m])}
 

@@ -25,9 +25,11 @@ class ModelEvaluation:
                                   beta1=.9,beta2=.999,layer_norm=layer_norm) for la,rl,lf,b,layer_norm,sw,ew in\
                              product([.001],[1e-2],[.005],[0.],[False],[128],[32])],
                        'sk':[dict(max_depth=i,regressor=rg,
+                                  **({'class_weight':{True:1.,False:1.}} if rg=='RandomForestClassifier'\
+                                     else {}),
                                   **({'n_jobs':-1} if rg=='RandomForestRegressor' else {}))\
-                             for i,rg in product([14],['RandomForestRegressor'])]
-                                                      #'HistGradientBoostingRegressor')),
+                             for i,rg in product([14],['RandomForestRegressor','RandomForestClassifier',
+                                                       'HistGradientBoostingRegressor'])]
                        }):
     if directory is None:
       directory='modeval_'+(ds if isinstance(ds,str) else 'cust')

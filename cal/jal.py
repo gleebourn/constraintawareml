@@ -246,7 +246,7 @@ def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
     else:
       fp,fn=calc_fp_fn(states['w'],X_raw,Y_raw,act)
     states['lw']*=set_lw(consts,fp,fn)
-    print('nn epoch',epoch,file=logf)
+    print('nn epoch',epoch,file=logf,flush=True)
   return states
 
 #_nn_epochs=jit(_nn_epochs,static_argnames=['n_epochs','n_batches','bs','last','act'])
@@ -335,6 +335,7 @@ class NNPar:
                             self.states,X_raw=X_raw,start_epoch=n+1,
                             Y_raw=Y_raw,act=self.act,logf=self.logf,
                             adap_thresh=self.adap_thresh)
+      print('Saving state at time',n,file=self.logf,flush=True)
       self.states_by_epoch[n]=self.states
       nl=n
 
