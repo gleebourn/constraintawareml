@@ -9,6 +9,7 @@ from cal.kal import SKL
 from cal.rs import Resampler,resamplers
 from cal.dl import load_ds
 from cal.ts import TimeStepper
+from pickle import dump
 
 def dict_to_tup(d):
   return tuple(sorted(d.items()))
@@ -39,8 +40,8 @@ class ModelEvaluation:
       dir_n=self.directory.join_path(str(reload_prev))
       
     self.res_dir=dir_n
-    if not self.res_dir.exists():
-      self.res_dir.mkdir(parents=True)
+    self.smooth_preds_dir=self.res_dir/'smooth_preds'
+    self.smooth_preds_dir.mkdir(parents=True)
     self.res_fp=self.res_dir/'res.csv'
     self.header=[]
     self.logf=(self.res_dir/'modeval.log').open('w')
@@ -151,7 +152,8 @@ class ModelEvaluation:
         r={l:NNPar(self.seed(),p,self.tfps[l],self.tfns[l],p_resampled=self.rs.get_p(l,rs),init=pm['init'],
                    lrfpfn=pm['lrfpfn'],reg=pm['reg'],start_width=pm['start_width'],end_width=pm['end_width'],
                    depth=pm['depth'],lr=pm['lr_ad'],beta1=pm['beta1'],beta2=pm['beta2'],eps=pm['eps'],
-                   times=pm['times'],bias=pm['bias'],logf=self.logf,layer_norm=pm['layer_norm'])\
+                   times=pm['times'],bias=pm['bias'],logf=self.logf,layer_norm=pm['layer_norm'],
+                   adap_thresh=pm['adap_thresh'])\
            for l,p in self.p_trn.items()}
       case _:
         raise NotImplementedError('Method',method,'not found')
@@ -166,14 +168,23 @@ class ModelEvaluation:
       times=reg.times
       self.log('Training for label',l,'...')
       reg.fit(*self.rs.get_resampled(l,resampler),X_raw=self.X_trn[l],Y_raw=self.Y_trn[l])
+      self.log('...completed training for label',l,'...')
       r={t:{'trn':{},'tst':{},'tgt':{targs[2]:dict(zip(('fp','fn','fpfn'),targs))\
             for targs in self.targets[l]}} for t in times}
 
       for stage,X,Y in [('tst',self.X_tst[l],self.Y_tst[l]),('trn',self.X_trn[l],self.Y_trn[l])]:
         Yp=reg.predict(X)
+        Yp_smooth=reg.predict_smooth(X)
+        job_str=stage+'_'+str(job)+'_'+l
+        h=str(hash(job_str))
+        with (self.smooth_preds_dir/'hashtab.csv').open('a') as fd:
+          fd.write(job_str+','+h+'\n')
+
+        with (self.smooth_preds_dir/(h+'.pkl')).open('wb') as fd:
+          dump((Y,Yp,Yp_smooth),fd)
         fps={t:(yp&~Y).mean(axis=1) for t,yp in Yp.items()}
         fns={t:((~yp)&Y).mean(axis=1) for t,yp in Yp.items()}
-        for t in reg.times:
+        for t in times:
           for tfpfn,fp,fn in zip(self.tfpfns[l],fps[t],fns[t]):
             r[t][stage][tfpfn]=dict(fp=fp,fn=fn,fpfn=fp/fn)
       for t in times:
@@ -186,7 +197,7 @@ class ModelEvaluation:
     for t,bm_t in self.benchmarked[job].items():
       res=bm_t[l]
       row=dict(method=method,resampler=resampler,cat_lab=l,p=self.p_trn[l],
-               params={'TIME':t,**tup_to_dict(pmt)})
+               params=tup_to_dict(pmt),time=t)
       row.update({k+lab:res[s][tfpfn][k] for k in ('fp','fn') for (lab,s) in\
                   (('_target','tgt'),('_train','trn'),('_test','tst'))})
       rows.append(row)

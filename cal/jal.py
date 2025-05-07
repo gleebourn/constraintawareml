@@ -230,14 +230,14 @@ def _calc_thresh(w,tfpfn,X,Y,act,tol=1e-1):
 calc_thresh=jit(vmap(_calc_thresh,(0,0,None,None,None),0),static_argnames=['act','tol'])
 
 def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
-               logf=None,adap_thresh=True,layer_norm=False):
+               logf=None,adap_thresh=True,layer_norm=False,start_epoch=1):
   tfps=consts['tfp']
   tfns=consts['tfn']
   lrfpfns=consts['lrfpfn']
   lrs=consts['lr']
   regs=consts['reg']
   tfpfns=tfps/tfns
-  for epoch,k in enumerate(ks,1):
+  for epoch,k in enumerate(ks,start_epoch):
     X_b,Y_b=get_reshuffled(k,X,Y,n_batches,bs,last)
     states=steps(states,consts,X_b,Y_b,act)
     if adap_thresh:
@@ -251,8 +251,8 @@ def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
 
 #_nn_epochs=jit(_nn_epochs,static_argnames=['n_epochs','n_batches','bs','last','act'])
 
-def nn_epochs(k,n_epochs,bs,X,Y,consts,states,X_raw=None,Y_raw=None,
-              act='relu',adap_thresh=True,logf=None,layer_norm=False):
+def nn_epochs(k,n_epochs,bs,X,Y,consts,states,X_raw=None,Y_raw=None,act='relu',
+              adap_thresh=True,logf=None,layer_norm=False,start_epoch=1):
   if X_raw is None:
     X_raw,Y_raw=X,Y
   if isinstance(act,str):
@@ -261,7 +261,7 @@ def nn_epochs(k,n_epochs,bs,X,Y,consts,states,X_raw=None,Y_raw=None,
   last=n_batches*bs
   ks=split(k,n_epochs)
   return _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
-                    logf=logf,layer_norm=layer_norm)
+                    logf=logf,layer_norm=layer_norm,start_epoch=start_epoch)
 
 def vectorise_fl_ls(x,l):
   if isinstance(x,list):
@@ -332,14 +332,15 @@ class NNPar:
     nl=0
     for n in sorted(self.times):
       self.states=nn_epochs(self.ke.emit_key(),n-nl,self.bs,X,Y,self.consts,
-                            self.states,X_raw=X_raw,
+                            self.states,X_raw=X_raw,start_epoch=n+1,
                             Y_raw=Y_raw,act=self.act,logf=self.logf,
                             adap_thresh=self.adap_thresh)
       self.states_by_epoch[n]=self.states
+      nl=n
 
   def predict(self,X):
-    return {t:self._predict_single(X,t) for t in self.times}
+    return {t:v>0 for t,v in self.predict_smooth(X).items()}
 
-  def _predict_single(self,X,t):
-    Yp=vorward(self.states_by_epoch[t]['w'],X,activations[self.act])
-    return Yp.reshape(Yp.shape[:-1])>0
+  def predict_smooth(self,X):
+    Yp={t:vorward(self.states_by_epoch[t]['w'],X,activations[self.act]) for t in self.times}
+    return {t:y.reshape(y.shape[:-1]) for t,y in Yp.items()}

@@ -1,0 +1,96 @@
+\documentclass{beamer}
+\usepackage{amsmath}
+\title{Constraint awareness for binary classification}
+\subtitle{sample}
+\begin{document}
+\begin{frame}
+\titlepage
+\end{frame}
+
+\section{Setup and motivation}
+\begin{frame}
+\frametitle{Setup}
+\begin{itemize}
+\item
+Focus on offline, supervised setting (though methods discussed may come into their own in an online setting where thresholding of a model needs to be conducted ``on the fly'')
+\item
+Fix a labelled dataset $(X,Y)$ with $n$ rows $X_i\in\mathbb R^d$ and $Y_i\in\{\pm\}$, which we assume to be drawn iid from some fixed distribution, which is then split randomly into train and test datasets for validation purposes,
+$$
+\{1,\cdots,n\}=\texttt{TRAIN}\sqcup\texttt{TEST},
+$$
+Where typically the data may be split 70:30, ie $\frac{\#\texttt{TRAIN}}{n}\approx.7$.
+\item
+Write $x$ and $y$ for samples drawn from this distribution which we wish to learn, and write $0<p=\mathbb P(y=+)<1$ for the \textbf{imbalance}, ie the probability that a randomly drawn sample belongs to the positive class.
+\item
+Focus on highly imbalanced datasets, ie cases where $p\ll1$. 
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{``Traditional'' approach - no constraint awareness during training}
+\begin{itemize}
+\item
+Typically such a classifier $f$ is found by training a regression model which outputs continuous values $g:\mathbb R^d\rightarrow \mathbb R$, then defining $f$ by choosing a threshold $\alpha\in\mathbb R$, so that
+$$
+f(x)=\begin{cases}+\text{ if }f(x)>\alpha\text{ and}\\-\text{ otherwise.}\end{cases}
+$$
+\item
+$g$ is trained to minimise a loss which represents how far predictions are from the target, for example
+\begin{gather*}
+\widehat{\mathbb E}(|g(x)-y|^2)=\tfrac1n\sum_{i\in\texttt{TEST}} |g(X_i)-Y_i|^2,\text{ or, if }g(X_i)\in(0,1),\\
+\widehat{\texttt{BCE}}(g)=\tfrac1{2n}\sum_{i\in\texttt{TEST}}\left((1+Y_i)\log(1-g(X_i))+(1-Y_i)\log(g(X_i))\right).
+\end{gather*}
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Integrating a constraint into training}
+\begin{itemize}
+\item
+Idea: $g$ is trained with no regard for any requirements we may wish to impose on the \textbf{false positive} and \textbf{false negative} rates
+\begin{align*}
+\texttt{FP}=\mathbb P(f(x)=+|y=-)\text{ and }\texttt{FN}=\mathbb P(f(x)=-|y=+).
+\end{align*}
+\item
+Therefore, we seek to train a classifier
+$$
+f:\mathbb R^d\rightarrow \{\pm 1\}
+$$
+in a way which aims for some constraint on the false positive and false negative rates $C(\texttt{FP},\texttt{FN})<0$ at the training stage.
+\item
+Example: malicious communication detection per UC2, where typically $p\ll 1$ and false positives may be far more tolerable and have less serious consequences than false negatives.
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{...But are we learning likelihoods?}
+\begin{itemize}
+\item
+Consider the case where $g$ takes values in $[0,1]$, so that the threshold is to be chosen from $(0,1)$.
+\item
+A model is said to be \textbf{perfectly calibrated} if $\mathbb P(y=+|g(x)=t)=t$ for any $t\in[0,1]$.
+In this case, the output of the model can be understood as a probability that the label belongs to the positive class.
+\item
+This can be measured using the test set, for example by checking that over small intervals $[t-\delta,t+\delta]$ we have
+$$
+\frac{\#\{i\in\texttt{TEST}: |g(X_i)-t|<\delta\text{ and }Y_i=+\}}{\#\{i\in\texttt{TEST}: |g(X_i)-t|<\delta\}}\approx t.
+$$
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{...But are we learning likelihoods? Continued}
+\begin{itemize}
+\item
+One should bear in mind that being well calibrated is no measure of the predictive abilities of a model!
+Note that if $g(x)=p$ for all values of $x$, then the model is perfectly calibrated but useless for classification.
+\item
+If $g$ is not perfectly calibrated, then it is often still possible to rescale its values $\tilde g(x)=h(g(x))$ such that $\tilde g$ is ``close'' to being perfectly calibrated.
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{A criterion for the benefits of constraint aware binary classification}
+\begin{itemize}
+\item
+Idea: if we are able to find a good calibration $\tilde g$ of a model $g$, then the model has effectively learned likelihoods.
+\item
+In this case, we should be skeptical of the idea that we benefitted from a ``constraint aware'' training process, since we can still choose a threshold to meet any desired compromise between the false positive and false negative rates
+\end{itemize}
+\end{frame}
+\end{document}

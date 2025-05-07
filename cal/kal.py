@@ -38,13 +38,12 @@ class SKL:
     if X_raw is None:
       X_raw,Y_raw=X,Y
     self.m.fit(X,Y)
-    for tfpfn,thresh in get_threshes(self.tfpfn,Y_raw,self._smooth_predict(X_raw),self.p):
+    for tfpfn,thresh in get_threshes(self.tfpfn,Y_raw,self.predict_smooth(X_raw)[1],self.p):
       self.threshes[self.tfpfn==tfpfn]=thresh
 
-  def _smooth_predict(self,X):
-    return self.m.predict(X)
+  def predict_smooth(self,X):
+    return {1:self.m.predict(X)}
 
   def predict(self,X):
-    Yp=self._smooth_predict(X)>self.threshes.reshape(-1,1)
-    return {1:Yp}
+    return {1:self.predict_smooth(X)[1]>self.threshes.reshape(-1,1)}
 

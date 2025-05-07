@@ -14,6 +14,9 @@
 *.out
 *.pdf
 *.json
+*.nav
+*.snm
+*.toc
 *_report
 b/*
 doc/snippets/*
