@@ -3,42 +3,35 @@ from pathlib import Path
 from os.path import dirname,abspath
 from sys import path,argv
 path.append(dirname(dirname(abspath(__file__))))
-from csv import reader,writer
+from csv import DictReader
 from pandas import read_csv
 from pickle import load,dump
-from matplotlib.pyplot import plot,show,title,xlabel,ylabel
-if len(argv)!=4:
-  print('Usage:',argv[0],'HASHTAB CSV_DIR LAB')
+from matplotlib.pyplot import plot,show,title,xlabel,ylabel,legend,ioff,xscale,yscale
+ioff()
+if len(argv)<4:
+  print('Usage:',argv[0],'PRED_DIR LAB trn|tst [RESAMPLER]')
   exit(1)
-ht_p=Path(argv[1])
-csv_p=Path(argv[2])
+pred_p=Path(argv[1])
+ht_p=pred_p/'hashtab.csv'
+rs=argv[4] if len(argv)==5 else ''
 
 with ht_p.open('r') as fd:
-  ls=fd.readlines()
-  ls=[m.split(',') for m in ls if argv[3] in m]
-  deets={l[-1][:-1]:','.join(l[:-1]) for l in ls}
+  ls=list(DictReader(fd))
 
-fs=list(csv_p.iterdir())
-fs=[f for f in fs if argv[3] in f.stem]
-fs_spl=[f.stem.split('_') for f in fs]
-params={}
-res={}
-for f in [f for (f,f_spl) in zip(fs,fs_spl) if f_spl[0]==argv[3] and f_spl[-2]=='128']:
-  for k,v in deets.items():
-    if k in f.stem:
-      params[f]=v
-      break
-  if not f in params:
-    raise Exception('Hash not found!')
-  with f.open('r') as fd:
-    res[f]=list(reader(fd))
-
-for f,r in res.items():
-  fp,fn=zip(*r[1:])
-  fp=[float(x)for x in fp]
-  fn=[float(x)for x in fn]
-  plot(fp,fn)
+fs=[f for f in pred_p.iterdir() if argv[2] in f.stem and argv[3] in f.stem]
+for h,p in [(l['hash'],l['params']) for l in ls if l['lab_cat']==argv[2] and\
+            l['stage']==argv[3] and l['params'].split("'")[-2]==rs]:
+  for tfp,tfn,f in sorted([(*(float(t) for t in f.stem.split('_')[2:4]),f)\
+      for f in fs if h in f.stem],key=lambda x:-x[0]):
+    with f.open('r') as fd:
+      res=list(DictReader(fd))
+    fps=[float(r['fp']) for r in res]
+    fns=[float(r['fn']) for r in res]
+    plot(fps,fns,label='tfp,tfn='+str(tfp)+','+str(tfn))
   xlabel('FP')
   ylabel('FN')
-  title(f.stem)
+  xscale('log')
+  yscale('log')
+  legend()
+  title(p)
   show()

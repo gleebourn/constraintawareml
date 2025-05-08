@@ -307,7 +307,7 @@ class NNPar:
     nl=0
     for n in sorted(self.times):
       self.states=nn_epochs(self.ke.emit_key(),n-nl,self.bs,X,Y,self.consts,
-                            self.states,X_raw=X_raw,start_epoch=n+1,
+                            self.states,X_raw=X_raw,start_epoch=nl+1,
                             Y_raw=Y_raw,act=self.act,logf=self.logf,
                             adap_thresh=self.adap_thresh)
       print('Saving state at time',n,file=self.logf,flush=True)

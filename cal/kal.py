@@ -1,4 +1,5 @@
 from sklearn.ensemble import RandomForestRegressor,HistGradientBoostingRegressor,RandomForestClassifier
+from sklearn.svm import NuSVC
 from numpy import zeros,concatenate
 
 def get_threshes(tfpfns,y,yp,p):
@@ -18,9 +19,8 @@ def get_threshes(tfpfns,y,yp,p):
       if not tfpfns:
         break
 
-skl={'RandomForestRegressor':RandomForestRegressor,
-     'HistGradientBoostingRegressor':HistGradientBoostingRegressor,
-     'RandomForestClassifier':RandomForestClassifier}
+skl={'RandomForestRegressor':RandomForestRegressor,'RandomForestClassifier':RandomForestClassifier,
+     'HistGradientBoostingRegressor':HistGradientBoostingRegressor,'NuSVC':NuSVC}
 
 class SKL:
   def __init__(self,skm,tfpfn,ska,p,seed=None):

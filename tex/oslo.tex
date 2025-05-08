@@ -60,37 +60,45 @@ Example: malicious communication detection per UC2, where typically $p\ll 1$ and
 \end{itemize}
 \end{frame}
 \begin{frame}
-\frametitle{...But are we learning likelihoods?}
+\frametitle{Is resampling beneficial?}
 \begin{itemize}
 \item
-Consider the case where $g$ takes values in $[0,1]$, so that the threshold is to be chosen from $(0,1)$.
-\item
-A model is said to be \textbf{perfectly calibrated} if $\mathbb P(y=+|g(x)=t)=t$ for any $t\in[0,1]$.
-In this case, the output of the model can be understood as a probability that the label belongs to the positive class.
-\item
-This can be measured using the test set, for example by checking that over small intervals $[t-\delta,t+\delta]$ we have
-$$
-\frac{\#\{i\in\texttt{TEST}: |g(X_i)-t|<\delta\text{ and }Y_i=+\}}{\#\{i\in\texttt{TEST}: |g(X_i)-t|<\delta\}}\approx t.
-$$
+No evidence of this for unsw-nb15: at best, such techniques achieve comparable results
 \end{itemize}
 \end{frame}
-\begin{frame}
-\frametitle{...But are we learning likelihoods? Continued}
-\begin{itemize}
-\item
-One should bear in mind that being well calibrated is no measure of the predictive abilities of a model!
-Note that if $g(x)=p$ for all values of $x$, then the model is perfectly calibrated but useless for classification.
-\item
-If $g$ is not perfectly calibrated, then it is often still possible to rescale its values $\tilde g(x)=h(g(x))$ such that $\tilde g$ is ``close'' to being perfectly calibrated.
-\end{itemize}
-\end{frame}
-\begin{frame}
-\frametitle{A criterion for the benefits of constraint aware binary classification}
-\begin{itemize}
-\item
-Idea: if we are able to find a good calibration $\tilde g$ of a model $g$, then the model has effectively learned likelihoods.
-\item
-In this case, we should be skeptical of the idea that we benefitted from a ``constraint aware'' training process, since we can still choose a threshold to meet any desired compromise between the false positive and false negative rates
-\end{itemize}
-\end{frame}
+%\begin{frame}
+%\end{itemize}
+%\frametitle{...But are we learning likelihoods?}
+%\begin{itemize}
+%\item
+%Consider the case where $g$ takes values in $[0,1]$, so that the threshold is to be chosen from $(0,1)$.
+%\item
+%A model is said to be \textbf{perfectly calibrated} if $\mathbb P(y=+|g(x)=t)=t$ for any $t\in[0,1]$.
+%In this case, the output of the model can be understood as a probability that the label belongs to the positive class.
+%\item
+%This can be measured using the test set, for example by checking that over small intervals $[t-\delta,t+\delta]$ we have
+%$$
+%\frac{\#\{i\in\texttt{TEST}: |g(X_i)-t|<\delta\text{ and }Y_i=+\}}{\#\{i\in\texttt{TEST}: |g(X_i)-t|<\delta\}}\approx t.
+%$$
+%\end{itemize}
+%\end{frame}
+%\begin{frame}
+%\frametitle{...But are we learning likelihoods? Continued}
+%\begin{itemize}
+%\item
+%One should bear in mind that being well calibrated is no measure of the predictive abilities of a model!
+%Note that if $g(x)=p$ for all values of $x$, then the model is perfectly calibrated but useless for classification.
+%\item
+%If $g$ is not perfectly calibrated, then it is often still possible to rescale its values $\tilde g(x)=h(g(x))$ such that $\tilde g$ is ``close'' to being perfectly calibrated.
+%\end{itemize}
+%\end{frame}
+%\begin{frame}
+%\frametitle{A criterion for the benefits of constraint aware binary classification}
+%\begin{itemize}
+%\item
+%Idea: if we are able to find a good calibration $\tilde g$ of a model $g$, then the model has effectively learned likelihoods.
+%\item
+%In this case, we should be skeptical of the idea that we benefitted from a ``constraint aware'' training process, since we can still choose a threshold to meet any desired compromise between the false positive and false negative rates
+%\end{itemize}
+%\end{frame}
 \end{document}

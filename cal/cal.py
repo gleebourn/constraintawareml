@@ -2,8 +2,8 @@ from itertools import count,product
 from pathlib import Path
 from time import perf_counter
 from json import dump as jump
-from numpy import array,geomspace
-from numpy.random import default_rng #Only used for deterministic routines
+from numpy import array,geomspace,linspace
+from numpy.random import default_rng
 from csv import reader,writer,DictWriter
 from cal.kal import SKL
 from cal.rs import Resampler,resamplers
@@ -18,7 +18,7 @@ def tup_to_dict(t):
   return {k:v for k,v in t}
 
 class ModelEvaluation:
-  def __init__(self,directory=None,ds='unsw',seed=1729,lab_cat=True,sds=False,
+  def __init__(self,directory=None,ds='unsw',seed=1729,lab_cat=True,sds=False,fpfn_curve_n_points=None,
                categorical=True,out_f=None,reload_prev=None,methods=['sk','nn'],
                params={'nn':[dict(lr_ad=la,reg=rl*la,lrfpfn=lf,bias=b,times=(10,20,40,80,160),start_width=sw,
                                   end_width=ew,depth=3,bs=128,act='relu',init='glorot_normal',eps=1e-8,
@@ -41,9 +41,11 @@ class ModelEvaluation:
     else:
       dir_n=self.directory.join_path(str(reload_prev))
       
+    self.fpfn_curve_n_points=fpfn_curve_n_points
     self.res_dir=dir_n
     self.smooth_preds_dir=self.res_dir/'smooth_preds'
     self.smooth_preds_dir.mkdir(parents=True)
+    self.ht_p=self.smooth_preds_dir/'hashtab.csv'
     self.res_fp=self.res_dir/'res.csv'
     self.header=[]
     self.logf=(self.res_dir/'modeval.log').open('w')
@@ -147,7 +149,7 @@ class ModelEvaluation:
     pm=tup_to_dict(pmt)
     match method:
       case 'sk':
-        r={l:SKL(pm['regressor'],self.tfpfns[l],{k:v for k,v in pm.items() if k!='regressor'},
+        r={l:SKL(pm['regressor'],self.tfpns[l],{k:v for k,v in pm.items() if k!='regressor'},
                  p,seed=self.seed()) for l,p in self.p_trn.items()}
       case 'nn':
         from cal.jal import NNPar
@@ -175,15 +177,31 @@ class ModelEvaluation:
             for targs in self.targets[l]}} for t in times}
 
       for stage,X,Y in [('tst',self.X_tst[l],self.Y_tst[l]),('trn',self.X_trn[l],self.Y_trn[l])]:
+        if self.fpfn_curve_n_points and reg.type=='regressor':
+          self.log('Finding points for the fp fn curve...')
+          Yp_smooth=reg.predict_smooth(X)
+          job_str=stage+'_'+str(job)+'_'+l
+          h=str(hash(job_str))
+          append_ht=self.ht_p.exists()
+          with self.ht_p.open('a') as fd:
+            w=writer(fd)
+            if not append_ht:
+              w.writerow(['params','stage','lab_cat','hash'])
+            w.writerow([job_str,stage,l,h])
+          for t,Yp_t in Yp_smooth.items():
+            for i,(tfp,tfn,_) in enumerate(self.targets[l]):
+              yp=Yp_t[i]
+              with (self.smooth_preds_dir/(l+'_'+stage+'_'+str(tfp)+'_'+str(tfn)+'_'+str(t)+'_'+h+'.csv')).\
+                   open('w') as fd:
+                w=writer(fd)
+                w.writerow(['fp','fn'])
+                mn=yp.min()
+                mx=yp.max()
+                threshes=linspace(yp.min(),yp.max(),self.fpfn_curve_n_points)
+                for th in threshes:
+                  yp_b=yp>th
+                  w.writerow([(yp_b&~Y).mean(),(Y&~yp_b).mean()])
         Yp=reg.predict(X)
-        Yp_smooth=reg.predict_smooth(X) if reg.type=='regressor' else None
-        job_str=stage+'_'+str(job)+'_'+l
-        h=str(hash(job_str))
-        with (self.smooth_preds_dir/'hashtab.csv').open('a') as fd:
-          fd.write(job_str+','+str(self.tfpfns[l])+','+h+'\n')
-
-        with (self.smooth_preds_dir/(h+'.pkl')).open('wb') as fd:
-          dump((Y,Yp,Yp_smooth),fd)
         fps={t:(yp&~Y).mean(axis=1) for t,yp in Yp.items()}
         fns={t:((~yp)&Y).mean(axis=1) for t,yp in Yp.items()}
         for t in times:
