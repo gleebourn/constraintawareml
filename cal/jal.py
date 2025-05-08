@@ -8,6 +8,7 @@ from jax import grad,jit,vmap
 from jax.lax import scan,while_loop
 from jax.lax.linalg import svd
 from jax.scipy.special import xlogy
+from cal.mt import MultiTrainerRegressor
 
 class KeyEmitter:
   def __init__(self,seed=1729,parents=['main','vis']):
@@ -244,14 +245,14 @@ def vectorise_fl_ls(x,l):
     return ones(l)*x 
   return x
 
-class NNPar:
+class NNPar(MultiTrainer):
   def __init__(self,seed,p,tfp,tfn,p_resampled=None,lrfpfn=.03,reg=1e-6,inner_dims=None,
                in_dim=None,lw=None,start_width=None,end_width=None,depth=None,bs=128,
                act='relu',init='glorot_normal',times=100,lr=1e-4,beta1=.9,beta2=.999,
                eps=1e-8,bias=.1,acc=.1,min_tfpfn=1,max_tfpfn=100,logf=None,n_par=None,
                adap_thresh=True,layer_norm=False):
+    super().__init__()
     self.logf=logf
-    self.type='regressor'
     self.p=p
     self.p_resampled=p if p_resampled is None else p_resampled
     if lw is None:

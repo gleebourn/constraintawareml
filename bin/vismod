@@ -25,8 +25,8 @@ for h,p in [(l['hash'],l['params']) for l in ls if l['lab_cat']==argv[2] and\
       for f in fs if h in f.stem],key=lambda x:-x[0]):
     with f.open('r') as fd:
       res=list(DictReader(fd))
-    fps=[float(r['fp']) for r in res]
-    fns=[float(r['fn']) for r in res]
+    fps=[float(r['fp']) for r in res[1:-1]]
+    fns=[float(r['fn']) for r in res[1:-1]]
     plot(fps,fns,label='tfp,tfn='+str(tfp)+','+str(tfn))
   xlabel('FP')
   ylabel('FN')

@@ -1,6 +1,7 @@
 from sklearn.ensemble import RandomForestRegressor,HistGradientBoostingRegressor,RandomForestClassifier
 from sklearn.svm import NuSVC
 from numpy import zeros,concatenate
+from cal.mt import MultiTrainer
 
 def get_threshes(tfpfns,y,yp,p):
   ypy=sorted(zip(yp,y))
@@ -22,8 +23,9 @@ def get_threshes(tfpfns,y,yp,p):
 skl={'RandomForestRegressor':RandomForestRegressor,'RandomForestClassifier':RandomForestClassifier,
      'HistGradientBoostingRegressor':HistGradientBoostingRegressor,'NuSVC':NuSVC}
 
-class SKL:
+class SKL(MultiTrainer):
   def __init__(self,skm,tfpfn,ska,p,seed=None):
+    super().__init__('regressor' if 'Regressor' in skm else 'classifier')
     if isinstance(skm,str):
       skm=skl[skm]
     if not seed is None:
@@ -32,10 +34,8 @@ class SKL:
     if 'class_weight' in ska: #Can investigate different power law weightings
       clw=ska['class_weight']
       skas=[{**ska,'class_weight':{True:p**-clw[1]*tpn,False:(1-p)**-clw[0]/tpn}} for tpn in tfpfn]
-      self.type='classifier'
       self.m=[skm(**ska) for ska in skas]
     else:
-      self.type='regressor'
       self.m=skm(**ska)
     self.tfpfn=tfpfn
     self.threshes=zeros(len(self.tfpfn))

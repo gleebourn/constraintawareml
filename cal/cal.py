@@ -6,10 +6,11 @@ from numpy import array,geomspace,linspace
 from numpy.random import default_rng
 from csv import reader,writer,DictWriter
 from cal.kal import SKL
-from cal.rs import Resampler,resamplers
+from cal.rs import Resampler,resamplers_list
 from cal.dl import load_ds
 from cal.ts import TimeStepper
 from pickle import dump
+
 
 def dict_to_tup(d):
   return tuple(sorted(d.items()))
@@ -19,7 +20,7 @@ def tup_to_dict(t):
 
 class ModelEvaluation:
   def __init__(self,directory=None,ds='unsw',seed=1729,lab_cat=True,sds=False,fpfn_curve_n_points=None,
-               categorical=True,out_f=None,reload_prev=None,methods=['sk','nn'],
+               categorical=True,out_f=None,reload_prev=None,methods=['sk','nn'],logf=None,
                params={'nn':[dict(lr_ad=la,reg=rl*la,lrfpfn=lf,bias=b,times=(10,20,40,80,160),start_width=sw,
                                   end_width=ew,depth=3,bs=128,act='relu',init='glorot_normal',eps=1e-8,
                                   beta1=.9,beta2=.999,layer_norm=layer_norm) for la,rl,lf,b,layer_norm,sw,ew in\
@@ -48,7 +49,7 @@ class ModelEvaluation:
     self.ht_p=self.smooth_preds_dir/'hashtab.csv'
     self.res_fp=self.res_dir/'res.csv'
     self.header=[]
-    self.logf=(self.res_dir/'modeval.log').open('w')
+    self.logf=(self.res_dir/'modeval.log').open('w') if logf is None else logf
     self.parent_seed=seed
     self.rs_seeds={}
     self.rng=default_rng(seed)
@@ -104,7 +105,7 @@ class ModelEvaluation:
     self.tfpfns={l:array([t[2] for t in v]) for l,v in self.targets.items()}
     self.n_targets=n_targets
 
-  def define_jobs(self,methods=['nn','sk'],resamplers=list(resamplers)+[''],params=None):
+  def define_jobs(self,methods=['nn','sk'],resamplers=resamplers_list,params=None):
     if params is None:
       params=self.params
     for m in methods:
@@ -149,7 +150,7 @@ class ModelEvaluation:
     pm=tup_to_dict(pmt)
     match method:
       case 'sk':
-        r={l:SKL(pm['regressor'],self.tfpns[l],{k:v for k,v in pm.items() if k!='regressor'},
+        r={l:SKL(pm['regressor'],self.tfpfns[l],{k:v for k,v in pm.items() if k!='regressor'},
                  p,seed=self.seed()) for l,p in self.p_trn.items()}
       case 'nn':
         from cal.jal import NNPar
@@ -178,16 +179,16 @@ class ModelEvaluation:
 
       for stage,X,Y in [('tst',self.X_tst[l],self.Y_tst[l]),('trn',self.X_trn[l],self.Y_trn[l])]:
         if self.fpfn_curve_n_points and reg.type=='regressor':
-          self.log('Finding points for the fp fn curve...')
+          self.log('Finding points for the fp fn, stage:',stage,'...')
           Yp_smooth=reg.predict_smooth(X)
           job_str=stage+'_'+str(job)+'_'+l
           h=str(hash(job_str))
           append_ht=self.ht_p.exists()
           with self.ht_p.open('a') as fd:
-            w=writer(fd)
+            w=DictWriter(fd,['params','stage','lab_cat','p_trn','hash'])
             if not append_ht:
-              w.writerow(['params','stage','lab_cat','hash'])
-            w.writerow([job_str,stage,l,h])
+              w.writeheader()
+            w.writerow(dict(params=job_str,stage=stage,lab_cat=l,p_trn=self.p_trn[l],hash=h))
           for t,Yp_t in Yp_smooth.items():
             for i,(tfp,tfn,_) in enumerate(self.targets[l]):
               yp=Yp_t[i]

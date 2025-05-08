@@ -60,10 +60,23 @@ Example: malicious communication detection per UC2, where typically $p\ll 1$ and
 \end{itemize}
 \end{frame}
 \begin{frame}
+\frametitle{Experimental setup}
+\begin{itemize}
+\item
+A python class was developed to benchmark classification algorithms over a range of possible false positive and false negative targets
+\item
+$\texttt{ModelEvaluation}$ provides an interface for comparison of multiple classification algorithms
+\item 
+In order to benchmark binary classification performance over a range of problems, a dataset with greater than two classes may be provided: models are then trained to distinguish one class from many.
+\item
+$\texttt{ModelEvaluation}$ instantiates $\texttt{MultiTrainer}$s, each of which trains models with fixed hyperparameters but with varying end times, class labels and target error rates.
+\end{itemize}
+\end{frame}
+\begin{frame}
 \frametitle{Is resampling beneficial?}
 \begin{itemize}
 \item
-No evidence of this for unsw-nb15: at best, such techniques achieve comparable results
+No evidence of this for unsw-nb15: at best, such techniques achieve comparable results.
 \end{itemize}
 \end{frame}
 %\begin{frame}

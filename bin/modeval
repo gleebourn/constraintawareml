@@ -35,13 +35,13 @@ from itertools import product
 params={'nn':[dict(lr_ad=1e-3,reg=1e-5,lrfpfn=5e-3,bias=0.,times=(128,),#(1,2,4,8,16,32,64,128),
                    start_width=sw,end_width=ew,depth=d,bs=128,act='relu',adap_thresh=adt,
                    init='glorot_normal',eps=1e-8,beta1=.9,beta2=.999,layer_norm=False)\
-              for sw,ew,d,adt in product([128],[32],[4],[True,False])],
-        'sk':[dict(max_depth=i,regressor=rg,
-                   **({'class_weight':{True:1.,False:1.}} if\
-                      rg in ['RandomForestClassifier','NuSVC'] else {}))\
-                   **({'n_jobs':-1} if rg=='RandomForestRegressor' else {}))\
-              for i,rg in product([14],['RandomForestRegressor',#'HistGradientBoostingRegressor',
-                                        'RandomForestClassifier','NuSVC'])]}
+                       for sw,ew,d,adt in product([128],[32],[4],[True,False])],'sk':[]}
+        #'sk':[dict(max_depth=i,regressor=rg,
+        #           **({'class_weight':{True:1.,False:1.}} if\
+        #              rg in ['RandomForestClassifier','NuSVC'] else {}))\
+        #           **({'n_jobs':-1} if rg=='RandomForestRegressor' else {}))\
+        #      for i,rg in product([14],['RandomForestRegressor',#'HistGradientBoostingRegressor',
+        #                                'RandomForestClassifier','NuSVC'])]}
 
 m=ModelEvaluation(ds=argv[1],lab_cat=argv[1]=='unsw',params=params,fpfn_curve_n_points=1000)
 m.set_targets()

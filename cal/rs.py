@@ -13,6 +13,9 @@ from numpy.random import default_rng
 
 resamplers={'NearMiss':NearMiss,'SMOTEENN':SMOTEENN,
             'ADASYN':ADASYN,'SMOTE':SMOTE,'SMOTETomek':SMOTETomek}#,'':NullResampler}
+
+resamplers_list=list(resamplers)+['']
+
 class Resampler:
   def __init__(self,X,Y,pkl_dir,ds_name,seed,logf=None,p=None):
     self.logf=logf
@@ -41,6 +44,7 @@ class Resampler:
       with pkl.open('rb') as fd:
         self.X[resampler],self.Y[resampler]=load(fd)
     else:
+      print('Resampling data with method',resampler,'...',file=self.logf)
       kwa={'random_state':self.rng.integers(2**32)}
       self.X[resampler]={}
       self.Y[resampler]={}
