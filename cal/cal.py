@@ -4,16 +4,21 @@ from time import perf_counter
 from json import dump as jump
 from numpy import array,geomspace,linspace
 from numpy.random import default_rng
-from csv import reader,writer,DictWriter
+from csv import DictReader,DictWriter
 from cal.kal import SKL
 from cal.rs import Resampler,resamplers_list
 from cal.dl import load_ds
 from cal.ts import TimeStepper
 from pickle import dump
+from subprocess import run
+from struct import unpack
+from base64 import decodebytes
 
+#no p hacking by seed selection
+seed=unpack('i',run(['git','rev-parse','HEAD'],capture_output=True).stdout[:4])[0]
 
-def res_hashes_params(directory,lab,stage,resampler,resampler=''):
-  pred_p=Path(directory)
+def fpfn_curve_by_target(directory,lab,stage,resampler=''):
+  pred_p=Path(directory)/'smooth_preds'
   ht_p=pred_p/'hashtab.csv'
   with ht_p.open('r') as fd:
     ls=list(DictReader(fd))
@@ -25,8 +30,8 @@ def res_hashes_params(directory,lab,stage,resampler,resampler=''):
         for f in fs if h in f.stem],key=lambda x:-x[0]):
       with f.open('r') as fd:
         res=list(DictReader(fd))
-      ret[tfp,tfn]=array([float(r['fp']) for r in res[1:-1]]),
-                   array([float(r['fn']) for r in res[1:-1]])
+      ret[tfp,tfn]=array([float(r['fp']) for r in res[1:-1]]),array([float(r['fn']) for r in res[1:-1]])
+  return ret
 
 def dict_to_tup(d):
   return tuple(sorted(d.items()))
@@ -35,7 +40,7 @@ def tup_to_dict(t):
   return {k:v for k,v in t}
 
 class ModelEvaluation:
-  def __init__(self,directory=None,ds='unsw',seed=1729,lab_cat=True,sds=False,fpfn_curve_n_points=None,
+  def __init__(self,directory=None,ds='unsw',seed=seed,lab_cat=True,sds=False,fpfn_curve_n_points=None,
                categorical=True,out_f=None,reload_prev=None,methods=['sk','nn'],logf=None,
                params={'nn':[dict(lr_ad=la,reg=rl*la,lrfpfn=lf,bias=b,times=(10,20,40,80,160),start_width=sw,
                                   end_width=ew,depth=3,bs=128,act='relu',init='glorot_normal',eps=1e-8,
@@ -167,7 +172,7 @@ class ModelEvaluation:
     match method:
       case 'sk':
         r={l:SKL(pm['regressor'],self.tfpfns[l],{k:v for k,v in pm.items() if k!='regressor'},
-                 p,seed=self.seed()) for l,p in self.p_trn.items()}
+                 p,self.seed()) for l,p in self.p_trn.items()}
       case 'nn':
         from cal.jal import NNPar
         r={l:NNPar(self.seed(),p,self.tfps[l],self.tfns[l],p_resampled=self.rs.get_p(l,rs),init=pm['init'],
@@ -210,14 +215,14 @@ class ModelEvaluation:
               yp=Yp_t[i]
               with (self.smooth_preds_dir/(l+'_'+stage+'_'+str(tfp)+'_'+str(tfn)+'_'+str(t)+'_'+h+'.csv')).\
                    open('w') as fd:
-                w=writer(fd)
-                w.writerow(['fp','fn'])
+                w=DictWriter(fd,['fp','fn'])
+                w.writeheader()
                 mn=yp.min()
                 mx=yp.max()
                 threshes=linspace(yp.min(),yp.max(),self.fpfn_curve_n_points)
                 for th in threshes:
                   yp_b=yp>th
-                  w.writerow([(yp_b&~Y).mean(),(Y&~yp_b).mean()])
+                  w.writerow({'fp':(yp_b&~Y).mean(),'fn':(Y&~yp_b).mean()})
         Yp=reg.predict(X)
         fps={t:(yp&~Y).mean(axis=1) for t,yp in Yp.items()}
         fns={t:((~yp)&Y).mean(axis=1) for t,yp in Yp.items()}

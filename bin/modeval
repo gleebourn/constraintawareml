@@ -4,14 +4,28 @@ from os.path import dirname,abspath
 from sys import path,argv
 path.append(dirname(dirname(abspath(__file__))))
 from cal.cal import ModelEvaluation
+from cal.kal import skp
+from cal.rs import resamplers_list
 from itertools import product
-#from argparse import ArgumentParser
-
-#ds=argv[1]
-#if len(argv)>2:
-#  kwa={'methods':[argv[2]]}
-#else:
-#  kwa={}
+from argparse import ArgumentParser
+ap=ArgumentParser()
+ap.add_argument('-nn_times',type=int,nargs='+',default=[128])
+ap.add_argument('-nn_start_widths',type=int,nargs='+',default=[64])
+ap.add_argument('-nn_end_widths',type=int,nargs='+',default=[32])
+ap.add_argument('-nn_depths',type=int,nargs='+',default=[4])
+ap.add_argument('-nn_epoch_correct_thresh',type=bool,nargs='+',default=[False])
+ap.add_argument('-sk_depths',type=int,nargs='+',default=[14])
+ap.add_argument('-sk_models',type=str,nargs='+',default=['RandomForestRegressor'],choices=list(skp))
+ap.add_argument('-resamplers',type=str,nargs='+',default=['none'],
+                choices=['none']+[rs for rs in resamplers_list if rs])
+ap.add_argument('-dataset',type=str,default='unsw')
+ap.add_argument('-labelled_categories',type=bool,default=True)
+ap.add_argument('-fpfn_curve_n_points',type=int,default=1000)
+ap.add_argument('-nn',type=lambda s:s=='True',default=True)
+ap.add_argument('-sk',type=lambda s:s=='True',default=True)
+ap=ap.parse_args()
+ap.nn_times=tuple(ap.nn_times)
+ap.resamplers=['' if rs=='none' else rs for rs in ap.resamplers]
 
 #params={'nn':[dict(lr_ad=la,reg=rl*la,lrfpfn=lf,bias=b,n_epochs=100,start_width=sw,
 #                   end_width=ew,depth=3,bs=128,act='relu',init='glorot_normal',
@@ -32,18 +46,16 @@ from itertools import product
 #        'sk':[dict(max_depth=i,regressor='RandomForestClassifier',
 #                   class_weight=(1,1),n_jobs=-1) for i in [12,14]]}
 
-params={'nn':[dict(lr_ad=1e-3,reg=1e-5,lrfpfn=5e-3,bias=0.,times=(128,),#(1,2,4,8,16,32,64,128),
+params={'nn':[dict(lr_ad=1e-3,reg=1e-5,lrfpfn=5e-3,bias=0.,times=ap.nn_times,
                    start_width=sw,end_width=ew,depth=d,bs=128,act='relu',adap_thresh=adt,
                    init='glorot_normal',eps=1e-8,beta1=.9,beta2=.999,layer_norm=False)\
-                       for sw,ew,d,adt in product([128],[32],[4],[True,False])],'sk':[]}
-        #'sk':[dict(max_depth=i,regressor=rg,
-        #           **({'class_weight':{True:1.,False:1.}} if\
-        #              rg in ['RandomForestClassifier','NuSVC'] else {}))\
-        #           **({'n_jobs':-1} if rg=='RandomForestRegressor' else {}))\
-        #      for i,rg in product([14],['RandomForestRegressor',#'HistGradientBoostingRegressor',
-        #                                'RandomForestClassifier','NuSVC'])]}
+                       for sw,ew,d,adt in product(ap.nn_start_widths,ap.nn_end_widths,ap.nn_depths,
+                                                  ap.nn_epoch_correct_thresh)] if ap.nn else [],
+        'sk':[dict(max_depth=depth,regressor=rg,**sk_exargs) for depth,(rg,sk_exargs) in\
+              product(ap.sk_depths,[(k,skp[k]) for k in ap.sk_models])] if ap.sk else []}
 
-m=ModelEvaluation(ds=argv[1],lab_cat=argv[1]=='unsw',params=params,fpfn_curve_n_points=1000)
+m=ModelEvaluation(ds=ap.dataset,lab_cat=ap.labelled_categories,params=params,
+                  fpfn_curve_n_points=ap.fpfn_curve_n_points)
 m.set_targets()
-m.define_jobs()
+m.define_jobs(resamplers=ap.resamplers)
 m.run_jobs()

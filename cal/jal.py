@@ -8,10 +8,10 @@ from jax import grad,jit,vmap
 from jax.lax import scan,while_loop
 from jax.lax.linalg import svd
 from jax.scipy.special import xlogy
-from cal.mt import MultiTrainerRegressor
+from cal.mt import MultiTrainer
 
 class KeyEmitter:
-  def __init__(self,seed=1729,parents=['main','vis']):
+  def __init__(self,seed,parents=['main','vis']):
     if isinstance(parents,dict):
       self.parents=parents
     else:

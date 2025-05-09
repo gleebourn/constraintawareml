@@ -1,5 +1,5 @@
 from sklearn.ensemble import RandomForestRegressor,HistGradientBoostingRegressor,RandomForestClassifier
-from sklearn.svm import NuSVC
+from sklearn.svm import SVC
 from numpy import zeros,concatenate
 from cal.mt import MultiTrainer
 
@@ -20,16 +20,20 @@ def get_threshes(tfpfns,y,yp,p):
       if not tfpfns:
         break
 
-skl={'RandomForestRegressor':RandomForestRegressor,'RandomForestClassifier':RandomForestClassifier,
-     'HistGradientBoostingRegressor':HistGradientBoostingRegressor,'NuSVC':NuSVC}
+sk_spec={'RandomForestRegressor':(RandomForestRegressor,{'n_jobs':-1}),
+         'RandomForestClassifier':(RandomForestClassifier,{'class_weight':(1,1)}),
+         'HistGradientBoostingRegressor':(HistGradientBoostingRegressor,{'n_jobs':-1}),
+         'SVC':(SVC,{'kernel':'poly','class_weight':(1,1)})}
+
+skl={k:v[0] for k,v in sk_spec.items()}
+skp={k:v[1] for k,v in sk_spec.items()}
 
 class SKL(MultiTrainer):
-  def __init__(self,skm,tfpfn,ska,p,seed=None):
+  def __init__(self,skm,tfpfn,ska,p,seed):
     super().__init__('regressor' if 'Regressor' in skm else 'classifier')
     if isinstance(skm,str):
       skm=skl[skm]
-    if not seed is None:
-      ska['random_state']=seed
+    ska['random_state']=seed
 
     if 'class_weight' in ska: #Can investigate different power law weightings
       clw=ska['class_weight']
