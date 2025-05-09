@@ -12,6 +12,22 @@ from cal.ts import TimeStepper
 from pickle import dump
 
 
+def res_hashes_params(directory,lab,stage,resampler,resampler=''):
+  pred_p=Path(directory)
+  ht_p=pred_p/'hashtab.csv'
+  with ht_p.open('r') as fd:
+    ls=list(DictReader(fd))
+  fs=[f for f in pred_p.iterdir() if lab in f.stem and stage in f.stem]
+  ret={}
+  for h,p in [(l['hash'],l['params']) for l in ls if l['lab_cat']==lab and\
+              l['stage']==stage and l['params'].split("'")[-2]==resampler]:
+    for tfp,tfn,f in sorted([(*(float(t) for t in f.stem.split('_')[2:4]),f)\
+        for f in fs if h in f.stem],key=lambda x:-x[0]):
+      with f.open('r') as fd:
+        res=list(DictReader(fd))
+      ret[tfp,tfn]=array([float(r['fp']) for r in res[1:-1]]),
+                   array([float(r['fn']) for r in res[1:-1]])
+
 def dict_to_tup(d):
   return tuple(sorted(d.items()))
 
