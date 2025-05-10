@@ -1,68 +1,52 @@
-from sklearn.ensemble import RandomForestRegressor,HistGradientBoostingRegressor,RandomForestClassifier
-from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestRegressor,HistGradientBoostingRegressor
+from sklearn.svm import SVR
 from numpy import zeros,concatenate
 from cal.mt import MultiTrainer
 
-def get_threshes(tfpfns,y,yp,p):
+def get_cutoffs(tfpfns,y,yp,p):
   ypy=sorted(zip(yp,y))
   tfpfns=sorted(tfpfns)
   delta_p=1/len(ypy)
   fp=1-p
   fn=0
-  for thresh,y in ypy:
+  for cutoff,y in ypy:
     if y:
       fn+=delta_p
     else:
       fp-=delta_p
     if fp<tfpfns[-1]*fn:
-      yield tfpfns[-1],thresh
+      yield tfpfns[-1],cutoff
       tfpfns=tfpfns[:-1]
       if not tfpfns:
         break
 
 sk_spec={'RandomForestRegressor':(RandomForestRegressor,{'n_jobs':-1}),
-         'RandomForestClassifier':(RandomForestClassifier,{'class_weight':(1,1)}),
          'HistGradientBoostingRegressor':(HistGradientBoostingRegressor,{'n_jobs':-1}),
-         'SVC':(SVC,{'kernel':'poly','class_weight':(1,1)})}
+         'SVR':(SVR,{'kernel':'poly'})}
 
 skl={k:v[0] for k,v in sk_spec.items()}
 skp={k:v[1] for k,v in sk_spec.items()}
 
 class SKL(MultiTrainer):
   def __init__(self,skm,tfpfn,ska,p,seed):
-    super().__init__('regressor' if 'Regressor' in skm else 'classifier')
+    super().__init__()
     if isinstance(skm,str):
       skm=skl[skm]
     ska['random_state']=seed
-
-    if 'class_weight' in ska: #Can investigate different power law weightings
-      clw=ska['class_weight']
-      skas=[{**ska,'class_weight':{True:p**-clw[1]*tpn,False:(1-p)**-clw[0]/tpn}} for tpn in tfpfn]
-      self.m=[skm(**ska) for ska in skas]
-    else:
-      self.m=skm(**ska)
+    self.m=skm(**ska)
     self.tfpfn=tfpfn
-    self.threshes=zeros(len(self.tfpfn))
+    self.cutoffs=.5
     self.p=p
     self.times=[1]
 
   def fit(self,X,Y,X_raw=None,Y_raw=None):
     if X_raw is None:
       X_raw,Y_raw=X,Y
-    if self.type=='regressor':
-      self.m.fit(X,Y)
-      for tfpfn,thresh in get_threshes(self.tfpfn,Y_raw,self.predict_smooth(X_raw)[1],self.p):
-        self.threshes[self.tfpfn==tfpfn]=thresh
-    else:
-      [n.fit(X,Y) for n in self.m]
+    self.m.fit(X,Y)
+    cutoff=zeros(len(self.tfpfn))
+    for tfpfn,co in get_cutoffs(self.tfpfn,Y_raw,self.predict_smooth(X_raw)[1],self.p):
+      cutoff[self.tfpfn==tfpfn]=co
+    self.cutoff=cutoff.reshape(-1,1)
 
   def predict_smooth(self,X):
-    if self.type=='classifier': raise Exception('No smooth output if the underlying sk model is a classifier')
     return {1:self.m.predict(X)}
-
-  def predict(self,X):
-    if self.type=='regressor':
-      return {1:self.predict_smooth(X)[1]>self.threshes.reshape(-1,1)}
-    else:
-      return {1:concatenate([n.predict(X).reshape(1,-1) for n in self.m])}
-

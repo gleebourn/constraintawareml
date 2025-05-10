@@ -26,11 +26,12 @@ def fpfn_curve_by_target(directory,lab,stage,resampler=''):
   ret={}
   for h,p in [(l['hash'],l['params']) for l in ls if l['lab_cat']==lab and\
               l['stage']==stage and l['params'].split("'")[-2]==resampler]:
+    ret[p]={}
     for tfp,tfn,f in sorted([(*(float(t) for t in f.stem.split('_')[2:4]),f)\
         for f in fs if h in f.stem],key=lambda x:-x[0]):
       with f.open('r') as fd:
         res=list(DictReader(fd))
-      ret[tfp,tfn]=array([float(r['fp']) for r in res[1:-1]]),array([float(r['fn']) for r in res[1:-1]])
+      ret[p][tfp,tfn]=array([float(r['fp']) for r in res[1:-1]]),array([float(r['fn']) for r in res[1:-1]])
   return ret
 
 def dict_to_tup(d):
@@ -41,7 +42,7 @@ def tup_to_dict(t):
 
 class ModelEvaluation:
   def __init__(self,directory=None,ds='unsw',seed=seed,lab_cat=True,sds=False,fpfn_curve_n_points=None,
-               categorical=True,out_f=None,reload_prev=None,methods=['sk','nn'],logf=None,
+               categorical=True,reload_prev=None,methods=['sk','nn'],logf=None,
                params={'nn':[dict(lr_ad=la,reg=rl*la,lrfpfn=lf,bias=b,times=(10,20,40,80,160),start_width=sw,
                                   end_width=ew,depth=3,bs=128,act='relu',init='glorot_normal',eps=1e-8,
                                   beta1=.9,beta2=.999,layer_norm=layer_norm) for la,rl,lf,b,layer_norm,sw,ew in\
@@ -103,6 +104,9 @@ class ModelEvaluation:
     self.methods=[]
     self.resamplers=set()
     self.jobs=set()
+
+  def fpfn_curve_by_target(self,lab,stage,resampler=''):
+    return fpfn_curve_by_target(self.res_dir,lab,stage,resampler=resampler)
   
   def log(self,*a):
     print(*a,file=self.logf,flush=True)
@@ -158,7 +162,7 @@ class ModelEvaluation:
       self.rm_job(job)
       self.log(self.n_complete,'experiments completed with',self.n_remaining,'to go...')
     self.log('Completed all jobs!')
-    return
+    return self.res_dir
 
   def rm_job(self,job):
     self.regressors.pop(job)
@@ -179,7 +183,7 @@ class ModelEvaluation:
                    lrfpfn=pm['lrfpfn'],reg=pm['reg'],start_width=pm['start_width'],end_width=pm['end_width'],
                    depth=pm['depth'],lr=pm['lr_ad'],beta1=pm['beta1'],beta2=pm['beta2'],eps=pm['eps'],
                    times=pm['times'],bias=pm['bias'],logf=self.logf,layer_norm=pm['layer_norm'],
-                   adap_thresh=pm['adap_thresh'])\
+                   adap_cutoff=pm['adap_cutoff'])\
            for l,p in self.p_trn.items()}
       case _:
         raise NotImplementedError('Method',method,'not found')
@@ -199,30 +203,32 @@ class ModelEvaluation:
             for targs in self.targets[l]}} for t in times}
 
       for stage,X,Y in [('tst',self.X_tst[l],self.Y_tst[l]),('trn',self.X_trn[l],self.Y_trn[l])]:
-        if self.fpfn_curve_n_points and reg.type=='regressor':
-          self.log('Finding points for the fp fn, stage:',stage,'...')
-          Yp_smooth=reg.predict_smooth(X)
-          job_str=stage+'_'+str(job)+'_'+l
-          h=str(hash(job_str))
-          append_ht=self.ht_p.exists()
-          with self.ht_p.open('a') as fd:
-            w=DictWriter(fd,['params','stage','lab_cat','p_trn','hash'])
-            if not append_ht:
+        self.log('Finding points for the fp fn, stage:',stage,'...')
+        Yp_smooth=reg.predict_smooth(X)
+        job_str=stage+'_'+str(job)+'_'+l
+        h=str(hash(job_str))
+        append_ht=self.ht_p.exists()
+        with self.ht_p.open('a') as fd:
+          w=DictWriter(fd,['params','stage','lab_cat','p_trn','hash'])
+          if not append_ht:
+            w.writeheader()
+          w.writerow(dict(params=job_str,stage=stage,lab_cat=l,p_trn=self.p_trn[l],hash=h))
+        for t,Yp_t in Yp_smooth.items():
+          if len(Yp_t.shape)==1:#if this regressor only ran one model for all targets
+            targs=[(0,0,0)]
+            Yps_current=[Yp_t]
+          else:
+            targs=self.targets[l]
+            Yps_current=Yp_t
+          for yp,(tfp,tfn,_) in zip(Yps_current,targs):
+            with (self.smooth_preds_dir/(l+'_'+stage+'_'+str(tfp)+'_'+str(tfn)+'_'+str(t)+'_'+h+'.csv')).\
+                 open('w') as fd:
+              w=DictWriter(fd,['fp','fn'])
               w.writeheader()
-            w.writerow(dict(params=job_str,stage=stage,lab_cat=l,p_trn=self.p_trn[l],hash=h))
-          for t,Yp_t in Yp_smooth.items():
-            for i,(tfp,tfn,_) in enumerate(self.targets[l]):
-              yp=Yp_t[i]
-              with (self.smooth_preds_dir/(l+'_'+stage+'_'+str(tfp)+'_'+str(tfn)+'_'+str(t)+'_'+h+'.csv')).\
-                   open('w') as fd:
-                w=DictWriter(fd,['fp','fn'])
-                w.writeheader()
-                mn=yp.min()
-                mx=yp.max()
-                threshes=linspace(yp.min(),yp.max(),self.fpfn_curve_n_points)
-                for th in threshes:
-                  yp_b=yp>th
-                  w.writerow({'fp':(yp_b&~Y).mean(),'fn':(Y&~yp_b).mean()})
+              cutoffs=linspace(yp.min(),yp.max(),num=self.fpfn_curve_n_points)
+              for th in cutoffs:
+                yp_b=yp>th
+                w.writerow({'fp':(yp_b&~Y).mean(),'fn':(Y&~yp_b).mean()})
         Yp=reg.predict(X)
         fps={t:(yp&~Y).mean(axis=1) for t,yp in Yp.items()}
         fns={t:((~yp)&Y).mean(axis=1) for t,yp in Yp.items()}

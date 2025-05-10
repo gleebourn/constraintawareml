@@ -1,5 +1,49 @@
 \documentclass{beamer}
 \usepackage{amsmath}
+\usepackage{algpseudocode}
+\newcommand{\IN}{{\texttt{IN}}}
+\newcommand{\OUT}{{\texttt{OUT}}}
+\newcommand{\OUTSMOOTH}{{\texttt{OUT}_{\texttt{NN}}}}
+\newcommand{\TWO}{\{\pm\}}
+\newcommand{\PAR}{{\texttt{PAR}}}
+
+\newcommand{\GD}{{\texttt{GD}}}
+
+\newcommand{\CO}{{P_{\texttt{cutoff}}}}
+
+\newcommand{\UC}{{\texttt{C}_{\texttt{FPFN}}}}
+
+\newcommand{\BS}{{P_{\texttt{bs}}}}
+\newcommand{\RAND}{{\texttt{r}}}
+\newcommand{\SHUFF}{{\texttt{shuff}}}
+
+\newcommand{\TRN}{{\texttt{Train}}}
+\newcommand{\TST}{{\texttt{Test}}}
+
+\newcommand{\RKG}{{\texttt{RKG}}}
+
+\newcommand{\PRED}{{\texttt{Pred}}}
+\newcommand{\PREDSMOOTH}{{\texttt{Pred}_{\texttt{NN}}}}
+\newcommand{\yP}{{\hat y}}
+\newcommand{\YP}{{\hat Y}}
+\newcommand{\yN}{{\tilde y}}
+\newcommand{\YN}{{\tilde Y}}
+\newcommand{\UPD}{{\texttt{Upd}}}
+\newcommand{\UPDSTEP}{{\texttt{Upd}_{\texttt{step}}}}
+\newcommand{\UPDEP}{{\texttt{Upd}_{\texttt{epoch}}}}
+\newcommand{\UPDFIT}{{\texttt{Upd}_{\texttt{fit}}}}
+
+\newcommand{\XYEP}{{\texttt{Z}_{\texttt{epoch}}}}
+\newcommand{\XB}{{\texttt{X}_{\texttt{B}}}}
+\newcommand{\YB}{{\texttt{Y}_{\texttt{B}}}}
+
+\newcommand{\FP}{{\texttt{FP}}}
+\newcommand{\FN}{{\texttt{FN}}}
+\newcommand{\FPB}{{\texttt{FP}_B}}
+\newcommand{\FNB}{{\texttt{FN}_B}}
+\newcommand{\FPT}{{\texttt{FP}_\oplus}}
+\newcommand{\FNT}{{\texttt{FN}_\oplus}}
+
 \title{Constraint awareness for binary classification}
 \subtitle{sample}
 \begin{document}
@@ -12,56 +56,190 @@
 \frametitle{Setup}
 \begin{itemize}
 \item
-Focus on offline, supervised setting (though methods discussed may come into their own in an online setting where thresholding of a model needs to be conducted ``on the fly'')
+  Objective: for a pair of random variables (RVs) $z=(x,y)$ taking values in $\IN\times\OUT$, seek to predict $y$ based on the value of $x$.
 \item
-Fix a labelled dataset $(X,Y)$ with $n$ rows $X_i\in\mathbb R^d$ and $Y_i\in\{\pm\}$, which we assume to be drawn iid from some fixed distribution, which is then split randomly into train and test datasets for validation purposes,
-$$
-\{1,\cdots,n\}=\texttt{TRAIN}\sqcup\texttt{TEST},
-$$
-Where typically the data may be split 70:30, ie $\frac{\#\texttt{TRAIN}}{n}\approx.7$.
+  Focus on \textbf{binary classification}, where $\OUT=\TWO$ and $y$ is the label for $x$.
 \item
-Write $x$ and $y$ for samples drawn from this distribution which we wish to learn, and write $0<p=\mathbb P(y=+)<1$ for the \textbf{imbalance}, ie the probability that a randomly drawn sample belongs to the positive class.
+  Depending on context and convenience, $\IN$ may be taken to be $\left(\texttt{float}\right)^{d_\IN}$ or $\mathbb R^{d_\IN}$.
 \item
-Focus on highly imbalanced datasets, ie cases where $p\ll1$. 
+Focus on supervised classification, where we are provided with a labelled dataset of $N$ samples $Z=\left((X_i,Y_i)\right)_{i=1}^N\in\left(\IN\times\OUT\right)^N$
+\item
+Rows are assumed to be drawn iid, $(X_i,Y_i)\sim z$
+\item
+Write $p=\mathbb P(y=+)$ which can be estimated well provided $\tfrac1N\ll p$
+\item
+With that being said, focus on highly imbalanced datasets, ie cases where $p\ll1$
 \end{itemize}
 \end{frame}
 \begin{frame}
-\frametitle{``Traditional'' approach - no constraint awareness during training}
+\frametitle{Splitting}
 \begin{itemize}
 \item
-Typically such a classifier $f$ is found by training a regression model which outputs continuous values $g:\mathbb R^d\rightarrow \mathbb R$, then defining $f$ by choosing a threshold $\alpha\in\mathbb R$, so that
+In this setting an algorithm which trains models may be experimentally tested by first uniformly randomly splitting $Z$ by index into training and test datasets,
 $$
-f(x)=\begin{cases}+\text{ if }f(x)>\alpha\text{ and}\\-\text{ otherwise.}\end{cases}
+\{1,\cdots,N\}=\TRN\sqcup\TST.
 $$
 \item
-$g$ is trained to minimise a loss which represents how far predictions are from the target, for example
+A model is then fit on $Z[\TRN]=\left((X_\TRN)_i,(Y_\TRN)_i\right)_{i=1}^{N_\TRN}$
+\item
+and validated on $Z[\TST]=\left((X_\TRN)_i,(Y_\TRN)_i\right)_{i=1}^{N_\TST}$.
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Learning algorithms}
+\begin{itemize}
+\item
+  In our context a \textbf{learning method} (LM) with inputs in $\IN$ and outputs in $\OUT$ with parameter space $\PAR$ is a tuple $(\PRED,\UPD)$ consisting of \textbf{prediction} and \textbf{update} rules
 \begin{gather*}
-\widehat{\mathbb E}(|g(x)-y|^2)=\tfrac1n\sum_{i\in\texttt{TEST}} |g(X_i)-Y_i|^2,\text{ or, if }g(X_i)\in(0,1),\\
-\widehat{\texttt{BCE}}(g)=\tfrac1{2n}\sum_{i\in\texttt{TEST}}\left((1+Y_i)\log(1-g(X_i))+(1-Y_i)\log(g(X_i))\right).
+  \PRED:\PAR\times\IN\rightarrow\OUT\text{ and}\\
+  \UPD:\PAR\times\left(\IN\times\OUT\right)^{<\infty}\rightarrow\PAR.
 \end{gather*}
+\item
+We often make new algorithms from simpler ones by composition, summing or other routines.
+\item
+  When a dataset as above and parameters $P\in\PAR$ for an LM are fixed, denote the $i$th prediction $\YP_i=\PRED(P,X_i)$.
 \end{itemize}
 \end{frame}
 \begin{frame}
-\frametitle{Integrating a constraint into training}
+\frametitle{Statistics associated with a parameterised model}
+  \begin{itemize}
+\item
+  For fixed parameters $P\in\PAR$ the RV $\yP=\PRED(P,x)$ is the prediction made for $y$.
+\item
+In our setting where $\OUT=\TWO$, there are two possible types of errors.
+Write
+\begin{gather*}
+  \FP=\mathbb P(\yP=+\text{ and }y=-)\text{ and }\\\FN=\mathbb P(\yP=-\text{ and }y=+).
+\end{gather*}
+for the \textbf{false positive} and \textbf{false negative} rates.
+Omit $P$ where clear.
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{User defined constraints}
 \begin{itemize}
 \item
-Idea: $g$ is trained with no regard for any requirements we may wish to impose on the \textbf{false positive} and \textbf{false negative} rates
-\begin{align*}
-\texttt{FP}=\mathbb P(f(x)=+|y=-)\text{ and }\texttt{FN}=\mathbb P(f(x)=-|y=+).
-\end{align*}
+  Aim: fit models that meet \textbf{user defined constraints} on the false positive and false negative rates.
 \item
-Therefore, we seek to train a classifier
+  Since $\FP$ and $\FN$ are probabilities, such a constraint can be written in the form
 $$
-f:\mathbb R^d\rightarrow \{\pm 1\}
+    \UC=C(\FP,\FN)<0\text{ for some }C:[0,1]^2\rightarrow\mathbb R.
 $$
-in a way which aims for some constraint on the false positive and false negative rates $C(\texttt{FP},\texttt{FN})<0$ at the training stage.
 \item
-Example: malicious communication detection per UC2, where typically $p\ll 1$ and false positives may be far more tolerable and have less serious consequences than false negatives.
+  Example: a model having error rates below fixed targets $\FPT,\FNT\in(0,1)$ is equivalent to requiring that $C(\FP,\FN)<0$ for the map
+  $$
+    C(s,t)=\texttt{max}(\tfrac s{\FPT},\tfrac t{\FNT})-1.
+  $$
+\item
+  A real world user needs to specify constraints that depend upon both $\FP$ and $\FN$, unless a model that always predicts $+$ or $-$ is appropriate for their task
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{From regressors to classifiers I}
+\begin{itemize}
+\item
+Focus mainly on models based on neural networks (NNs)
+\item
+In this case a choice of parameters $P\in\PAR$ includes the network's weights $P_w\in\PAR_w$ and the parameters associated with some choice of gradient descent algorithm $P_\GD\in\PAR_\GD$
+\item
+  Problem: we want $\OUT=\TWO$ but the output in $\OUTSMOOTH$ of a NN is continuous/float valued
+\item
+  Solution: set the binary prediction equal to $+$ or $-$ depending on whether the NN's output $\PREDSMOOTH(P,X)$ is greater than a real parameter $\CO$: 
+$$
+\PRED(P,X)=\begin{cases}+\text{ if }\PREDSMOOTH(P,X)>\CO\text{ and}\\-\text{ otherwise.}\end{cases}
+$$
+\item
+  Write $\yN=\PREDSMOOTH(P,x)$ and $\YN_i=\PREDSMOOTH(P,X_i)$.
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Gradient descent steps}
+\begin{itemize}
+\item
+  For a fixed NN with forward pass $\PREDSMOOTH$ and a cutoff $\CO$ there are many possible choices of LMs which can be composed as we please to make new ones.
+\item
+  Fixing a sufficiently well behaved loss function and gradient descent routine
+    \begin{gather*}
+      L:(\OUTSMOOTH\times\TWO)^{<\infty}\rightarrow\mathbb R\text{ and}\\
+      \GD:\PAR_\GD\times\PAR_w\times\PAR_w\rightarrow\PAR_\GD\times\PAR_w,
+    \end{gather*}
+A single update step $\UPDSTEP$ is given by
+\begin{algorithmic}[0]
+\Function{$\UPDSTEP$}{$P,\XB,\YB$}
+  \State $(P_\GD,P_w)\gets\GD(P_\GD,P_w,\partial_w(L(\PRED(P,\XB),\YB)))$
+  \State\Return $P$
+\EndFunction.
+\end{algorithmic}
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Epochs and fitting algorithms}
+\begin{itemize}
+\item
+A fitting method $\UPDFIT$ typically repeatedly iterates the update step over the randomly batched training set.
+\item
+   For fixed random key generator and batched shuffling routines
+    \begin{gather*}
+      \RKG:\PAR_\RAND\rightarrow\PAR_\RAND\text{ and}\\
+      \SHUFF:\mathbb N\times\PAR_\RAND\times\left(\IN\times\OUT\right)^{<\infty}\rightarrow\left(\IN\times\OUT\right)^{(<\infty)\times(<\infty)},
+    \end{gather*}
+  such an epoch route is given by the function
+\item
+\begin{algorithmic}[0]
+  \Function{$\UPDEP$}{$P$,$X$,$Y$}
+  \State batched$\gets\SHUFF(\BS,P_\RAND,(X_i,Y_i)_i)$
+  \ForAll{$(\XB,\YB)\in$ batched}
+  \State $P\gets\UPDSTEP(P,\XB,\YB)$
+  \EndFor
+  \State $P_\RAND\gets\RKG(P_\RAND)$
+  \State\Return $P$
+  \EndFunction
+\end{algorithmic}
+\end{itemize}
+\end{frame}
+\begin{frame}
+\begin{itemize}
+\item
+Larger problem: gradient descent relies on repeatedly nudging a model's weights down the slope of some smooth loss function.
+We want to satisfy the user defined constraint, $C<0$.
+While this quantity may be smooth, for a fixed batch $X_B,Y_B$ of rows these error rates can only be estimated, and the obvious choices
+\begin{gather*}
+\FPB=\frac{\#\left(\PRED(X_B)=+\text{ and }Y_B=-\right)}{\#B}\text{ and }\\
+\FNB=\frac{\#\left(\PRED(X_B)=-\text{ and }Y_B=+\right)}{\#B}
+\end{gather*}
+are discrete quantities whose gradients are either $0$ or undefined.
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{A base case: ``user defined constraint-unaware'' losses}
+\begin{itemize}
+\item
+Models are commonly trained to minimise a loss which in some way represents how far predictions are from the target with no regard for the class, for example
+
+\begin{gather*}
+  L_{L^2}(B)=\sum_{i\in B} |\YP_i-Y_i|^2,\text{ or, if }\OUT_{\texttt{NN}}\subseteq(0,1),\\
+  \texttt{BCE}(B)=\tfrac1{\#B}\sum_{i\in B}\left((1_{Y_i=+})\log(1-g(X_i))+(1-Y_i)\log(g(X_i))\right).
+\end{gather*}
+\item
+These standard choices of loss function effectively place similar importance on making the model's predictions close to the actual value for every data point.
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Constraint aware training I: class weighted losses}
+\begin{itemize}
+\item
+  Relative rates of false positives and false negatives may be adjusted by a routine that chooses an appropriate $\CO$ 
+\item
+  In this case instead fix $\CO$ and seek routines take into account the requirement that $C<0$ for a fixed cutoff throughout the training process
+\item
+  Existing approach: a better behaved estimator of $\FP$ and $\FN$ as a function of a batch is chosen, and a new loss function is chosen as a function of these parameters
 \end{itemize}
 \end{frame}
 \begin{frame}
 \frametitle{Experimental setup}
 \begin{itemize}
+\item
+Focus on malicious communication detection per UC2, where typically $p\ll 1$ and false positives may be far more tolerable and have less serious consequences than false negatives.
 \item
 A python class was developed to benchmark classification algorithms over a range of possible false positive and false negative targets
 \item

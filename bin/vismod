@@ -6,7 +6,7 @@ path.append(dirname(dirname(abspath(__file__))))
 from csv import DictReader
 from pandas import read_csv
 from pickle import load,dump
-from cal.cal import plot_fpfn_curve_by_target
+from cal.cal import fpfn_curve_by_target
 from matplotlib.pyplot import plot,show,title,xlabel,ylabel,legend,ioff,xscale,yscale
 
 if len(argv)<4:
@@ -16,9 +16,9 @@ pred_p=Path(argv[1])
 ht_p=pred_p/'hashtab.csv'
 rs=argv[4] if len(argv)==5 else ''
 
-fps_fns=plot_fpfn_curve_by_target(argv[1],argv[2],argv[3],rs)
+fps_fns=fpfn_curve_by_target(argv[1],argv[2],argv[3],rs)
 
-for (tfp,tfn),(fps,fns) in fps_fns:
+for (tfp,tfn),(fps,fns) in fps_fns.items():
   plot(fps,fns,label='tfp,tfn='+str(tfp)+','+str(tfn))
 xlabel('FP')
 ylabel('FN')

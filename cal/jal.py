@@ -157,12 +157,12 @@ def binsearch_step(r,tfpfn,y,yp_smooth):
   return a*(~excess_fps)+excess_fps*mid,b*(excess_fps)+(~excess_fps)*mid,(fpfn-tfpfn)**2
 
 @jit
-def search_thresh(y,yp_smooth,tfpfn,adapthresh_tol):
+def search_cutoff(y,yp_smooth,tfpfn,adapcutoff_tol):
   yp_min_max=yp_smooth.min(),yp_smooth.max()
-  thresh_range=while_loop(lambda r:(r[2]>adapthresh_tol)&(r[3]<1/adapthresh_tol),
+  cutoff_range=while_loop(lambda r:(r[2]>adapcutoff_tol)&(r[3]<1/adapcutoff_tol),
                           lambda r:binsearch_step(r[:2],tfpfn,y,yp_smooth)+(r[3]+1,),
                           (*yp_min_max,1,0))[:2]
-  return (thresh_range[0]+thresh_range[1])/2
+  return (cutoff_range[0]+cutoff_range[1])/2
 
 def _set_lw(consts,fp,fn):
   return exp(consts['lrfpfn']*(-fp/consts['tfp']+fn/consts['tfn']))
@@ -200,14 +200,14 @@ y_smooth_fp_fn=jit(_y_smooth_fp_fn,static_argnames=['act'])
 
 calc_fp_fn=lambda w,X,Y,act:y_smooth_fp_fn(w,X,Y,act)[1:]
 
-def _calc_thresh(w,tfpfn,X,Y,act,tol=1e-1):
+def _calc_cutoff(w,tfpfn,X,Y,act,tol=1e-1):
   Yp_smooth,fp,fn=y_smooth_fp_fn(w,X,Y,act)
-  return search_thresh(Y,Yp_smooth,tfpfn,tol),fp,fn
+  return search_cutoff(Y,Yp_smooth,tfpfn,tol),fp,fn
 
-calc_thresh=jit(vmap(_calc_thresh,(0,0,None,None,None),0),static_argnames=['act','tol'])
+calc_cutoff=jit(vmap(_calc_cutoff,(0,0,None,None,None),0),static_argnames=['act','tol'])
 
 def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
-               logf=None,adap_thresh=True,layer_norm=False,start_epoch=1):
+               logf=None,adap_cutoff=True,layer_norm=False,start_epoch=1):
   tfps=consts['tfp']
   tfns=consts['tfn']
   lrfpfns=consts['lrfpfn']
@@ -217,9 +217,9 @@ def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
   for epoch,k in enumerate(ks,start_epoch):
     X_b,Y_b=get_reshuffled(k,X,Y,n_batches,bs,last)
     states=steps(states,consts,X_b,Y_b,act)
-    if adap_thresh:
-      thresh,fp,fn=calc_thresh(states['w'],tfpfns,X_raw,Y_raw,act)
-      states['w'][-1][1]-=thresh.reshape(-1,1)
+    if adap_cutoff:
+      cutoff,fp,fn=calc_cutoff(states['w'],tfpfns,X_raw,Y_raw,act)
+      states['w'][-1][1]-=cutoff.reshape(-1,1)
     else:
       fp,fn=calc_fp_fn(states['w'],X_raw,Y_raw,act)
     states['lw']*=set_lw(consts,fp,fn)
@@ -227,7 +227,7 @@ def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
   return states
 
 def nn_epochs(k,n_epochs,bs,X,Y,consts,states,X_raw=None,Y_raw=None,act='relu',
-              adap_thresh=True,logf=None,layer_norm=False,start_epoch=1):
+              adap_cutoff=True,logf=None,layer_norm=False,start_epoch=1):
   if X_raw is None:
     X_raw,Y_raw=X,Y
   if isinstance(act,str):
@@ -250,8 +250,8 @@ class NNPar(MultiTrainer):
                in_dim=None,lw=None,start_width=None,end_width=None,depth=None,bs=128,
                act='relu',init='glorot_normal',times=100,lr=1e-4,beta1=.9,beta2=.999,
                eps=1e-8,bias=.1,acc=.1,min_tfpfn=1,max_tfpfn=100,logf=None,n_par=None,
-               adap_thresh=True,layer_norm=False):
-    super().__init__()
+               adap_cutoff=True,layer_norm=False):
+    super().__init__(times=times,cutoff=0.)
     self.logf=logf
     self.p=p
     self.p_resampled=p if p_resampled is None else p_resampled
@@ -261,7 +261,6 @@ class NNPar(MultiTrainer):
                          inner_dims is None else inner_dims
     self.ke=KeyEmitter(seed)
 
-    self.times=(times,) if isinstance(times,int) else times #epochs when weights will be saved
     self.init=init
     self.bias=bias
     #consts
@@ -277,7 +276,7 @@ class NNPar(MultiTrainer):
     #states
     self.lw=lw
     self.act=act
-    self.adap_thresh=adap_thresh
+    self.adap_cutoff=adap_cutoff
     self.layer_norm=layer_norm
 
     self.states=None
@@ -310,13 +309,10 @@ class NNPar(MultiTrainer):
       self.states=nn_epochs(self.ke.emit_key(),n-nl,self.bs,X,Y,self.consts,
                             self.states,X_raw=X_raw,start_epoch=nl+1,
                             Y_raw=Y_raw,act=self.act,logf=self.logf,
-                            adap_thresh=self.adap_thresh)
+                            adap_cutoff=self.adap_cutoff)
       print('Saving state at time',n,file=self.logf,flush=True)
       self.states_by_epoch[n]=self.states
       nl=n
-
-  def predict(self,X):
-    return {t:v>0 for t,v in self.predict_smooth(X).items()}
 
   def predict_smooth(self,X):
     Yp={t:vorward(self.states_by_epoch[t]['w'],X,activations[self.act]) for t in self.times}

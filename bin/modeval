@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 from pathlib import Path
 from os.path import dirname,abspath
-from sys import path,argv
+from sys import path,argv,stdout
 path.append(dirname(dirname(abspath(__file__))))
 from cal.cal import ModelEvaluation
 from cal.kal import skp
@@ -23,6 +23,7 @@ ap.add_argument('-labelled_categories',type=bool,default=True)
 ap.add_argument('-fpfn_curve_n_points',type=int,default=1000)
 ap.add_argument('-nn',type=lambda s:s=='True',default=True)
 ap.add_argument('-sk',type=lambda s:s=='True',default=True)
+ap.add_argument('-log_stdout',action='store_true')
 ap=ap.parse_args()
 ap.nn_times=tuple(ap.nn_times)
 ap.resamplers=['' if rs=='none' else rs for rs in ap.resamplers]
@@ -51,11 +52,15 @@ params={'nn':[dict(lr_ad=1e-3,reg=1e-5,lrfpfn=5e-3,bias=0.,times=ap.nn_times,
                    init='glorot_normal',eps=1e-8,beta1=.9,beta2=.999,layer_norm=False)\
                        for sw,ew,d,adt in product(ap.nn_start_widths,ap.nn_end_widths,ap.nn_depths,
                                                   ap.nn_epoch_correct_thresh)] if ap.nn else [],
-        'sk':[dict(max_depth=depth,regressor=rg,**sk_exargs) for depth,(rg,sk_exargs) in\
-              product(ap.sk_depths,[(k,skp[k]) for k in ap.sk_models])] if ap.sk else []}
+        'sk':[]}
+if ap.sk:
+  for rg in ap.sk_models:
+    depth_dicts=[{'max_depth':d} for d in ap.sk_depths] if rg in ['RandomForestClassifier','RandomForestRegressor'] else [{}] 
+    for depth_rg in depth_dicts:
+      params['sk'].append(dict(regressor=rg,**skp[rg],**depth_rg))
 
 m=ModelEvaluation(ds=ap.dataset,lab_cat=ap.labelled_categories,params=params,
-                  fpfn_curve_n_points=ap.fpfn_curve_n_points)
+                  fpfn_curve_n_points=ap.fpfn_curve_n_points,logf=stdout if ap.log_stdout else None)
 m.set_targets()
 m.define_jobs(resamplers=ap.resamplers)
 m.run_jobs()
