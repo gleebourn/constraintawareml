@@ -164,9 +164,9 @@ def search_cutoff(y,yp_smooth,tfpfn,adapcutoff_tol):
                           (*yp_min_max,1,0))[:2]
   return (cutoff_range[0]+cutoff_range[1])/2
 
-def _set_lw(consts,fp,fn):
+def _set_fp_fn_weights(consts,fp,fn):
   return exp(consts['lrfpfn']*(-fp/consts['tfp']+fn/consts['tfn']))
-set_lw=jit(vmap(_set_lw,(0,0,0),0))#,None
+set_fp_fn_weights=jit(vmap(_set_fp_fn_weights,(0,0,0),0))#,None
 
 def get_reshuffled(k,X_trn,Y_trn,n_batches,bs,last):
   X,Y=shuffle_xy(k,X_trn,Y_trn)
@@ -174,13 +174,13 @@ def get_reshuffled(k,X_trn,Y_trn,n_batches,bs,last):
 
 get_reshuffled=jit(get_reshuffled,static_argnames=['n_batches','bs','last'])
 
-def loss(w,x,y,lw,act):
+def loss(w,x,y,fp_fn_weights,act):
   yp=forward(w,x,act)
-  return jsm((lw*y+(1-y)/lw)*(1-2*y)*yp)
+  return jsm((fp_fn_weights*y+(1-y)/fp_fn_weights)*(1-2*y)*yp)
 
 dl=grad(loss)
 def _upd(x,y,state,consts,act):
-  return dict_adam_no_bias(dl(state['w'],x,y,state['lw'],act),state,consts)
+  return dict_adam_no_bias(dl(state['w'],x,y,state['fp_fn_weights'],act),state,consts)
 
 upd=vmap(_upd,(None,None,0,0,None),0)
 
@@ -207,7 +207,7 @@ def _calc_cutoff(w,tfpfn,X,Y,act,tol=1e-1):
 calc_cutoff=jit(vmap(_calc_cutoff,(0,0,None,None,None),0),static_argnames=['act','tol'])
 
 def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
-               logf=None,adap_cutoff=True,layer_norm=False,start_epoch=1):
+               logf=None,adap_cutoff=True,layer_norm=False,start_epoch=1,lr_fp_fn=False):
   tfps=consts['tfp']
   tfns=consts['tfn']
   lrfpfns=consts['lrfpfn']
@@ -222,7 +222,8 @@ def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
       states['w'][-1][1]-=cutoff.reshape(-1,1)
     else:
       fp,fn=calc_fp_fn(states['w'],X_raw,Y_raw,act)
-    states['lw']*=set_lw(consts,fp,fn)
+    if lr_fp_fn:
+      states['fp_fn_weights']*=set_fp_fn_weights(consts,fp,fn)
     print('nn epoch',epoch,file=logf,flush=True)
   return states
 
@@ -239,24 +240,26 @@ def nn_epochs(k,n_epochs,bs,X,Y,consts,states,X_raw=None,Y_raw=None,act='relu',
                     logf=logf,layer_norm=layer_norm,start_epoch=start_epoch)
 
 def vectorise_fl_ls(x,l):
-  if isinstance(x,list):
+  if isinstance(x,list|tuple):
     return array(x)
   elif isinstance(x,float):
     return ones(l)*x 
   return x
 
 class NNPar(MultiTrainer):
-  def __init__(self,seed,p,tfp,tfn,p_resampled=None,lrfpfn=.03,reg=1e-6,inner_dims=None,
-               in_dim=None,lw=None,start_width=None,end_width=None,depth=None,bs=128,
+  def __init__(self,seed,p,tfp,tfn,p_resampled=None,lrfpfn=False,reg=1e-6,inner_dims=None,
+               in_dim=None,fp_fn_weights=None,start_width=None,end_width=None,depth=None,bs=128,
                act='relu',init='glorot_normal',times=100,lr=1e-4,beta1=.9,beta2=.999,
                eps=1e-8,bias=.1,acc=.1,min_tfpfn=1,max_tfpfn=100,logf=None,n_par=None,
                adap_cutoff=True,layer_norm=False):
+    if isinstance(lrfpfn,bool):
+      lrfpfn=.003 if lrfpfn else 0.
     super().__init__(times=times,cutoff=0.)
     self.logf=logf
     self.p=p
     self.p_resampled=p if p_resampled is None else p_resampled
-    if lw is None:
-      lw=((1-self.p_resampled)/self.p_resampled)**.5
+    if fp_fn_weights is None:
+      fp_fn_weights=1.#=((1-self.p_resampled)/self.p_resampled)**.5
     self.inner_dims=list(geomspace(start_width,end_width,depth+1,dtype=int)) if\
                          inner_dims is None else inner_dims
     self.ke=KeyEmitter(seed)
@@ -273,16 +276,15 @@ class NNPar(MultiTrainer):
     self.tfp=tfp
     self.tfn=tfn
     self.bs=bs
-    #states
-    self.lw=lw
     self.act=act
     self.adap_cutoff=adap_cutoff
     self.layer_norm=layer_norm
 
+    #states
     self.states=None
-    self.states_by_epoch={}
     self.consts=None
     self.n_par=n_par
+    self.fp_fn_weights=vectorise_fl_ls(fp_fn_weights,n_par)
   
   def get_states(self):
     return self.states
@@ -298,7 +300,7 @@ class NNPar(MultiTrainer):
         self.n_par=max((len(x) if hasattr(x,'__len__') else 1 for x in consts.values()))
       self.consts={k:vectorise_fl_ls(v,self.n_par) for k,v in consts.items()}
     if self.states is None:
-      self.states=dict(lw=vectorise_fl_ls(self.lw,self.n_par),
+      self.states=dict(fp_fn_weights=self.fp_fn_weights,
                        **init_layers_adam(self.mod_shape,self.init,k=self.ke.emit_key(),
                                           n_par=self.n_par,bias=self.bias))
 
@@ -311,9 +313,9 @@ class NNPar(MultiTrainer):
                             Y_raw=Y_raw,act=self.act,logf=self.logf,
                             adap_cutoff=self.adap_cutoff)
       print('Saving state at time',n,file=self.logf,flush=True)
-      self.states_by_epoch[n]=self.states
+      self.past_states[n]=self.states
       nl=n
 
   def predict_smooth(self,X):
-    Yp={t:vorward(self.states_by_epoch[t]['w'],X,activations[self.act]) for t in self.times}
+    Yp={t:vorward(self.past_states[t]['w'],X,activations[self.act]) for t in self.times}
     return {t:y.reshape(y.shape[:-1]) for t,y in Yp.items()}

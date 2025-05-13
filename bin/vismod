@@ -9,21 +9,31 @@ from pickle import load,dump
 from cal.cal import fpfn_curve_by_target
 from matplotlib.pyplot import plot,show,title,xlabel,ylabel,legend,ioff,xscale,yscale
 
-if len(argv)<4:
-  print('Usage:',argv[0],'PRED_DIR LAB trn|tst [RESAMPLER]')
-  exit(1)
-pred_p=Path(argv[1])
+from argparse import ArgumentParser
+
+ap=ArgumentParser()
+ap.add_argument('pred_dir',type=str)
+ap.add_argument('lab',type=str)
+ap.add_argument('-rs',type=str,default='none')
+ap.add_argument('-fpfn_payoff',default=False
+
+ap.parse_args()
+
+pred_p=Path(ap.pred_dir)
 ht_p=pred_p/'hashtab.csv'
-rs=argv[4] if len(argv)==5 else ''
+rs=rs
+fps_fns=fpfn_curve_by_target(ap.pred_dir,ap.lab,ap.stage,rs)
+[print(len(k),len(v)) for k,v in fps_fns.items()]
+print(list(fps_fns))
 
-fps_fns=fpfn_curve_by_target(argv[1],argv[2],argv[3],rs)
+for param,tgts in fps_fns.items():
+  for (tfp,tfn),(fps,fns) in tgts.items():
+    plot(fps,fns,label='tfp,tfn='+str(tfp)+','+str(tfn))
 
-for (tfp,tfn),(fps,fns) in fps_fns.items():
-  plot(fps,fns,label='tfp,tfn='+str(tfp)+','+str(tfn))
-xlabel('FP')
-ylabel('FN')
-xscale('log')
-yscale('log')
-legend()
-title(p)
-show()
+  xlabel('FP')
+  ylabel('FN')
+  xscale('log')
+  yscale('log')
+  legend()
+  title(param)
+  show()

@@ -20,6 +20,7 @@ def get_cutoffs(tfpfns,y,yp,p):
       if not tfpfns:
         break
 
+#Focus on regressors and find a likelihood with no class weighting
 sk_spec={'RandomForestRegressor':(RandomForestRegressor,{'n_jobs':-1}),
          'HistGradientBoostingRegressor':(HistGradientBoostingRegressor,{'n_jobs':-1}),
          'SVR':(SVR,{'kernel':'poly'})}

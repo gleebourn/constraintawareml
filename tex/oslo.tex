@@ -1,11 +1,11 @@
 \documentclass{beamer}
 \usepackage{amsmath}
 \usepackage{algpseudocode}
-\newcommand{\IN}{{\texttt{IN}}}
-\newcommand{\OUT}{{\texttt{OUT}}}
+\newcommand{\IN}{{\texttt{In}}}
+\newcommand{\OUT}{{\texttt{Out}}}
 \newcommand{\OUTSMOOTH}{{\texttt{OUT}_{\texttt{NN}}}}
 \newcommand{\TWO}{\{\pm\}}
-\newcommand{\PAR}{{\texttt{PAR}}}
+\newcommand{\PAR}{{\texttt{Par}}}
 
 \newcommand{\GD}{{\texttt{GD}}}
 
@@ -14,7 +14,7 @@
 \newcommand{\UC}{{\texttt{C}_{\texttt{FPFN}}}}
 
 \newcommand{\BS}{{P_{\texttt{bs}}}}
-\newcommand{\RAND}{{\texttt{r}}}
+\newcommand{\RAND}{{\texttt{rand}}}
 \newcommand{\SHUFF}{{\texttt{shuff}}}
 
 \newcommand{\TRN}{{\texttt{Train}}}
@@ -43,6 +43,8 @@
 \newcommand{\FNB}{{\texttt{FN}_B}}
 \newcommand{\FPT}{{\texttt{FP}_\oplus}}
 \newcommand{\FNT}{{\texttt{FN}_\oplus}}
+
+\newcommand{\CTHRESH}{{\texttt{C}}_{\texttt{FPFN}}}
 
 \title{Constraint awareness for binary classification}
 \subtitle{sample}
@@ -123,7 +125,7 @@ Omit $P$ where clear.
 \item
   Since $\FP$ and $\FN$ are probabilities, such a constraint can be written in the form
 $$
-    \UC=C(\FP,\FN)<0\text{ for some }C:[0,1]^2\rightarrow\mathbb R.
+    \UC=C(\FP,\FN)<\CTHRESH\text{ for some }C:[0,1]^2\rightarrow\mathbb R.
 $$
 \item
   Example: a model having error rates below fixed targets $\FPT,\FNT\in(0,1)$ is equivalent to requiring that $C(\FP,\FN)<0$ for the map
@@ -153,16 +155,17 @@ $$
 \end{itemize}
 \end{frame}
 \begin{frame}
-\frametitle{Gradient descent steps}
+\frametitle{Gradient descent}
 \begin{itemize}
 \item
-  For a fixed NN with forward pass $\PREDSMOOTH$ and a cutoff $\CO$ there are many possible choices of LMs which can be composed as we please to make new ones.
+  For a NN with fixed forward pass implementation $\PREDSMOOTH$ and cutoff $\CO$ there are many possible choices of LMs which can be composed as we please to make new ones.
 \item
-  Fixing a sufficiently well behaved loss function and gradient descent routine
+  Fix a sufficiently well behaved loss function and gradient descent routine
     \begin{gather*}
       L:(\OUTSMOOTH\times\TWO)^{<\infty}\rightarrow\mathbb R\text{ and}\\
-      \GD:\PAR_\GD\times\PAR_w\times\PAR_w\rightarrow\PAR_\GD\times\PAR_w,
+      \GD:\PAR_\GD\times\PAR_w\times\PAR_w\rightarrow\PAR_\GD\times\PAR_w.
     \end{gather*}
+\item
 A single update step $\UPDSTEP$ is given by
 \begin{algorithmic}[0]
 \Function{$\UPDSTEP$}{$P,\XB,\YB$}
@@ -176,14 +179,14 @@ A single update step $\UPDSTEP$ is given by
 \frametitle{Epochs and fitting algorithms}
 \begin{itemize}
 \item
-A fitting method $\UPDFIT$ typically repeatedly iterates the update step over the randomly batched training set.
+A fitting method $\UPDFIT$ typically repeatedly iterates the update step over the randomly batched training set, repeatedly calling an epoch learning method
 \item
-   For fixed random key generator and batched shuffling routines
-    \begin{gather*}
-      \RKG:\PAR_\RAND\rightarrow\PAR_\RAND\text{ and}\\
-      \SHUFF:\mathbb N\times\PAR_\RAND\times\left(\IN\times\OUT\right)^{<\infty}\rightarrow\left(\IN\times\OUT\right)^{(<\infty)\times(<\infty)},
-    \end{gather*}
-  such an epoch route is given by the function
+   For fixed random key generator $\RKG$ and batched shuffling routine $\SHUFF$
+   % \begin{gather*}
+   %   \RKG:\PAR_\RAND\rightarrow\PAR_\RAND\text{ and}\\
+   %   \SHUFF:\mathbb N\times\PAR_\RAND\times\left(\IN\times\OUT\right)^{<\infty}\rightarrow\left(\IN\times\OUT\right)^{(<\infty)\times(<\infty)},
+   % \end{gather*}
+  such a routine is given by
 \item
 \begin{algorithmic}[0]
   \Function{$\UPDEP$}{$P$,$X$,$Y$}
@@ -202,7 +205,7 @@ A fitting method $\UPDFIT$ typically repeatedly iterates the update step over th
 \item
 Larger problem: gradient descent relies on repeatedly nudging a model's weights down the slope of some smooth loss function.
 We want to satisfy the user defined constraint, $C<0$.
-While this quantity may be smooth, for a fixed batch $X_B,Y_B$ of rows these error rates can only be estimated, and the obvious choices
+While this quantity may be smooth, for a fixed batch $X_B,Y_B$ with $B=B_+\sqcup B_-$, the positive and negative labelled indixes rows these error rates can only be estimated, and the obvious choices
 \begin{gather*}
 \FPB=\frac{\#\left(\PRED(X_B)=+\text{ and }Y_B=-\right)}{\#B}\text{ and }\\
 \FNB=\frac{\#\left(\PRED(X_B)=-\text{ and }Y_B=+\right)}{\#B}
@@ -218,25 +221,27 @@ Models are commonly trained to minimise a loss which in some way represents how 
 
 \begin{gather*}
   L_{L^2}(B)=\sum_{i\in B} |\YP_i-Y_i|^2,\text{ or, if }\OUT_{\texttt{NN}}\subseteq(0,1),\\
-  \texttt{BCE}(B)=\tfrac1{\#B}\sum_{i\in B}\left((1_{Y_i=+})\log(1-g(X_i))+(1-Y_i)\log(g(X_i))\right).
+  \texttt{BCE}(B)=-\tfrac1{\#B}\left(\sum_{i\in B_+}\log(\hat Y_i)+\sum_{i\in B_-}\log(1-\hat Y_i)\right)
 \end{gather*}
 \item
-These standard choices of loss function effectively place similar importance on making the model's predictions close to the actual value for every data point.
+These choices of loss function place similar importance on making the model's predictions close to the actual value for every data point, and one may use them interchangably by rescaling the last layer of the NN appropriately.
 \end{itemize}
 \end{frame}
 \begin{frame}
-\frametitle{Constraint aware training I: class weighted losses}
+\frametitle{Constraint aware training I: class weighting}
 \begin{itemize}
 \item
-  Relative rates of false positives and false negatives may be adjusted by a routine that chooses an appropriate $\CO$ 
+  Relative rates of false positives and false negatives of the previous loss functions may be adjusted after training by a routine that chooses an appropriate $\CO$.
+\item One may move between the loss functions describe above by rescaling the last layer of the NN appropriately.
+  However, one may choose a loss $\CO$ which depends on target classes and instead make gradient descent steps that reduce the value of $C$ throughout the training process.
+  Updates on the last layer of a network's bias have the effect of controlling the relative rates.
 \item
-  In this case instead fix $\CO$ and seek routines take into account the requirement that $C<0$ for a fixed cutoff throughout the training process
-\item
-  Existing approach: a better behaved estimator of $\FP$ and $\FN$ as a function of a batch is chosen, and a new loss function is chosen as a function of these parameters
+  Seek to minimise an intuitive/explainable choice of loss function $L(B)=-\beta\sum_{i\in B_+}\hat Y_i+\tfrac1\beta\sum_{i\in B_-}\hat Y_i$.
+  These losses are all increasing functions of the errors: neural networks are capable of learning nonlinear relationships in any case, and modern gradient descent methods also go some way toward mitigating the differences between different choices of loss.
 \end{itemize}
 \end{frame}
 \begin{frame}
-\frametitle{Experimental setup}
+\frametitle{Experimental setup I}
 \begin{itemize}
 \item
 Focus on malicious communication detection per UC2, where typically $p\ll 1$ and false positives may be far more tolerable and have less serious consequences than false negatives.
@@ -246,15 +251,18 @@ A python class was developed to benchmark classification algorithms over a range
 $\texttt{ModelEvaluation}$ provides an interface for comparison of multiple classification algorithms
 \item 
 In order to benchmark binary classification performance over a range of problems, a dataset with greater than two classes may be provided: models are then trained to distinguish one class from many.
+
 \item
 $\texttt{ModelEvaluation}$ instantiates $\texttt{MultiTrainer}$s, each of which trains models with fixed hyperparameters but with varying end times, class labels and target error rates.
 \end{itemize}
 \end{frame}
+
 \begin{frame}
 \frametitle{Is resampling beneficial?}
 \begin{itemize}
 \item
-No evidence of this for unsw-nb15: at best, such techniques achieve comparable results.
+Class weighting appears to achieve similar results while avoiding an extra step.
+unsw-nb15:
 \end{itemize}
 \end{frame}
 %\begin{frame}
