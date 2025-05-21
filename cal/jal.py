@@ -207,7 +207,7 @@ def _calc_cutoff(w,tfpfn,X,Y,act,tol=1e-1):
 calc_cutoff=jit(vmap(_calc_cutoff,(0,0,None,None,None),0),static_argnames=['act','tol'])
 
 def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
-               logf=None,adap_cutoff=True,layer_norm=False,start_epoch=1,lr_fp_fn=False):
+               logf=None,adap_cutoff=True,layer_norm=False,start_epoch=1,adapt_weights=False):
   tfps=consts['tfp']
   tfns=consts['tfn']
   lrfpfns=consts['lrfpfn']
@@ -222,7 +222,7 @@ def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
       states['w'][-1][1]-=cutoff.reshape(-1,1)
     else:
       fp,fn=calc_fp_fn(states['w'],X_raw,Y_raw,act)
-    if lr_fp_fn:
+    if adapt_weights:
       states['fp_fn_weights']*=set_fp_fn_weights(consts,fp,fn)
     print('nn epoch',epoch,file=logf,flush=True)
   return states
@@ -236,8 +236,11 @@ def nn_epochs(k,n_epochs,bs,X,Y,consts,states,X_raw=None,Y_raw=None,act='relu',
   n_batches=len(X)//bs
   last=n_batches*bs
   ks=split(k,n_epochs)
+  adw=consts['lrfpfn'].sum()
+  if adw:
+    print('Variable weights!!!!!!')
   return _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
-                    logf=logf,layer_norm=layer_norm,start_epoch=start_epoch)
+                    logf=logf,layer_norm=layer_norm,start_epoch=start_epoch,adapt_weights=adw)
 
 def vectorise_fl_ls(x,l):
   if isinstance(x,list|tuple):

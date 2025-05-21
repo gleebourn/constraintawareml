@@ -1,15 +1,20 @@
 \documentclass{beamer}
 \usepackage{amsmath}
 \usepackage{algpseudocode}
-\newcommand{\IN}{{\texttt{In}}}
-\newcommand{\OUT}{{\texttt{Out}}}
+%\newcommand{\IN}{{\texttt{In}}}
+%\newcommand{\OUT}{{\texttt{Out}}}
+\newcommand{\IN}{{\texttt{X}}}
+\newcommand{\OUT}{{\texttt{Y}}}
+\newcommand{\DIM}{{\texttt{d}}}
 \newcommand{\OUTSMOOTH}{{\texttt{OUT}_{\texttt{NN}}}}
 \newcommand{\TWO}{\{\pm\}}
-\newcommand{\PAR}{{\texttt{Par}}}
+%\newcommand{\PAR}{{\texttt{Par}}}
+\newcommand{\PAR}{{\texttt{P}}}
 
 \newcommand{\GD}{{\texttt{GD}}}
 
-\newcommand{\CO}{{P_{\texttt{cutoff}}}}
+\newcommand{\CO}{{\hat w}}
+\newcommand{\NNW}{{\tilde w}}
 
 \newcommand{\UC}{{\texttt{C}_{\texttt{FPFN}}}}
 
@@ -22,16 +27,17 @@
 
 \newcommand{\RKG}{{\texttt{RKG}}}
 
-\newcommand{\PRED}{{\texttt{Pred}}}
-\newcommand{\PREDSMOOTH}{{\texttt{Pred}_{\texttt{NN}}}}
+\newcommand{\PRED}{{\hat y}}%{{\texttt{Pred}}}
+\newcommand{\PREDSMOOTH}{{\tilde y}}%{{\texttt{Pred}_{\texttt{NN}}}}
 \newcommand{\yP}{{\hat y}}
 \newcommand{\YP}{{\hat Y}}
-\newcommand{\yN}{{\tilde y}}
 \newcommand{\YN}{{\tilde Y}}
 \newcommand{\UPD}{{\texttt{Upd}}}
 \newcommand{\UPDSTEP}{{\texttt{Upd}_{\texttt{step}}}}
 \newcommand{\UPDEP}{{\texttt{Upd}_{\texttt{epoch}}}}
 \newcommand{\UPDFIT}{{\texttt{Upd}_{\texttt{fit}}}}
+\newcommand{\Prob}{{\mathbb P}}
+\newcommand{\ProbH}{{\widehat{\mathbb P}}}
 
 \newcommand{\XYEP}{{\texttt{Z}_{\texttt{epoch}}}}
 \newcommand{\XB}{{\texttt{X}_{\texttt{B}}}}
@@ -39,6 +45,10 @@
 
 \newcommand{\FP}{{\texttt{FP}}}
 \newcommand{\FN}{{\texttt{FN}}}
+\newcommand{\FPE}{{\widehat{\texttt{FP}}}}
+\newcommand{\FNE}{{\widehat{\texttt{FN}}}}
+\newcommand{\Fp}{\widetilde{\texttt{FP}}}
+\newcommand{\Fn}{\widetilde{\texttt{FN}}}
 \newcommand{\FPB}{{\texttt{FP}_B}}
 \newcommand{\FNB}{{\texttt{FN}_B}}
 \newcommand{\FPT}{{\texttt{FP}_\oplus}}
@@ -58,63 +68,101 @@
 \frametitle{Setup}
 \begin{itemize}
 \item
-  Objective: for a pair of random variables (RVs) $z=(x,y)$ taking values in $\IN\times\OUT$, seek to predict $y$ based on the value of $x$.
+  Broad problem setting: for a pair of \textbf{random variables} (RVs) $z_\omega=(x,y)$ taking values in $\IN\times\OUT$, infer a \textbf{class label} $y\in\OUT$ based on the \textbf{feature} $x\in\IN$.
 \item
-  Focus on \textbf{binary classification}, where $\OUT=\TWO$ and $y$ is the label for $x$.
+  Focus on \textbf{binary classification}, $y_\omega\in\TWO$
 \item
-  Depending on context and convenience, $\IN$ may be taken to be $\left(\texttt{float}\right)^{d_\IN}$ or $\mathbb R^{d_\IN}$.
+  Depending on context $\IN$ might be $\left(\texttt{float}\right)^{\DIM_\IN}$ or $\mathbb R^{\DIM_\IN}$
+\item Initial setting is
+    \begin{itemize}
 \item
-Focus on supervised classification, where we are provided with a labelled dataset of $N$ samples $Z=\left((X_i,Y_i)\right)_{i=1}^N\in\left(\IN\times\OUT\right)^N$
+  Offline: we are provided with an $N$ row dataset $Z=(X,Y)$ with $(X_i,Y_i)\in\IN\times\OUT$ for $1\leq i\leq N$.
 \item
-Rows are assumed to be drawn iid, $(X_i,Y_i)\sim z$
+  iid: rows are assumed to be drawn \textbf{independently and identically distributed}, $(X,Y)\sim_{\texttt{iid}}(x,y)$.
 \item
-Write $p=\mathbb P(y=+)$ which can be estimated well provided $\tfrac1N\ll p$
-\item
-With that being said, focus on highly imbalanced datasets, ie cases where $p\ll1$
+  $p=\Prob(y=+)$ can be estimated by $\hat p=\ProbH(Y=+)=\tfrac{\#Y=+}{\#Y}$ for $N\gg p^{-1}$.
+    \end{itemize}
 \end{itemize}
 \end{frame}
 \begin{frame}
-\frametitle{Splitting}
+\frametitle{Is class imbalance worth resampling over?}
 \begin{itemize}
 \item
-In this setting an algorithm which trains models may be experimentally tested by first uniformly randomly splitting $Z$ by index into training and test datasets,
-$$
-\{1,\cdots,N\}=\TRN\sqcup\TST.
-$$
+  We focus on techniques for \textbf{imbalanced} data, ie $p\ll1$: we assume that there are enough samples to learn the features of $Y$ to some tolerance.
 \item
-A model is then fit on $Z[\TRN]=\left((X_\TRN)_i,(Y_\TRN)_i\right)_{i=1}^{N_\TRN}$
+  Current problem: investigate alternatives to computationally expensive training data \textbf{resampling} schemes $(SMOTE^*,TOMEKS^*,\cdots)$
 \item
-and validated on $Z[\TST]=\left((X_\TRN)_i,(Y_\TRN)_i\right)_{i=1}^{N_\TST}$.
+Offline validation by randomly splitting $\{1,\cdots,N\}=\TRN\sqcup\TST$ into train and test sets.
+\item
+  UNSW-NB15: no appreciable gains from resampling compared to training using a regression model, when an appropriate threshold is selected based on train dataset
 \end{itemize}
 \end{frame}
 \begin{frame}
-\frametitle{Learning algorithms}
+\frametitle{Note on iid offline setting}
+\begin{itemize}
+  \item
+    Without these assumptions the problem might be as hard as any prediction problem we might pose in ml, since the output of any model can be represented as asequence of bits.
+  \item
+    Useful for initial algorithm benchmarking, but hard to beat SOTA regression techniques in this relatively well understood setting.
+    Fundamentally want to develop techniques that may be used in an online setting, where updates to a model will have to be made in response to an evolving sequence of costs for errors and time sensitive user defined constraints
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Regression based classification}
 \begin{itemize}
 \item
-  In our context a \textbf{learning method} (LM) with inputs in $\IN$ and outputs in $\OUT$ with parameter space $\PAR$ is a tuple $(\PRED,\UPD)$ consisting of \textbf{prediction} and \textbf{update} rules
+%  In our context a \textbf{learning method} (LM) with inputs in $\IN$ and outputs in $\OUT$ with parameter space $\PAR$ is a tuple $(\PRED,\UPD)$ consisting of \textbf{prediction} and \textbf{update} rules
+  A learning algorithm on $\IN\times\OUT$ parameterised by $\PAR$ consists of prediction and update maps
 \begin{gather*}
   \PRED:\PAR\times\IN\rightarrow\OUT\text{ and}\\
   \UPD:\PAR\times\left(\IN\times\OUT\right)^{<\infty}\rightarrow\PAR.
 \end{gather*}
 \item
-We often make new algorithms from simpler ones by composition, summing or other routines.
-\item
-  When a dataset as above and parameters $P\in\PAR$ for an LM are fixed, denote the $i$th prediction $\YP_i=\PRED(P,X_i)$.
+  Want to find a model where $\OUT$ takes discrete parameters, but based on an underlying regression where $\OUT$ takes continuous values
 \end{itemize}
 \end{frame}
 \begin{frame}
-\frametitle{Statistics associated with a parameterised model}
+\frametitle{Classifiers from regressors}
+\begin{itemize}
+\item
+  Fix parameters $w\in\PAR$
+\item
+  Binary classifiers target RVs $(x,y)$ considered in this work are the composition of NN based inference with a binary cutoff step with respective parameters $w=(\NNW,\CO)$.
+  \item
+    The continuous-valued prediction $\PREDSMOOTH(x)$ is classified according to a cutoff hyperparameter $\CO$:
+    $$
+    \PRED(\PREDSMOOTH(x))=\begin{cases}+\text{ if }\tilde y>\CO,\\-\text{ otherwise.}\end{cases}
+    $$
+\item
+  When a choice of dataset or batch $(X,Y)$ is unambiguous write $\YN_i=\PREDSMOOTH(X_i)$ and $\YP_i=\yP(\YN_i)$ for the binary and continuous inferences respectively.
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Error rates, estimation and relaxation}
   \begin{itemize}
 \item
-  For fixed parameters $P\in\PAR$ the RV $\yP=\PRED(P,x)$ is the prediction made for $y$.
+In this setting only need to infer one bit of information $y\in\TWO$ at a time
 \item
-In our setting where $\OUT=\TWO$, there are two possible types of errors.
-Write
+Accordingly, two possible types of errors
+Fix a batch $B\subseteq\{1,\cdots,N\}$ on which to estimate statistics.
 \begin{gather*}
-  \FP=\mathbb P(\yP=+\text{ and }y=-)\text{ and }\\\FN=\mathbb P(\yP=-\text{ and }y=+).
+  \FP=\Prob(\yP>y),~\FN=\Prob(\yP<y),\\
+  \FPE_B=\ProbH_B(\YP>Y),~\FNE_B=\ProbH_B(\YP<Y),\\
+  \Fp_B=\tfrac1{\#B}\sum_{i\in B:Y_i=-}\YN_i\text{ and }\Fn_B=-\tfrac1{\#B}\sum_{i\in B:Y_i=+}\YN_i.
 \end{gather*}
-for the \textbf{false positive} and \textbf{false negative} rates.
-Omit $P$ where clear.
+\item
+  $\FP$ and $\FN$ are the model's (true) \textbf{false positive} and \textbf{false negative} rates
+\item hats: binary estimate: best indication of the true rates, but not differentiable
+\item tildes: "surrogate error" or "likelihood" depending on perspective
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{User defined constraints}
+\begin{itemize}
+\item
+  For a fixed batch, reducing $\Fp$ and $\Fn$ will reduce $\FP$ and $\FN$
+\item
+  The NN $\PREDSMOOTH$'s raw gradient updates can be expected to move $\YN$ in the correct direction at a rate that depends on the marginal distribution $\mathbb P(x|y)$.
 \end{itemize}
 \end{frame}
 \begin{frame}
@@ -123,42 +171,83 @@ Omit $P$ where clear.
 \item
   Aim: fit models that meet \textbf{user defined constraints} on the false positive and false negative rates.
 \item
-  Since $\FP$ and $\FN$ are probabilities, such a constraint can be written in the form
-$$
-    \UC=C(\FP,\FN)<\CTHRESH\text{ for some }C:[0,1]^2\rightarrow\mathbb R.
-$$
+  Algorithm needs an objective function to optimise: user needs to select one
 \item
-  Example: a model having error rates below fixed targets $\FPT,\FNT\in(0,1)$ is equivalent to requiring that $C(\FP,\FN)<0$ for the map
+  objective 
+\item
+  Regression step needs a smooth objective function: Bayesian formalism provides one
+\item
+  $\FP$ and $\FN$ are two probabilities, and we seek to reduce both according to a precise definition of their relative importance.
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Constraining the constraints}
+\begin{itemize}
+\item
+  Parameter selection should be explainable
+\item
+  Constraint is in terms of a continuous RV, but constraint satisfaction measured will be scored by binary performance $\FPE_\TST$ and $\FNE_\TST$.
+\item
+  We need to find a continuous objective to train a NN model
+\item
+  Well understood, simple choice: minimise cost $C(\FP,\FN)$
+\item
+  Example: demanding that a model have error rates below fixed targets $\FPT,\FNT\in(0,1)$ is equivalent to requiring that $C(\FP,\FN)<0$ for the map
   $$
     C(s,t)=\texttt{max}(\tfrac s{\FPT},\tfrac t{\FNT})-1.
   $$
 \item
-  A real world user needs to specify constraints that depend upon both $\FP$ and $\FN$, unless a model that always predicts $+$ or $-$ is appropriate for their task
+  Higher $\FP$ and $\FN$ is always bad, any objective
 \end{itemize}
 \end{frame}
 \begin{frame}
-\frametitle{From regressors to classifiers I}
+\frametitle{Choosing a cost}
 \begin{itemize}
 \item
-Focus mainly on models based on neural networks (NNs)
+  Requiring a user to specify a notion of their costs and gains as a function of $\FP$ and $\FN$ is necessary to define the problem being solved.
+  \item
+    The only effect of $C$ is to define the relative importance of reducing $\FP$ versus $\FN$ at each point on the unit square
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Choosing a cost}
+\begin{itemize}
+  \item
+    If a user knows some measure of the costs of each possible outcome of a classification, there is an associated linear cost function $\UC(\Fp,\Fn)=C_\FP\Fn+C_\FN\Fn$ and the training problem is in minimising this expectation.
+  \item
+    If the costs can only be approximated as RVs with finite expectations, it is optimal to minimise using the expactations of those costs
+  \item
+    If nothing is known, then optimising BCE equivalent to minimising AUC/ROC/etc
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Architecture vs loss selection}
+\begin{itemize}
+  \item
+    Should we focus on loss choice or architecture in model design?
+  \item
+    There is a duality between NN architecture and loss - a loss which is a function of $\Fp$ and $\Fn$ can be seen as another layer
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Choice of architecture vs loss}
+\begin{itemize}
 \item
-In this case a choice of parameters $P\in\PAR$ includes the network's weights $P_w\in\PAR_w$ and the parameters associated with some choice of gradient descent algorithm $P_\GD\in\PAR_\GD$
+Models are commonly trained to minimise a loss which in some way represents how far predictions are from the target with no regard for the class, for example
+
+\begin{gather*}
+  L_{L^2}(B)=\sum_{i\in B} |\YP_i-Y_i|^2,\text{ or, if }\OUT_{\texttt{NN}}\subseteq(0,1),\\
+  \texttt{BCE}(B)=-\tfrac1{\#B}\left(\sum_{i\in B_+}\log(\hat Y_i)+\sum_{i\in B_-}\log(1-\hat Y_i)\right)
+\end{gather*}
 \item
-  Problem: we want $\OUT=\TWO$ but the output in $\OUTSMOOTH$ of a NN is continuous/float valued
-\item
-  Solution: set the binary prediction equal to $+$ or $-$ depending on whether the NN's output $\PREDSMOOTH(P,X)$ is greater than a real parameter $\CO$: 
-$$
-\PRED(P,X)=\begin{cases}+\text{ if }\PREDSMOOTH(P,X)>\CO\text{ and}\\-\text{ otherwise.}\end{cases}
-$$
-\item
-  Write $\yN=\PREDSMOOTH(P,x)$ and $\YN_i=\PREDSMOOTH(P,X_i)$.
+These choices of loss function place similar importance on making the model's predictions close to the actual value for every data point, and one may use them interchangably by rescaling the last layer of the NN appropriately.
 \end{itemize}
 \end{frame}
 \begin{frame}
 \frametitle{Gradient descent}
 \begin{itemize}
 \item
-  For a NN with fixed forward pass implementation $\PREDSMOOTH$ and cutoff $\CO$ there are many possible choices of LMs which can be composed as we please to make new ones.
+  For a NN with fixed forward pass implementation $\PREDSMOOTH$ and cutoff $\CO$ there are many possible choices of routines which can be composed and iterated as we please to make new ones.
 \item
   Fix a sufficiently well behaved loss function and gradient descent routine
     \begin{gather*}
@@ -198,33 +287,6 @@ A fitting method $\UPDFIT$ typically repeatedly iterates the update step over th
   \State\Return $P$
   \EndFunction
 \end{algorithmic}
-\end{itemize}
-\end{frame}
-\begin{frame}
-\begin{itemize}
-\item
-Larger problem: gradient descent relies on repeatedly nudging a model's weights down the slope of some smooth loss function.
-We want to satisfy the user defined constraint, $C<0$.
-While this quantity may be smooth, for a fixed batch $X_B,Y_B$ with $B=B_+\sqcup B_-$, the positive and negative labelled indixes rows these error rates can only be estimated, and the obvious choices
-\begin{gather*}
-\FPB=\frac{\#\left(\PRED(X_B)=+\text{ and }Y_B=-\right)}{\#B}\text{ and }\\
-\FNB=\frac{\#\left(\PRED(X_B)=-\text{ and }Y_B=+\right)}{\#B}
-\end{gather*}
-are discrete quantities whose gradients are either $0$ or undefined.
-\end{itemize}
-\end{frame}
-\begin{frame}
-\frametitle{A base case: ``user defined constraint-unaware'' losses}
-\begin{itemize}
-\item
-Models are commonly trained to minimise a loss which in some way represents how far predictions are from the target with no regard for the class, for example
-
-\begin{gather*}
-  L_{L^2}(B)=\sum_{i\in B} |\YP_i-Y_i|^2,\text{ or, if }\OUT_{\texttt{NN}}\subseteq(0,1),\\
-  \texttt{BCE}(B)=-\tfrac1{\#B}\left(\sum_{i\in B_+}\log(\hat Y_i)+\sum_{i\in B_-}\log(1-\hat Y_i)\right)
-\end{gather*}
-\item
-These choices of loss function place similar importance on making the model's predictions close to the actual value for every data point, and one may use them interchangably by rescaling the last layer of the NN appropriately.
 \end{itemize}
 \end{frame}
 \begin{frame}
@@ -272,7 +334,7 @@ unsw-nb15:
 %\item
 %Consider the case where $g$ takes values in $[0,1]$, so that the threshold is to be chosen from $(0,1)$.
 %\item
-%A model is said to be \textbf{perfectly calibrated} if $\mathbb P(y=+|g(x)=t)=t$ for any $t\in[0,1]$.
+%A model is said to be \textbf{perfectly calibrated} if $\Prob(y=+|g(x)=t)=t$ for any $t\in[0,1]$.
 %In this case, the output of the model can be understood as a probability that the label belongs to the positive class.
 %\item
 %This can be measured using the test set, for example by checking that over small intervals $[t-\delta,t+\delta]$ we have
