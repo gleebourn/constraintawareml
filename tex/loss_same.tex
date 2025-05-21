@@ -1,0 +1,98 @@
+\documentclass{beamer}
+\usepackage{amsmath}
+\usepackage{algpseudocode}
+%\newcommand{\IN}{{\texttt{In}}}
+%\newcommand{\OUT}{{\texttt{Out}}}
+\newcommand{\IN}{{\texttt{X}}}
+\newcommand{\OUT}{{\texttt{Y}}}
+\newcommand{\DIM}{{\texttt{d}}}
+\newcommand{\OUTSMOOTH}{{\texttt{OUT}_{\texttt{NN}}}}
+\newcommand{\TWO}{\{\pm\}}
+%\newcommand{\PAR}{{\texttt{Par}}}
+\newcommand{\PAR}{{\texttt{P}}}
+
+\newcommand{\GD}{{\texttt{GD}}}
+
+\newcommand{\CO}{{\hat w}}
+\newcommand{\NNW}{{\tilde w}}
+
+\newcommand{\UC}{{\texttt{C}_{\texttt{FPFN}}}}
+
+\newcommand{\BS}{{P_{\texttt{bs}}}}
+\newcommand{\RAND}{{\texttt{rand}}}
+\newcommand{\SHUFF}{{\texttt{shuff}}}
+
+\newcommand{\TRN}{{\texttt{Train}}}
+\newcommand{\TST}{{\texttt{Test}}}
+
+\newcommand{\RKG}{{\texttt{RKG}}}
+
+\newcommand{\PRED}{{\hat y}}%{{\texttt{Pred}}}
+\newcommand{\PREDSMOOTH}{{\tilde y}}%{{\texttt{Pred}_{\texttt{NN}}}}
+\newcommand{\yP}{{\hat y}}
+\newcommand{\YP}{{\hat Y}}
+\newcommand{\YN}{{\tilde Y}}
+\newcommand{\UPD}{{\texttt{Upd}}}
+\newcommand{\BCE}{{\texttt{BCE}}}
+\newcommand{\UPDSTEP}{{\texttt{Upd}_{\texttt{step}}}}
+\newcommand{\UPDEP}{{\texttt{Upd}_{\texttt{epoch}}}}
+\newcommand{\UPDFIT}{{\texttt{Upd}_{\texttt{fit}}}}
+\newcommand{\Prob}{{\mathbb P}}
+\newcommand{\ProbH}{{\widehat{\mathbb P}}}
+
+\newcommand{\XYEP}{{\texttt{Z}_{\texttt{epoch}}}}
+\newcommand{\XB}{{\texttt{X}_{\texttt{B}}}}
+\newcommand{\YB}{{\texttt{Y}_{\texttt{B}}}}
+
+\newcommand{\FP}{{\texttt{FP}}}
+\newcommand{\FN}{{\texttt{FN}}}
+\newcommand{\CFP}{{\texttt{C}_\FP}}
+\newcommand{\CFN}{{\texttt{C}_\FN}}
+\newcommand{\FPE}{{\widehat{\texttt{FP}}}}
+\newcommand{\FNE}{{\widehat{\texttt{FN}}}}
+\newcommand{\Fp}{\widetilde{\texttt{FP}}}
+\newcommand{\Fn}{\widetilde{\texttt{FN}}}
+\newcommand{\FPB}{{\texttt{FP}_B}}
+\newcommand{\FNB}{{\texttt{FN}_B}}
+\newcommand{\FPT}{{\texttt{FP}_\oplus}}
+\newcommand{\FNT}{{\texttt{FN}_\oplus}}
+
+\newcommand{\CTHRESH}{{\texttt{C}}_{\texttt{FPFN}}}
+
+\title{Loss functions don't matter}
+\subtitle{George Lee}
+\begin{document}
+\begin{frame}
+\titlepage
+\end{frame}
+
+\section{Setup}
+\begin{frame}
+\frametitle{Setup}
+\begin{itemize}
+\item
+  NN with forward pass $\PREDSMOOTH:\IN\times\PAR\rightarrow\OUT\subseteq\mathbb R$ applied to feature $x$ to predict target $y$
+\item
+  What difference does loss make?
+\item
+  If $\PREDSMOOTH$ can take any value define the $L^p$ loss $L_p(\yP,y)=\sum_i|\yP_i-y_i|^p$
+\item
+  If $y\in\{0,1\}$ then further define dot loss $L_\bullet(\PREDSMOOTH,y)=\PREDSMOOTH\cdot(-1)^y$,
+\item
+  If in addition $\yP$ takes values on $(0,1)$ define $\beta-$weighted binary cross entropy
+  \begin{align*}
+    \BCE_\beta(\PREDSMOOTH,y)=&-\beta\sum_{i:y_i=1}\log\PREDSMOOTH_i-\tfrac1\beta\sum_{i:y_i=0}\log(1-\PREDSMOOTH_i)\\
+    =&-\sum_i\beta^{(2y_i-1)}\log(1-|y_i-\PREDSMOOTH_i|)
+  \end{align*}
+\end{itemize}
+\end{frame}
+\begin{frame}
+  \begin{itemize}
+    \item
+      Yeah
+  \end{itemize}
+\end{frame}
+\end{document}
+
+%\bibliography{imbalanced}{}
+%\bibliographystyle{plain}

@@ -45,6 +45,8 @@
 
 \newcommand{\FP}{{\texttt{FP}}}
 \newcommand{\FN}{{\texttt{FN}}}
+\newcommand{\CFP}{{\texttt{C}_\FP}}
+\newcommand{\CFN}{{\texttt{C}_\FN}}
 \newcommand{\FPE}{{\widehat{\texttt{FP}}}}
 \newcommand{\FNE}{{\widehat{\texttt{FN}}}}
 \newcommand{\Fp}{\widetilde{\texttt{FP}}}
@@ -57,7 +59,7 @@
 \newcommand{\CTHRESH}{{\texttt{C}}_{\texttt{FPFN}}}
 
 \title{Constraint awareness for binary classification}
-\subtitle{sample}
+\subtitle{George Lee}
 \begin{document}
 \begin{frame}
 \titlepage
@@ -127,14 +129,18 @@ Offline validation by randomly splitting $\{1,\cdots,N\}=\TRN\sqcup\TST$ into tr
 \item
   Fix parameters $w\in\PAR$
 \item
-  Binary classifiers target RVs $(x,y)$ considered in this work are the composition of NN based inference with a binary cutoff step with respective parameters $w=(\NNW,\CO)$.
-  \item
-    The continuous-valued prediction $\PREDSMOOTH(x)$ is classified according to a cutoff hyperparameter $\CO$:
-    $$
-    \PRED(\PREDSMOOTH(x))=\begin{cases}+\text{ if }\tilde y>\CO,\\-\text{ otherwise.}\end{cases}
-    $$
+  Many binary classifiers modelling RVs $(x,y)$ are based on regression models
 \item
-  When a choice of dataset or batch $(X,Y)$ is unambiguous write $\YN_i=\PREDSMOOTH(X_i)$ and $\YP_i=\yP(\YN_i)$ for the binary and continuous inferences respectively.
+  feature $x\rightsquigarrow$ regression inference $\PREDSMOOTH\rightsquigarrow$ binary class label $\PRED$
+\item
+  Respective parameters for the overall model then are $w=(\NNW,\CO)$
+\item
+  The continuous-valued prediction $\PREDSMOOTH(\NNW,x)$ is classified according to a cutoff hyperparameter $\CO$:
+  $$
+  \PRED(\PREDSMOOTH,\CO)=\begin{cases}+\text{ if }\tilde y>\CO,\\-\text{ otherwise.}\end{cases}
+  $$
+\item
+  When dataset or batch $(X,Y)$ fixed write $\YN_i=\PREDSMOOTH(X_i)$ and $\YP_i=\yP(\YN_i)$ for the binary and continuous inferences respectively.
 \end{itemize}
 \end{frame}
 \begin{frame}
@@ -144,6 +150,7 @@ Offline validation by randomly splitting $\{1,\cdots,N\}=\TRN\sqcup\TST$ into tr
 In this setting only need to infer one bit of information $y\in\TWO$ at a time
 \item
 Accordingly, two possible types of errors
+\item
 Fix a batch $B\subseteq\{1,\cdots,N\}$ on which to estimate statistics.
 \begin{gather*}
   \FP=\Prob(\yP>y),~\FN=\Prob(\yP<y),\\
@@ -157,7 +164,7 @@ Fix a batch $B\subseteq\{1,\cdots,N\}$ on which to estimate statistics.
 \end{itemize}
 \end{frame}
 \begin{frame}
-\frametitle{User defined constraints}
+\frametitle{Regression approach}
 \begin{itemize}
 \item
   For a fixed batch, reducing $\Fp$ and $\Fn$ will reduce $\FP$ and $\FN$
@@ -173,9 +180,7 @@ Fix a batch $B\subseteq\{1,\cdots,N\}$ on which to estimate statistics.
 \item
   Algorithm needs an objective function to optimise: user needs to select one
 \item
-  objective 
-\item
-  Regression step needs a smooth objective function: Bayesian formalism provides one
+  Estimates of objective might not be immediately amenable to gradient descent algorithms required for NN training
 \item
   $\FP$ and $\FN$ are two probabilities, and we seek to reduce both according to a precise definition of their relative importance.
 \end{itemize}
@@ -186,11 +191,9 @@ Fix a batch $B\subseteq\{1,\cdots,N\}$ on which to estimate statistics.
 \item
   Parameter selection should be explainable
 \item
-  Constraint is in terms of a continuous RV, but constraint satisfaction measured will be scored by binary performance $\FPE_\TST$ and $\FNE_\TST$.
+  Constraint is in terms of continuous RVs $\FP$ and $\FN$ but constraint satisfaction measured will be scored by binary performance $\FPE_\TST$ and $\FNE_\TST$.
 \item
   We need to find a continuous objective to train a NN model
-\item
-  Well understood, simple choice: minimise cost $C(\FP,\FN)$
 \item
   Example: demanding that a model have error rates below fixed targets $\FPT,\FNT\in(0,1)$ is equivalent to requiring that $C(\FP,\FN)<0$ for the map
   $$
@@ -198,26 +201,49 @@ Fix a batch $B\subseteq\{1,\cdots,N\}$ on which to estimate statistics.
   $$
 \item
   Higher $\FP$ and $\FN$ is always bad, any objective
+\item
+  Want to decide on tradeoff in rigorous manner
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Choosing a cost I}
+\begin{itemize}
+\item
+  Explainable choice for user defined objective: constraint $C(\FP,\FN)$ will take the form of a $\textbf{cost}$
+\item
+  Old, well understood, but seems intrinsically better than many common statistics\cite{ferrerno}:
+\begin{itemize}
+\item
+  Can be scaled to be independent of priors and for cost of 1 to be eqiuivalent to the best guesses that always guesses the more likely class
+\item
+  Simple, intuitive gradient profile
+\item
+  For a fixed regression model this continuous objective is backed by theory, this and gradient descent methods suppresing importance of loss function geometry anull the need to search for the perfect loss
+\end{itemize}
 \end{itemize}
 \end{frame}
 \begin{frame}
 \frametitle{Choosing a cost}
 \begin{itemize}
 \item
+  Simplest case user knows costs of false positives and false negatives $\rightsquigarrow$ use $C(s,t)=s\CFP+t\CFN$.
+\item
   Requiring a user to specify a notion of their costs and gains as a function of $\FP$ and $\FN$ is necessary to define the problem being solved.
-  \item
-    The only effect of $C$ is to define the relative importance of reducing $\FP$ versus $\FN$ at each point on the unit square
+\item
+The only effect of $C$ is to define the relative importance of reducing $\FP$ versus $\FN$ at each point on the unit square
 \end{itemize}
 \end{frame}
 \begin{frame}
-\frametitle{Choosing a cost}
+\frametitle{Choosing a cost II}
 \begin{itemize}
   \item
-    If a user knows some measure of the costs of each possible outcome of a classification, there is an associated linear cost function $\UC(\Fp,\Fn)=C_\FP\Fn+C_\FN\Fn$ and the training problem is in minimising this expectation.
+    If as in previous slide costs known in advance, apply gradient update method to $\UC(\Fp,\Fn)=C_\FP\Fn+C_\FN\Fn$ to target an actual solution to the problem.  However, can generalise to broader scenarios
   \item
     If the costs can only be approximated as RVs with finite expectations, it is optimal to minimise using the expactations of those costs
   \item
     If nothing is known, then optimising BCE equivalent to minimising AUC/ROC/etc
+  \item
+    In the offline setting, this may suggest searching for other objectives is unnecessary
 \end{itemize}
 \end{frame}
 \begin{frame}
@@ -243,90 +269,102 @@ Models are commonly trained to minimise a loss which in some way represents how 
 These choices of loss function place similar importance on making the model's predictions close to the actual value for every data point, and one may use them interchangably by rescaling the last layer of the NN appropriately.
 \end{itemize}
 \end{frame}
+%\begin{frame}
+%\frametitle{Gradient descent}
+%\begin{itemize}
+%\item
+%  For a NN with fixed forward pass implementation $\PREDSMOOTH$ and cutoff $\CO$ there are many possible choices of routines which can be composed and iterated as we please to make new ones.
+%\item
+%  Fix a sufficiently well behaved loss function and gradient descent routine
+%    \begin{gather*}
+%      L:(\OUTSMOOTH\times\TWO)^{<\infty}\rightarrow\mathbb R\text{ and}\\
+%      \GD:\PAR_\GD\times\PAR_w\times\PAR_w\rightarrow\PAR_\GD\times\PAR_w.
+%    \end{gather*}
+%\item
+%A single update step $\UPDSTEP$ is given by
+%\begin{algorithmic}[0]
+%\Function{$\UPDSTEP$}{$P,\XB,\YB$}
+%  \State $(P_\GD,P_w)\gets\GD(P_\GD,P_w,\partial_w(L(\PRED(P,\XB),\YB)))$
+%  \State\Return $P$
+%\EndFunction.
+%\end{algorithmic}
+%\end{itemize}
+%\end{frame}
+%\begin{frame}
+%\frametitle{Epochs and fitting algorithms}
+%\begin{itemize}
+%\item
+%A fitting method $\UPDFIT$ typically repeatedly iterates the update step over the randomly batched training set, repeatedly calling an epoch learning method
+%\item
+%   For fixed random key generator $\RKG$ and batched shuffling routine $\SHUFF$
+%   % \begin{gather*}
+%   %   \RKG:\PAR_\RAND\rightarrow\PAR_\RAND\text{ and}\\
+%   %   \SHUFF:\mathbb N\times\PAR_\RAND\times\left(\IN\times\OUT\right)^{<\infty}\rightarrow\left(\IN\times\OUT\right)^{(<\infty)\times(<\infty)},
+%   % \end{gather*}
+%  such a routine is given by
+%\item
+%\begin{algorithmic}[0]
+%  \Function{$\UPDEP$}{$P$,$X$,$Y$}
+%  \State batched$\gets\SHUFF(\BS,P_\RAND,(X_i,Y_i)_i)$
+%  \ForAll{$(\XB,\YB)\in$ batched}
+%  \State $P\gets\UPDSTEP(P,\XB,\YB)$
+%  \EndFor
+%  \State $P_\RAND\gets\RKG(P_\RAND)$
+%  \State\Return $P$
+%  \EndFunction
+%\end{algorithmic}
+%\end{itemize}
+%\end{frame}
+%\begin{frame}
+%\frametitle{Constraint aware training I: class weighting}
+%\begin{itemize}
+%\item
+%  Relative rates of false positives and false negatives of the previous loss functions may be adjusted after training by a routine that chooses an appropriate $\CO$.
+%\item One may move between the loss functions describe above by rescaling the last layer of the NN appropriately.
+%  However, one may choose a loss $\CO$ which depends on target classes and instead make gradient descent steps that reduce the value of $C$ throughout the training process.
+%  Updates on the last layer of a network's bias have the effect of controlling the relative rates.
+%\item
+%  Seek to minimise an intuitive/explainable choice of loss function $L(B)=-\beta\sum_{i\in B_+}\hat Y_i+\tfrac1\beta\sum_{i\in B_-}\hat Y_i$.
+%  These losses are all increasing functions of the errors: neural networks are capable of learning nonlinear relationships in any case, and modern gradient descent methods also go some way toward mitigating the differences between different choices of loss.
+%\end{itemize}
+%\end{frame}
 \begin{frame}
-\frametitle{Gradient descent}
+\frametitle{Cost choice influences resulting FP-FN tradeoff without posthoc thresholding}
 \begin{itemize}
 \item
-  For a NN with fixed forward pass implementation $\PREDSMOOTH$ and cutoff $\CO$ there are many possible choices of routines which can be composed and iterated as we please to make new ones.
+  BCE is often used for training, but cost less ubuquitous
 \item
-  Fix a sufficiently well behaved loss function and gradient descent routine
-    \begin{gather*}
-      L:(\OUTSMOOTH\times\TWO)^{<\infty}\rightarrow\mathbb R\text{ and}\\
-      \GD:\PAR_\GD\times\PAR_w\times\PAR_w\rightarrow\PAR_\GD\times\PAR_w.
-    \end{gather*}
-\item
-A single update step $\UPDSTEP$ is given by
-\begin{algorithmic}[0]
-\Function{$\UPDSTEP$}{$P,\XB,\YB$}
-  \State $(P_\GD,P_w)\gets\GD(P_\GD,P_w,\partial_w(L(\PRED(P,\XB),\YB)))$
-  \State\Return $P$
-\EndFunction.
-\end{algorithmic}
+  The functions learned are related, but targetting one specific cost reduces dimensions of the problem by 1 and may force the algorithm to concentrate on learning points near a certain likelihood of being in a classs rather than worring about AUC
 \end{itemize}
 \end{frame}
 \begin{frame}
-\frametitle{Epochs and fitting algorithms}
-\begin{itemize}
-\item
-A fitting method $\UPDFIT$ typically repeatedly iterates the update step over the randomly batched training set, repeatedly calling an epoch learning method
-\item
-   For fixed random key generator $\RKG$ and batched shuffling routine $\SHUFF$
-   % \begin{gather*}
-   %   \RKG:\PAR_\RAND\rightarrow\PAR_\RAND\text{ and}\\
-   %   \SHUFF:\mathbb N\times\PAR_\RAND\times\left(\IN\times\OUT\right)^{<\infty}\rightarrow\left(\IN\times\OUT\right)^{(<\infty)\times(<\infty)},
-   % \end{gather*}
-  such a routine is given by
-\item
-\begin{algorithmic}[0]
-  \Function{$\UPDEP$}{$P$,$X$,$Y$}
-  \State batched$\gets\SHUFF(\BS,P_\RAND,(X_i,Y_i)_i)$
-  \ForAll{$(\XB,\YB)\in$ batched}
-  \State $P\gets\UPDSTEP(P,\XB,\YB)$
-  \EndFor
-  \State $P_\RAND\gets\RKG(P_\RAND)$
-  \State\Return $P$
-  \EndFunction
-\end{algorithmic}
-\end{itemize}
-\end{frame}
-\begin{frame}
-\frametitle{Constraint aware training I: class weighting}
-\begin{itemize}
-\item
-  Relative rates of false positives and false negatives of the previous loss functions may be adjusted after training by a routine that chooses an appropriate $\CO$.
-\item One may move between the loss functions describe above by rescaling the last layer of the NN appropriately.
-  However, one may choose a loss $\CO$ which depends on target classes and instead make gradient descent steps that reduce the value of $C$ throughout the training process.
-  Updates on the last layer of a network's bias have the effect of controlling the relative rates.
-\item
-  Seek to minimise an intuitive/explainable choice of loss function $L(B)=-\beta\sum_{i\in B_+}\hat Y_i+\tfrac1\beta\sum_{i\in B_-}\hat Y_i$.
-  These losses are all increasing functions of the errors: neural networks are capable of learning nonlinear relationships in any case, and modern gradient descent methods also go some way toward mitigating the differences between different choices of loss.
-\end{itemize}
-\end{frame}
-\begin{frame}
-\frametitle{Experimental setup I}
+\frametitle{Cost choice influences resulting FP-FN tradeoff without posthoc thresholding}
 \begin{itemize}
 \item
 Focus on malicious communication detection per UC2, where typically $p\ll 1$ and false positives may be far more tolerable and have less serious consequences than false negatives.
 \item
-A python class was developed to benchmark classification algorithms over a range of possible false positive and false negative targets
-\item
-$\texttt{ModelEvaluation}$ provides an interface for comparison of multiple classification algorithms
-\item 
-In order to benchmark binary classification performance over a range of problems, a dataset with greater than two classes may be provided: models are then trained to distinguish one class from many.
-
-\item
-$\texttt{ModelEvaluation}$ instantiates $\texttt{MultiTrainer}$s, each of which trains models with fixed hyperparameters but with varying end times, class labels and target error rates.
+  Training directly on cost does force a corresponding payoff
+  \includegraphics[scale=0.35]{fpfn_tradeoff_effect.png}
+%\item
+%A python class was developed to benchmark classification algorithms over a range of possible false positive and false negative targets
+%\item
+%$\texttt{ModelEvaluation}$ provides an interface for comparison of multiple classification algorithms
+%\item 
+%In order to benchmark binary classification performance over a range of problems, a dataset with greater than two classes may be provided: models are then trained to distinguish one class from many.
+%
+%\item
+%$\texttt{ModelEvaluation}$ instantiates $\texttt{MultiTrainer}$s, each of which trains models with fixed hyperparameters but with varying end times, class labels and target error rates.
 \end{itemize}
 \end{frame}
 
-\begin{frame}
-\frametitle{Is resampling beneficial?}
-\begin{itemize}
-\item
-Class weighting appears to achieve similar results while avoiding an extra step.
-unsw-nb15:
-\end{itemize}
-\end{frame}
+%\begin{frame}
+%\frametitle{Is resampling beneficial?}
+%\begin{itemize}
+%\item
+%Class weighting appears to achieve similar results while avoiding an extra step.
+%unsw-nb15:
+%\end{itemize}
+%\end{frame}
 %\begin{frame}
 %\end{itemize}
 %\frametitle{...But are we learning likelihoods?}
@@ -362,4 +400,8 @@ unsw-nb15:
 %In this case, we should be skeptical of the idea that we benefitted from a ``constraint aware'' training process, since we can still choose a threshold to meet any desired compromise between the false positive and false negative rates
 %\end{itemize}
 %\end{frame}
+
+\bibliography{imbalanced}{}
+\bibliographystyle{plain}
+
 \end{document}
