@@ -3,15 +3,36 @@
 \usepackage{algpseudocode}
 %\newcommand{\IN}{{\texttt{In}}}
 %\newcommand{\OUT}{{\texttt{Out}}}
-\newcommand{\IN}{{\texttt{X}}}
-\newcommand{\OUT}{{\texttt{Y}}}
+\newcommand{\TYPE}[1][X]{{\texttt{#1}}}
+\newcommand{\TYPEY}{{\TYPE[Y]}}
+\newcommand{\IN}{\TYPE}
+\newcommand{\OUT}{\TYPEY}
 \newcommand{\DIM}{{\texttt{d}}}
 \newcommand{\OUTSMOOTH}{{\texttt{OUT}_{\texttt{NN}}}}
 \newcommand{\TWO}{\{\pm\}}
 %\newcommand{\PAR}{{\texttt{Par}}}
 \newcommand{\PAR}{{\texttt{P}}}
+\newcommand{\BATCH}{{\texttt{B}}}
+\newcommand{\dee}{\textrm{d}}
 
 \newcommand{\GD}{{\texttt{GD}}}
+\newcommand{\NN}{{\texttt{NN}}}
+\newcommand{\siid}{\sim_{\texttt{iid}}}
+
+\newcommand{\INDICES}{{\mathbb{I}}}
+\newcommand{\Feature}{{x}}
+\newcommand{\Target}{{y}}
+\newcommand{\TARGET}{{Y}}
+\newcommand{\FEATURE}{{X}}
+\newcommand{\FeatureD}{{x'}}
+\newcommand{\TargetD}{{y'}}
+
+\NewDocumentCommand \FUNC {O{\Pred} O{x}}{{{#1}({#2})}}
+\NewDocumentCommand \TS {O{\FEATURE} O{t}} {{#1}^{(#2)}}
+\NewDocumentCommand \ind {O{n}}{{\texttt{#1}}}
+\NewDocumentCommand \IND {O{\FEATURE} O{n}}{{#1}_{\ind[#2]}}
+\NewDocumentCommand \REST {O{\FEATURE} O{\BATCH}}{{#1}_{#2}}
+\NewDocumentCommand \ENUM {O{\FEATURE} O{\ind} O{\ROWS} O{\in}}{{\left({#1}_{#2}\right)_{{#2}{#4}{#3}}}}
 
 \newcommand{\CO}{{\hat w}}
 \newcommand{\NNW}{{\tilde w}}
@@ -21,17 +42,42 @@
 \newcommand{\BS}{{P_{\texttt{bs}}}}
 \newcommand{\RAND}{{\texttt{rand}}}
 \newcommand{\SHUFF}{{\texttt{shuff}}}
+\newcommand{\DOM}{{\texttt{dom}}}
+\newcommand{\Time}{{t}}
+\newcommand{\TimeD}{{t'}}
+\newcommand{\TIMES}{{\texttt T}}
+\newcommand{\TIMEIND}[1][t]{{(#1)}}
+\newcommand{\WEIGHTS}{{\texttt W}}
+\newcommand{\ROWS}{{\texttt N}}
 
 \newcommand{\TRN}{{\texttt{Train}}}
 \newcommand{\TST}{{\texttt{Test}}}
+\newcommand{\PRD}{{\texttt{Prod}}}
 
 \newcommand{\RKG}{{\texttt{RKG}}}
 
-\newcommand{\PRED}{{\hat y}}%{{\texttt{Pred}}}
-\newcommand{\PREDSMOOTH}{{\tilde y}}%{{\texttt{Pred}_{\texttt{NN}}}}
+\newcommand{\Phase}{{\omega}}
+\newcommand{\PHASE}{{\Omega}}
+\newcommand{\PhaseK}{{\widehat\Phase}}
+\newcommand{\PHASEK}{{\widehat\PHASE}}
+\newcommand{\STAT}{{S}}
+\newcommand{\Stat}{{s}}
+\newcommand{\StatD}{{\Stat'}}
+\newcommand{\SCORE}{{C}}
+\newcommand{\Score}{{c}}
+\newcommand{\ScoreFun}{{\textbf{c}}}
+\newcommand{\Regret}{{r}}
+\newcommand{\Pred}[1][y]{{\hat{#1}}}
+\newcommand{\PredD}[1][y]{{\hat{#1}'}}
+\newcommand{\STATPRED}{\Pred[\STAT]}
+\newcommand{\Predsmooth}[1][y]{{\tilde{#1}}}
+\newcommand{\PRED}{{\Pred[\TARGET]}}
+\newcommand{\PREDSMOOTH}{{\Predsmooth[\TARGET]}}
+\NewDocumentCommand \Marginal{O{{}} O{\Target} O{\Feature} O{\TargetD}}{f_{\left({#2}_{#1}|{#3}_{#1}={#4}\right)}}
+\NewDocumentCommand \Bestguess{O{{}} O{\Target} O{\FeatureD} O{\ScoreFun}}{{{#2}^{*}_{#1}\left({#3}_{#1},{#4}_{#1}\right)}}
 \newcommand{\yP}{{\hat y}}
-\newcommand{\YP}{{\hat Y}}
-\newcommand{\YN}{{\tilde Y}}
+\newcommand{\YP}{{\hat \TARGET}}
+\newcommand{\YN}{{\tilde \TARGET}}
 \newcommand{\UPD}{{\texttt{Upd}}}
 \newcommand{\BCE}{{\texttt{BCE}}}
 \newcommand{\UPDSTEP}{{\texttt{Upd}_{\texttt{step}}}}
@@ -39,60 +85,290 @@
 \newcommand{\UPDFIT}{{\texttt{Upd}_{\texttt{fit}}}}
 \newcommand{\Prob}{{\mathbb P}}
 \newcommand{\ProbH}{{\widehat{\mathbb P}}}
+\newcommand{\SGN}{{\texttt{sgn}}}
 
 \newcommand{\XYEP}{{\texttt{Z}_{\texttt{epoch}}}}
-\newcommand{\XB}{{\texttt{X}_{\texttt{B}}}}
-\newcommand{\YB}{{\texttt{Y}_{\texttt{B}}}}
+\newcommand{\AB}{{A_\BATCH}}
+\newcommand{\XB}{{\FEATURE_\BATCH}}
+\newcommand{\YB}{{\TARGET_\BATCH}}
+\newcommand{\ZB}{{Z_\BATCH}}
+\newcommand{\YPB}{{\YP_\BATCH}}
+\newcommand{\XTRN}{{\FEATURE_\TRN}}
+\newcommand{\YTRN}{{\TARGET_\TRN}}
+\newcommand{\YPTRN}{{\YP_\TRN}}
 
-\newcommand{\FP}{{\texttt{FP}}}
-\newcommand{\FN}{{\texttt{FN}}}
+\newcommand{\fp}{{\texttt{fp}}}
+\newcommand{\fn}{{\texttt{fn}}}
+\newcommand{\FP}{{FP}}
+\newcommand{\FN}{{FN}}
+\newcommand{\FPB}{{\FP_\BATCH}}
+\newcommand{\FNB}{{\FN_\BATCH}}
 \newcommand{\CFP}{{\texttt{C}_\FP}}
 \newcommand{\CFN}{{\texttt{C}_\FN}}
 \newcommand{\FPE}{{\widehat{\texttt{FP}}}}
 \newcommand{\FNE}{{\widehat{\texttt{FN}}}}
-\newcommand{\Fp}{\widetilde{\texttt{FP}}}
-\newcommand{\Fn}{\widetilde{\texttt{FN}}}
-\newcommand{\FPB}{{\texttt{FP}_B}}
-\newcommand{\FNB}{{\texttt{FN}_B}}
+\newcommand{\Fp}{{\texttt{fp}}}
+\newcommand{\Fn}{{\texttt{fn}}}
+\newcommand{\FS}{\texttt f}
 \newcommand{\FPT}{{\texttt{FP}_\oplus}}
 \newcommand{\FNT}{{\texttt{FN}_\oplus}}
 
 \newcommand{\CTHRESH}{{\texttt{C}}_{\texttt{FPFN}}}
 
-\title{Loss functions don't matter}
+\title{Loss-architecture duality and experimental design}
 \subtitle{George Lee}
 \begin{document}
 \begin{frame}
 \titlepage
 \end{frame}
-
-\section{Setup}
 \begin{frame}
-\frametitle{Setup}
+\frametitle{Notational conventions}
 \begin{itemize}
-\item
-  NN with forward pass $\PREDSMOOTH:\IN\times\PAR\rightarrow\OUT\subseteq\mathbb R$ applied to feature $x$ to predict target $y$
-\item
-  What difference does loss make?
-\item
-  If $\PREDSMOOTH$ can take any value define the $L^p$ loss $L_p(\yP,y)=\sum_i|\yP_i-y_i|^p$
-\item
-  If $y\in\{0,1\}$ then further define dot loss $L_\bullet(\PREDSMOOTH,y)=\PREDSMOOTH\cdot(-1)^y$,
-\item
-  If in addition $\yP$ takes values on $(0,1)$ define $\beta-$weighted binary cross entropy
-  \begin{align*}
-    \BCE_\beta(\PREDSMOOTH,y)=&-\beta\sum_{i:y_i=1}\log\PREDSMOOTH_i-\tfrac1\beta\sum_{i:y_i=0}\log(1-\PREDSMOOTH_i)\\
-    =&-\sum_i\beta^{(2y_i-1)}\log(1-|y_i-\PREDSMOOTH_i|)
-  \end{align*}
+  \item
+    \texttt{TEXTTT}/$\mathbb{MATHBB}$: Spaces
+  \item
+    $TEXT$: statistics for a fixed experiment, functions
+  \item
+    $text$: time indexes, numbers, RVs, (possibly) random functions
+  \item
+    Timeseries have bracketed superscripts eg $\TS[w]$
+  \item
+    \texttt{texttt}: discrete indices
+  \item
+    Discretely indexed statistics addressed with subscripts eg $\IND$
+  \item
+    $\hat h\hat a\hat t\hat s/\tilde t\tilde i\tilde l\tilde d\tilde e\tilde s$: predictions/continuous predictions
+  \item
+    $\INDICES=\{$all possible discrete indices$\}$, that is,
+    $$
+    \INDICES=\mathbb Z^{<\infty}=\bigsqcup_{n\in\mathbb N_0}\mathbb Z^n
+    $$
+  \item
+    If $\BATCH\subseteq\ROWS$ and  $A\in\TYPE^\ROWS$ write $\REST[A]=(\IND[A][b])_{\texttt b\in\BATCH}\in\TYPE^\BATCH$ for the restriction of $A$ to $\BATCH$
 \end{itemize}
 \end{frame}
 \begin{frame}
-  \begin{itemize}
-    \item
-      Yeah
+\frametitle{Setting}
+\begin{itemize}
+  \item
+    User will be making inferences and decisions based on observations that are functions of the underlying state $\Phase$ of a system
+  \item
+    Any statistic/data describing the system is a function $\STAT(\Phase)$ of its state
+  \item
+    Classification and regression: determine likely values of $\TARGET(\Phase)$ taking discrete and continuous values respectively based on the value of some other data $\FEATURE(\Phase)$
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Inferences from data}
+\begin{itemize}
+  \item
+    User works with dataset or stream $(\Feature,\Target)=(\ENUM[\Feature],\ENUM[\Target])$ indexed by $\ind\in\ROWS$
+  \item
+    User observations and predictions depend on underlying system $\PhaseK(\Phase)=\ENUM[\PhaseK]$
+
+  \item
+    Dataset may be written $\Feature=\ENUM[\FEATURE(\PhaseK_{\ind})][][\ROWS][\ind\in]$ and $\Target=\ENUM[\TARGET(\PhaseK_{\ind})][][\ROWS][\ind\in]$
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Plan}
+\begin{itemize}
+  \item
+    Determine and represent constraints as user-explainable classifier optimisation problems
+  \item
+    Probablistic reasoning allows us to determine which continuous regression problems we should be solving
+  \item
+    Select appropriate model architectures and algorithms for these problems
   \end{itemize}
 \end{frame}
+\begin{frame}
+\frametitle{Real world use}
+  \begin{itemize}
+  \item
+    End user will evaluate performance of a model by evaluating its predictions $\Pred$ against the actual value $\Target$
+  \item
+    Suppose some statistic $\Score$ measuring performance of the classifier is made at time $t\in\TIMES$
+  \item
+    $\Score$ is a measure of a batch $\BATCH$ of earlier outcomes $\TargetD,\PredD=\REST[\Target],\REST[\Pred]$ which is chosen based on user observations and decisions $\PhaseK$
+      $$
+      \Score=\REST[\SCORE][\PhaseK](\TargetD,\PredD)
+      $$
+  \item
+    If user knows the probabilities of possible outcomes conditional on $\Feature=\FeatureD$ then they should choose $\Pred(\Feature,\SCORE_{\PhaseK})$ that minimises $\SCORE_{\PhaseK}$ in expectation
+  \item
+    For binary classification, this is the choice $\Pred\in\TWO^{\BATCH}$ that minimises
+      $$
+      \mathbb E(\SCORE_{\PhaseK}(\Target,\Pred)|\Feature=\FeatureD)=\sum_{\TargetD\in\TWO^{\BATCH}}\SCORE_{\PhaseK}(\TargetD,\Pred)\mathbb P(\TargetD|\Feature=\FeatureD)
+      $$
+  \end{itemize}
+  \end{frame}
+\begin{frame}
+\frametitle{Theoretical characterisation of optimal predictions: marginals}
+  \begin{itemize}
+  \item
+    Have reformulated classification probablistically, allowing us to write down an optimal solution in terms of a probability
+    \item
+      For a pair $(\Feature,\Target)$ of RVs taking values in $\IN$ and $\OUT$, the marginal/conditional distribution describes likely values of $\Target$ based on the value of $\Feature$
+    \item
+      This distribution is the best possible knowledge of what $\Target$ is likely to be if we only know the value of $\Feature$
+    \item
+        Write $\Marginal$ for the density/probability that $\Target=\TargetD$ conditional on the observation $\Feature=\FeatureD$
+  \item
+    If we know the marginals of $\Target$ given $\Feature$ then we can also calculate the marginals for any statistic $\Stat=\STAT(\Target)$ of $\Target$ with the rule
+      $$
+      \Marginal[][\Stat][\Feature][\FeatureD](\StatD)=\int_{\TargetD\in\OUT:\STAT(\TargetD)=\StatD}\Marginal[][\Target][\Feature][\FeatureD](\TargetD)\frac{\dee\STAT(\TargetD)}{\dee\TargetD}\dee\TargetD
+      $$
+  \end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Perfect knowledge of marginals yields optimal performance}
+  \begin{itemize}
+        \item
+      for binary classification and not batching $\ScoreFun$ is defined by four numbers for the fours possible prediction-target outcomes
+        \item
+          the marginal distribution is equivalent to its corresponding marginal probability $\mathbb P(\Target=+|\Feature=\TargetD)$ of a positive classification
+    \item
+      User should make the prediction $\Pred\in\TWO$ with a smaller value of
+          $$
+          \mathbb E(\ScoreFun(\Target,\pm)|\Feature=\FeatureD)=\ScoreFun(\mp,\pm)\mathbb P(\Target=+|\Feature=\FeatureD)
+          $$
+      \end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Optimal regression targets for offline learning}
+  \begin{itemize}
+  \item
+    If all we know is that mistakes will be bad, impossible to refine problem beyond the fact that good knowledge of the marginals will allow probablistic optimisation of stats on the fly: score offline classifiers that target this approach using AUC or similar to evaluate how well this is achieved
+  \item
+    If costs are fixed or an iid RV per evalution then we can restrict our attention to learning how near some cutoff probability the marginals lie
+  \end{itemize}
+  \end{frame}
+  \begin{frame}
+    \frametitle{Refining the problem for likely values of $C$}
+  \begin{itemize}
+  \item
+    Any other choice of target will be distributed according to some function of the marginals
+  \item
+    
+  \end{itemize}
+\end{frame}
+%\begin{frame}
+%\frametitle{Offline and online decision making}
+%  \begin{itemize}
+%    \item
+%      Offline: start with train and test indices $\TRN\sqcup\TST$. user will
+%      \begin{itemize}
+%        \item
+%          train a model on $\TRN$
+%        \item
+%          evaluate performance on $\TST$
+%        \item
+%          decide based on this whether to use the model to make prediction on real world rows whose labels have not yet been identified $\PRD$.
+%
+%    \end{itemize}
+%  \end{itemize}
+%\end{frame}
+%\begin{frame}
+%\frametitle{Setup I}
+%  \begin{itemize}
+%  \item
+%    $\STAT$ should be as simple and explainable to the user as possible
+%  \item
+%  To make the problem well defined, need to properly specify $\FPE$ and $\FNE$
+%    \item
+%      In application: model used to predict labels $\TARGET_i$ of a steam of real world observation $\FEATURE_i$.
+%    \item
+%      User could take many different approaches, assume based on a finite batch $\BATCH$ of predictions $\STATPRED_B(\FPE_B,\FNE_B)$
+%    \item
+%      We can always assume that errors are bad, so that $\STATPRED_B$ is increasing in the values $\FPE_B$ and $\FNE_B$.
+%    \item
+%      Offline setting: will be fed rows and labels $(\FEATURE_i,\TARGET_i)$ sampled according to
+%  \end{itemize}
+%  \end{frame}
+%  \begin{frame}
+%  \begin{itemize}
+%\item
+%  Approach: build a classifier by turning the problem into one of
+%  \begin{itemize}
+%\item
+%  finding a regression model $\tilde y$ trained to minimise a related tractable quantity $L$ then obtaining a binary prediction $\hat y$ depending on the value of $\tilde y$.
+%  \end{itemize}
+%\item
+%  NN with forward pass $\Predsmooth:\IN\times\PAR\rightarrow\OUT\subseteq\mathbb R$ applied to feature $x$ to predict label $y$.
+%\item
+%  For such a fixed map, when we speak of training $\tilde y$ we mean iteratively applying $\GD$ for fixed architecture $\tilde y\in\NN(\PAR,\IN,\OUT)$ to find weights $w\in\PAR$ to solve some optimisation problem
+%\item
+%  Fix a batch of rows $(x,y)$
+%\item
+%  For a batch $\BATCH$ of one or more rows the NN's output can be encoded as $(\Fp_\BATCH,\Fn_\BATCH)$ where for each row one of $\Fp$ and $\Fn=0$ while the other increases with how far away from $y$ the prediction is for $y=+$ and $-$ respectively.
+%  For a single row $i$ of a dataset write $\FS_i$ for whichever of $\Fp_i$ and $\Fn_i$ is nonzero
+%\item
+%  Depending on the ranges of $\Predsmooth(x)$ and $y$ we may define various losses
+%\end{itemize}
+%\end{frame}
+%\begin{frame}
+%\frametitle{Setup III}
+%  \begin{itemize}
+%\item
+%  Define $\SGN(x)=\begin{cases}+\text{ if }x\geq0,\\-\text{ otherwise}\end{cases}$
+%\item
+%  $L^p$ loss $L_a=\sum_i\FS_i^p$ for $1\leq p\leq\infty$
+%\item
+%  dot weighted loss $L_b=\Predsmooth\cdot y$
+%\item
+%  weighted cost $L_c=\sum_i{\beta_c}^{y_i}\FS_i$ for $\beta>0$
+%\item
+%  weighted binary cross entropy $L_d=-\sum_i{\beta_d}^{\SGN(y_i)}\log(1-\FS_i)$ for $\beta>0$
+%\item
+%  What difference do they make?
+%\end{itemize}
+%\end{frame}
+%\begin{frame}
+%\frametitle{Transforming out different choices of losses}
+%  \begin{itemize}
+%    \item
+%      When designing an algorithm based on an NN we might wish to focus on a choice of loss function with no consideration for the specific choice of NN architecture
+%    \item
+%      This isn't possible.
+%    \item
+%      Each choice of loss function defined above is a sufficiently nice, increasing function of each $\Fp_i$ and $\Fn_i$.
+%    \item
+%      This means that for any two of these functions $L_u$ and $L_v$ there is a transformation $\varphi_{uv}:\DOM(L_u)\rightarrow\DOM(L_v)$ such that $L_v(\varphi_{uv}(\Predsmooth))=L_u(\Predsmooth)$
+%\end{itemize}
+%\end{frame}
+%\begin{frame}
+%\frametitle{Loss functions can be viewed as equivalent if we don't fix the NN architecture!}
+%  \begin{itemize}
+%    \item
+%      Write $\Predsmooth_{uv}=\varphi_{uv}(\Predsmooth)$.
+%    \item
+%      Changing the loss function is equivalent to rescaling the last layer!
+%    \item
+%      There is an equivalence between
+%      \begin{itemize}
+%      \item
+%        modifying the last layer activation (NN architecture perspective), and
+%      \item
+%        changing the choice of loss (gradient descent tuning perspective).
+%      \end{itemize}
+%    \item
+%      When defining an algorithm to train an architecture, we need to restrict the class of models we are using - otherwise there is no way to say which loss is better, because we can always find an architecture that performs arbitrarily well or poorly for a fixed loss by rescaling.
+%    \item
+%      I is impossible to argue rigorously in favour of choosing any of the above loss functions without also understanding the exact workings of $\tilde y$.
+%    \item
+%      This means that training $\Predsmooth_{uv}$ with the loss function $L_u$ is equivalent to training $\Predsmooth$ with loss function $L_v$ then using $\Predsmooth_{uv}$ for the forward pass!
+%    \item
+%      In this context, changing loss functions is equivalent to changing the last layer's activation.
+%    \item
+%      A good NN architecture is likely able to fit to the underlying transformations $\varphi_{uv}$ as part of the learning process anyway
+%    \item
+%      If we do need to investigate custom loss functions, need to also consider model architecture
+%%      Let $\Predsmooth_{uv}(x)=\varphi_{uv}(\Predsmooth(x))$ denote the output of a $NN$ defined by applying $\Predsmooth$ then applying $\varphi$ to the result.
+%%    \item
+%%      It then holds that $L_v(\Predsmooth_{uv})=L_u(\Predsmooth)$.
+%%
+%  \end{itemize}
 \end{document}
 
 %\bibliography{imbalanced}{}
-%\bibliographystyle{plain}
+%\bibliographystyle{plaine
