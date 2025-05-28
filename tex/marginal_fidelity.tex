@@ -1,5 +1,6 @@
-\documentclass{beamer}
+\documentclass{article}
 \usepackage{amsmath}
+\usepackage{amsfonts}
 \usepackage{algpseudocode}
 %\newcommand{\IN}{{\texttt{In}}}
 %\newcommand{\OUT}{{\texttt{Out}}}
@@ -117,13 +118,13 @@
 \newcommand{\CTHRESH}{{\texttt{C}}_{\texttt{FPFN}}}
 
 \title{Loss-architecture duality and experimental design}
-\subtitle{George Lee}
+\author{George Lee}
 \begin{document}
-\begin{frame}
-\titlepage
-\end{frame}
-\begin{frame}
-\frametitle{Notational conventions}
+
+\maketitle
+
+
+\subsection{Notational conventions}
 \begin{itemize}
   \item
     \texttt{TEXTTT}/$\mathbb{MATHBB}$: Spaces
@@ -147,44 +148,39 @@
   \item
     If $\BATCH\subseteq\ROWS$ and  $A\in\TYPE^\ROWS$ write $\REST[A]=(\IND[A][b])_{\texttt b\in\BATCH}\in\TYPE^\BATCH$ for the restriction of $A$ to $\BATCH$
 \end{itemize}
-\end{frame}
-\begin{frame}
-\frametitle{Setting}
+
+
+\section{Problem definition and reformulation}
+\subsection{Underlying dynamics}
 \begin{itemize}
   \item
     User will be making inferences and decisions based on observations that are functions of the underlying state $\Phase$ of a system
   \item
-    Any statistic/data describing the system is a function $\STAT(\Phase)$ of its state
+    Correspondingly any statistic/data arising from the system is a function $\STAT(\Phase)$ of its state
+  \item
+    Observations and predictions made by user $\PhaseK=\ENUM[\PhaseK]$ depend on underlying system $\PhaseK=\PHASEK(\Phase)$
+\end{itemize}
+
+
+\subsection{Inferences from data}
+\begin{itemize}
   \item
     Classification and regression: determine likely values of data $\TARGET$ taking discrete and continuous values respectively based on the value of some other data $\FEATURE$
-\end{itemize}
-\end{frame}
-\begin{frame}
-\frametitle{Inferences from data}
-\begin{itemize}
   \item
     User works with dataset or stream $(\Feature,\Target)=(\ENUM[\Feature],\ENUM[\Target])$ indexed by $\ind\in\ROWS$
   \item
-    Observations and predictions made by user $\PhaseK=\ENUM[\PhaseK]$ depend on underlying system $\PhaseK=\PHASEK(\Phase)$
-
-  \item
-    Dataset available to user may be represented $\Feature=\ENUM[\FEATURE(\PhaseK_{\ind})][][\ROWS][\ind\in]$ and $\Target=\ENUM[\TARGET(\PhaseK_{\ind})][][\ROWS][\ind\in]$
+    All statistics available to user may be represented $\Feature=\ENUM[\FEATURE(\PhaseK_{\ind})][][\ROWS][\ind\in]$ and $\Target=\ENUM[\TARGET(\PhaseK_{\ind})][][\ROWS][\ind\in]$
 \end{itemize}
-\end{frame}
-\begin{frame}
-\frametitle{Plan}
+
+
+\subsection{Formalising user needs}
 \begin{itemize}
   \item
-    Determine and represent constraints as user-explainable classifier optimisation problems
+    Want to determine and represent constraints as user-explainable classifier optimisation problems
   \item
     Probablistic reasoning allows us to determine which continuous regression problems we should be solving
   \item
     Select appropriate model architectures and algorithms for these problems
-  \end{itemize}
-\end{frame}
-\begin{frame}
-\frametitle{Real world use}
-  \begin{itemize}
   \item
     End user will evaluate performance of a model $\PRED$ with parameters $\Par$ by evaluating its predictions $\Pred=\PRED(\Par,\Feature)$ for feature $\Feature$ against the target $\Target$
   \item
@@ -202,9 +198,9 @@
       \mathbb E(\SCORE_{\PhaseK}(\Target,\Pred)|\Feature=\FeatureD)=\sum_{\TargetD\in\TWO^{\BATCH}}\SCORE_{\PhaseK}(\TargetD,\Pred)\mathbb P(\Target=\TargetD|\Feature=\FeatureD)
       $$
   \end{itemize}
-  \end{frame}
-\begin{frame}
-\frametitle{Theoretical characterisation of optimal predictions: marginals}
+  
+
+\subsection{Theoretical characterisation of optimal predictions: marginals}
   \begin{itemize}
   \item
     Have reformulated classification probablistically, allowing us to write down an optimal solution in terms of a probability
@@ -221,9 +217,9 @@
       %\Marginal[][\Stat][\Feature][\FeatureD](\StatD)=\int_{\TargetD\in\OUT:\STAT(\TargetD)=\StatD}\Marginal[][\Target][\Feature][\FeatureD](\TargetD)\frac{\dee\STAT(\TargetD)}{\dee\TargetD}\dee\TargetD
       %$$
   \end{itemize}
-\end{frame}
-\begin{frame}
-\frametitle{Perfect knowledge of marginals allows for optimal decision making}
+
+
+\subsection{Perfect knowledge of marginals allows for optimal decision making}
   \begin{itemize}
         \item
       The score for a single binary classification $\SCORE_\PhaseK$ is defined by four numbers for the four possible prediction-target outcomes, can rescale to no costs for correct choice without changing the problem, so just interested in two error rates
@@ -235,9 +231,9 @@
           \mathbb E(\SCORE_\PhaseK(\Target,\pm)|\Feature=\FeatureD)=\SCORE_\PhaseK(\mp,\pm)\mathbb P(\Target=+|\Feature=\FeatureD)
           $$
       \end{itemize}
-\end{frame}
-\begin{frame}
-\frametitle{Optimal regression targets for offline learning}
+
+
+\subsection{Optimal regression targets for offline learning}
   \begin{itemize}
   \item
     If all we know is that mistakes will be bad,
@@ -245,25 +241,42 @@
         \item
           impossible to refine problem beyond the fact that good knowledge of the marginals will allow probablistic optimisation of stats on the fly
         \item
-          User may attempt to learn the marginals - equivalent to minimising AUC
+          User may attempt to learn the marginals - equivalent to minimising AUC(ROC)
       \end{itemize}
+  \end{itemize}
+  
+  
+    \subsection{Preemptive learning when $C$ can be forecast}
+  \begin{itemize}
   \item
-    If it is at least possible to predict likely values for relative cost of $\FP$ versus $\FN$ then we can apply a weighting to AUC
+    If it is at least possible to predict likely values for relative cost of $\FP$ versus $\FN$ may be possible to restrict attention to some function of the ROC
   \item
     Sufficient to learn marginals to high precision only over the range relevant to likely cost ratios $\frac{\SCORE_\PhaseK(\pm,\mp)}{\SCORE_\PhaseK(\mp,\pm)}$ and imbalances $\mathbb P(+)$
-  \end{itemize}
-  \end{frame}
-  \begin{frame}
-    \frametitle{Refining the problem for likely values of $C$}
-  \begin{itemize}
   \item
     Any other choice of target will be distributed according to some function of the marginals
   \item
     
   \end{itemize}
-\end{frame}
-%\begin{frame}
-%\frametitle{Offline and online decision making}
+  \subsection{Experiment I}
+  \begin{itemize}
+    \item
+      Want to compare training algorithms for fixed ReLU network
+    \item
+      Models scored on cost in cases where cost of false negatives $\gg$ that of false positives
+    \item
+      Three approaches
+      \begin{itemize}
+        \item
+          Resampling and BCE
+        \item
+          No resampling and BCE
+        \item
+          No resampling and cost-derived loss
+      \end{itemize}
+  \end{itemize}
+
+%
+%\subsection{Offline and online decision making}
 %  \begin{itemize}
 %    \item
 %      Offline: start with train and test indices $\TRN\sqcup\TST$. user will
@@ -277,9 +290,9 @@
 %
 %    \end{itemize}
 %  \end{itemize}
-%\end{frame}
-%\begin{frame}
-%\frametitle{Setup I}
+%
+%
+%\subsection{Setup I}
 %  \begin{itemize}
 %  \item
 %    $\STAT$ should be as simple and explainable to the user as possible
@@ -294,8 +307,8 @@
 %    \item
 %      Offline setting: will be fed rows and labels $(\FEATURE_i,\TARGET_i)$ sampled according to
 %  \end{itemize}
-%  \end{frame}
-%  \begin{frame}
+%  
+%  
 %  \begin{itemize}
 %\item
 %  Approach: build a classifier by turning the problem into one of
@@ -315,9 +328,9 @@
 %\item
 %  Depending on the ranges of $\Predsmooth(x)$ and $y$ we may define various losses
 %\end{itemize}
-%\end{frame}
-%\begin{frame}
-%\frametitle{Setup III}
+%
+%
+%\subsection{Setup III}
 %  \begin{itemize}
 %\item
 %  Define $\SGN(x)=\begin{cases}+\text{ if }x\geq0,\\-\text{ otherwise}\end{cases}$
@@ -332,9 +345,9 @@
 %\item
 %  What difference do they make?
 %\end{itemize}
-%\end{frame}
-%\begin{frame}
-%\frametitle{Transforming out different choices of losses}
+%
+%
+%\subsection{Transforming out different choices of losses}
 %  \begin{itemize}
 %    \item
 %      When designing an algorithm based on an NN we might wish to focus on a choice of loss function with no consideration for the specific choice of NN architecture
@@ -345,9 +358,9 @@
 %    \item
 %      This means that for any two of these functions $L_u$ and $L_v$ there is a transformation $\varphi_{uv}:\DOM(L_u)\rightarrow\DOM(L_v)$ such that $L_v(\varphi_{uv}(\Predsmooth))=L_u(\Predsmooth)$
 %\end{itemize}
-%\end{frame}
-%\begin{frame}
-%\frametitle{Loss functions can be viewed as equivalent if we don't fix the NN architecture!}
+%
+%
+%\subsection{Loss functions can be viewed as equivalent if we don't fix the NN architecture!}
 %  \begin{itemize}
 %    \item
 %      Write $\Predsmooth_{uv}=\varphi_{uv}(\Predsmooth)$.
