@@ -1,0 +1,221 @@
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+
+\NewDocumentCommand\R{m}{{\MakeLowercase{{#1}}}}          % RV
+\NewDocumentCommand\F{m}{{\MakeUppercase{#1}}}            % Function
+\NewDocumentCommand\I{m}{{\texttt{\MakeLowercase{#1}}}}   % index
+
+\newcommand{\Ib}{\I b}
+\newcommand{\In}{\I n}
+\NewDocumentCommand \ind {O{n}}{{\I #1}}
+
+\NewDocumentCommand\T{m}{{\texttt{\MakeUppercase{#1}}}}   % type
+\NewDocumentCommand\X{m}{{\mathbb{#1}}}             % space
+
+\NewDocumentCommand\EXPECTN{}{{{\mathbb E}}}             % space
+
+\newcommand\A{{\T A}}   % type
+\newcommand\B{{\T B}}   % type
+\newcommand\TA{{\T A}}   % type
+\newcommand\TB{{\T B}}   % type
+\newcommand\ST{{\T S}}   % type
+
+\newcommand\ALPH{{\texttt{Alph}}}   % codomain
+
+\NewDocumentCommand\C{m}{#1'}                     % dummy copy
+
+\NewDocumentCommand\NA{m}{{#1_{\scalebox{.6}{$\textbf{+}$}}}}             % additive range
+\NewDocumentCommand\NM{m}{{#1_*}}             % additive range
+
+\NewDocumentCommand\DG{m}{{{\widehat{#1}}}}             % dual group
+
+\NewDocumentCommand\UINT{m}{{\texttt{uint<{#1}>}}}
+\NewDocumentCommand\uint{}{{\texttt{uint32}}}
+\NewDocumentCommand\ulong{}{{\texttt{uint64}}}
+
+\NewDocumentCommand\GEOM{m}{{\texttt{geom<{#1}>}}}
+
+\NewDocumentCommand\INT{m}{{\texttt{int<{#1}>}}}
+\NewDocumentCommand\UFLT{m m}{{\texttt{ufloat<{#1},{#2}>}}}
+\NewDocumentCommand\FLT{m m}{{\texttt{float<{#1},{#2}>}}}
+
+\newcommand\SZ{{\X Z}}
+\newcommand\SR{{\X R}}
+\newcommand\SRG{{\X R_{>0}}}
+\newcommand\SQ{{\X Q}}
+\newcommand\SC{{\X C}}
+\newcommand\SN{{\X N}}
+\newcommand\SNO{{{\X N}_0}}
+
+
+\newcommand{\feat}{{x}}
+\newcommand\Feat{{\R \feat}}
+\newcommand\FEAT{{\F \feat}}
+\NewDocumentCommand\FU{O{\feat}}{{\uppercase{{#1}}}}
+\NewDocumentCommand\Type{O{\feat}}{{\T{#1}}}
+\NewDocumentCommand\TYPE{O{\feat}}{{\T{\uppercase{{#1}}}}}
+\newcommand{\FeatD}{{\C\Feat}}
+
+\newcommand{\targ}{{y}}
+\newcommand{\Targ}{\R {\targ}}
+\newcommand{\TARG}{\F{\targ}}
+\newcommand{\TargD}{\C\Targ}
+\newcommand{\TargDD}{\C\TargD}
+
+
+\newcommand{\und}{{\omega}}
+\newcommand{\Und}{{\R \und}}
+\newcommand{\UNI}{{\Omega}}
+
+\newcommand{\usr}{{u}}
+\newcommand{\Usr}{{\R \usr}}
+\newcommand{\USR}{{\F \usr}}
+\newcommand{\MEM}{{\T{{\usr}}}}
+
+\newcommand{\Obs}{{z}}
+\newcommand{\OBS}{{\F Z}}
+
+\newcommand{\Time}{{t}}
+\newcommand{\TimeD}{{\Time'}}
+\newcommand{\TIMES}{{\T{\Time}}}
+\newcommand{\TIMEIND}[1][\Time]{{(#1)}}
+
+\newcommand{\TimeDelta}{{\tau}}%\Delta\Time}}
+\newcommand\DIFF{{\boldsymbol\delta}}
+\newcommand{\TIMEDELTAS}{{\DIFF\TIMES}}
+
+\newcommand{\PFC}{{\widetilde{\texttt{PF}}}}
+\NewDocumentCommand{\LS}{O{\TA}}{{\boldsymbol[{#1}\boldsymbol]}}
+\NewDocumentCommand{\CODE}{}{{\texttt{Enc}}}
+\NewDocumentCommand{\LOSSY}{}{\widetilde{\texttt{Enc}}}
+\NewDocumentCommand{\PREF}{m m}{{({#1}\boldsymbol\vee{#2})}}
+\NewDocumentCommand{\ENC}{}{{\F E}}
+\NewDocumentCommand{\PFO}{}{{\texttt{PF}}}
+\NewDocumentCommand{\SSTR}{}{{~\trianglelefteq~}}
+
+\NewDocumentCommand{\LEN}{m}{{|{#1}|}}
+
+\newcommand{\EV}{{\sigma}}
+\NewDocumentCommand{\BTEV}{O{\TimeDelta}}{{\TS[\EV][{#1}]}}
+
+\newcommand{\IN}{\TYPE}
+\newcommand{\OUT}{\TYPE[Y]}
+\newcommand{\OUTPR}{\widetilde\OUT}
+\newcommand{\DIM}{{\texttt{d}}}
+\newcommand{\TWO}{\pmb{\pmb\pm}}%{\pmb{\pmb{\pmb\pm}}}
+\newcommand{\Par}{{w}}
+\newcommand{\PAR}{{W}}
+\newcommand{\PARS}{{\T W}}
+\newcommand{\BATCH}{{\texttt{B}}}
+\newcommand{\dee}{\textrm{d}}
+\newcommand{\GD}{{\texttt{GD}}}
+\newcommand{\NN}{{\texttt{NN}}}
+\newcommand{\siid}{\sim_{\texttt{iid}}}
+\newcommand{\INDICES}{{\mathbb{I}}}
+\newcommand{\Pred}[1][y]{{\hat{#1}}}
+\newcommand{\PredS}[1][y]{{\hat{{#1}_\sigma}}}
+\NewDocumentCommand \FUNC {O{\Pred} O{x}}{{{#1}({#2})}}
+\NewDocumentCommand \TS {O{\Feat} O{t}} {{#1}^{(#2)}}
+\NewDocumentCommand \IND {O{\Feat} O{n}}{{#1}_{\ind[#2]}}
+\NewDocumentCommand \REST {O{\Feat} O{\BATCH}}{{#1}_{#2}}
+\NewDocumentCommand \ENUM {O{\Feat} O{\ind} O{\ROWS} O{\in}}{{\left({#1}_{#2}\right)_{{#2}{#4}{#3}}}}
+\NewDocumentCommand \ENMB {O{x} O{\Ib} O{\Ib} O{\BATCH} O{\in}}{{\left({#1}_{#2}\right)_{{#3}{#5}{#4}}}}
+\NewDocumentCommand \ID {}{{\textbf{1}}}
+\NewDocumentCommand \ProbRat {}{\rho}
+\NewDocumentCommand \ProbRatB {}{\rho^*}
+\NewDocumentCommand \Weight {}{{w}}
+
+\newcommand{\POS}{\pmb+}
+\newcommand{\NEG}{\pmb-}
+
+\NewDocumentCommand \BITS {O{2}}{\NM{ 2^{{#1}}}}
+\DeclareMathOperator*{\argmin}{argmin}
+\newcommand{\Wt}{w}
+\newcommand{\CO}{\tau}
+\newcommand{\COF}{\mathcal T}
+\newcommand{\COx}{x_{\texttt{co}}}
+\newcommand{\NNW}{\Wt_{\texttt{nn}}}
+\newcommand{\UC}{{\texttt{C}_{\texttt{FPFN}}}}
+\newcommand{\BS}{{P_{\texttt{bs}}}}
+\newcommand{\RAND}{{\texttt{rand}}}
+\newcommand{\SHUFF}{{\texttt{shuff}}}
+\newcommand{\DOM}{{\texttt{dom}}}
+\newcommand{\WEIGHTS}{{\texttt W}}
+\newcommand{\ROWS}{{\texttt N}}
+\newcommand{\TRN}{{\texttt{Train}}}
+\newcommand{\TST}{{\texttt{Test}}}
+\newcommand{\PRD}{{\texttt{Prod}}}
+\newcommand{\RKG}{{\texttt{RKG}}}
+\newcommand{\STAT}{{S}}
+\newcommand{\Stat}{{s}}
+\newcommand{\StatD}{{\Stat'}}
+\newcommand{\SCORE}{{C}}
+\newcommand{\Score}{{c}}
+\newcommand{\ScoreFun}{{\textbf{c}}}
+\newcommand{\Regret}{{r}}
+\newcommand{\PredB}[1][y]{{{#1}^*}}
+\newcommand{\STATPRED}{\Pred[\STAT]}
+\newcommand{\Predsmooth}[1][y]{\widetilde{#1}}
+\newcommand{\PRED}{{\Pred[\Targ]}}
+\newcommand{\PREDSMOOTH}{{\Predsmooth[\F y]}}
+\NewDocumentCommand \Marginal{O{{}} O{\TargRV} O{\FeatRV} O{\TargRVD}}{f_{\left({#2}_{#1}|{#3}_{#1}={#4}\right)}}
+\newcommand{\yP}{{\hat y}}
+\newcommand{\YP}{{\hat \Targ}}
+\newcommand{\YN}{{\tilde \Targ}}
+\newcommand{\UPD}{{\texttt{Upd}}}
+\newcommand{\BCE}{{\texttt{BCE}}}
+\newcommand{\UPDSTEP}{{\texttt{Upd}_{\texttt{step}}}}
+\newcommand{\UPDEP}{{\texttt{Upd}_{\texttt{epoch}}}}
+\newcommand{\UPDFIT}{{\texttt{Upd}_{\texttt{fit}}}}
+
+\newcommand{\Prob}{{\mathbb P}}
+\newcommand{\Probs}{{\Delta}}
+\newcommand{\ProbH}{{\widehat{\mathbb P}}}
+\newcommand{\PMF}{{\F P}}
+\newcommand{\CONC}{{\mu}}
+\newcommand{\CC}{{\boldsymbol{\cdot}}}
+
+\newcommand\Para{{\textbf{Para}}}
+
+\newcommand{\SGN}{{\texttt{sgn}}}
+\newcommand{\XYEP}{{\texttt{Z}_{\texttt{epoch}}}}
+\newcommand{\AB}{{A_\BATCH}}
+\newcommand{\XB}{{\Feat_\BATCH}}
+\newcommand{\YB}{{\Targ_\BATCH}}
+\newcommand{\ZB}{{Z_\BATCH}}
+\newcommand{\YPB}{{\YP_\BATCH}}
+\newcommand{\XTRN}{{\Feat_\TRN}}
+\newcommand{\YTRN}{{\Targ_\TRN}}
+\newcommand{\YPTRN}{{\YP_\TRN}}
+\NewDocumentCommand{\fp}{O{} O{}}{{fp}_{{#1}{#2}}}
+\NewDocumentCommand{\fn}{O{} O{}}{{fn}_{{#1}{#2}}}
+\NewDocumentCommand{\FP}{O{} O{}}{{FP}_{{#1}{#2}}}
+\NewDocumentCommand{\FN}{O{} O{}}{{FN}_{{#1}{#2}}}
+
+\newcommand\LCOST{{{\lambda}}}
+\newcommand\COSTMAG{{{\gamma}}}
+\newcommand\RELCOST{{{\beta}}}
+\newcommand\RELCOSTD{{v}}
+\newcommand\RELCOSTS{{{\T \RELCOSTD}}}
+\newcommand\COSTP{{{v}_+}}
+\newcommand\COSTN{{{v}_-}}
+\NewDocumentCommand\COSTPN{O{}}{{(\COSTP{{#1}},\COSTN{{#1}})}}
+\NewDocumentCommand{\wf}{O{} O{}}{{\beta}}
+\NewDocumentCommand{\wfp}{O{} O{}}{\wf_+}
+\NewDocumentCommand{\wfn}{O{} O{}}{\wf_-}
+
+\newcommand{\FPB}{{\FP_\BATCH}}
+\newcommand{\FNB}{{\FN_\BATCH}}
+\newcommand{\CFP}{{\texttt{C}_\FP}}
+\newcommand{\CFN}{{\texttt{C}_\FN}}
+\newcommand{\FPE}{{\widehat{\texttt{FP}}}}
+\newcommand{\FNE}{{\widehat{\texttt{FN}}}}
+\newcommand{\Fp}{{\texttt{fp}}}
+\newcommand{\Fn}{{\texttt{fn}}}
+\newcommand{\FPT}{{\texttt{FP}_\oplus}}
+\newcommand{\FNT}{{\texttt{FN}_\oplus}}
+\newcommand{\CTHRESH}{{\texttt{C}}_{\texttt{FPFN}}}
+
+

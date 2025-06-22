@@ -20,5 +20,6 @@
 *_report
 b/*
 doc/snippets/*
+resampled/*
 modeval*
 .ipynb_checkpoints/*

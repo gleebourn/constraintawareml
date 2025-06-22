@@ -32,7 +32,7 @@ def dl_rbd24(data_dir=str(Path.home())+'/data',
 def unsw(csv_train=Path.home()/'data'/'UNSW_NB15_training-set.csv',
          csv_test=Path.home()/'data'/'UNSW_NB15_testing-set.csv',
          rescale='log',numeric_only=False,verbose=False,logf=None,
-         random_split=None,lab_cat=False):
+         random_split=None,lab_cat=True):
   _df_train=read_csv(csv_train)
   _df_test=read_csv(csv_test)
   if lab_cat:
@@ -71,22 +71,23 @@ def unsw(csv_train=Path.home()/'data'/'UNSW_NB15_training-set.csv',
   if not lab_cat:
     y_train=y_train.__array__().astype(bool)
     y_test=y_test.__array__().astype(bool)
-  if rescale=='log':
-    if verbose:print('rescaling x<-log(1+x)',file=logf)
-    x_test=log(1+x_test)
-    x_train=log(1+x_train)
-  elif rescale=='standard':
-    if verbose:print('rescaling x<(x-E(x))/V(x)**.5',file=logf)
-    sc=StandardScaler()
-    sc.fit(x_train)
-    x_test=sc.transform(x_test)
-    x_train=sc.transform(x_train)
+  if rescale:
+    if rescale=='log':
+      if verbose:print('rescaling x<-log(1+x)',file=logf)
+      x_test=log(1+x_test)
+      x_train=log(1+x_train)
+    else:
+      if verbose:print('rescaling x<(x-E(x))/V(x)**.5',file=logf)
+      sc=StandardScaler()
+      sc.fit(x_train)
+      x_test=sc.transform(x_test)
+      x_train=sc.transform(x_train)
   if verbose:
     print('New x_train.min(),x_test.min():',x_train.min(),x_test.min(),file=logf)
     print('New x_train.max(),x_test.max():',x_train.max(),x_test.max(),file=logf)
     print('Differing columns:',f_to_str(list(diff_cols)),file=logf)
     print('Common cols:',*common_cols,file=logf)
-  return (x_train,y_train),(x_test,y_test),(_df_train,_df_test),(sc if rescale=='standard' else rescale)
+  return (x_train,y_train),(x_test,y_test),(_df_train,_df_test),sc if rescale else None #=='standard' else rescale)
 
 def rbd24(preproc=True,split_test_train=True,rescale='log',single_dataset=False,random_split=None,
           raw_pickle_file=str(Path.home())+'/data/rbd24/rbd24.pkl',categorical=True,logf=None,

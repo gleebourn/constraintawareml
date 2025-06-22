@@ -174,6 +174,11 @@ def get_reshuffled(k,X_trn,Y_trn,n_batches,bs,last):
 
 get_reshuffled=jit(get_reshuffled,static_argnames=['n_batches','bs','last'])
 
+def shuffle_batched(k,X,Y,bs):
+  l=len(Y)
+  n_batches=l//bs
+  return get_reshuffled(k,X,Y,n_batches,bs,bs*n_batches)
+
 def loss(w,x,y,fp_fn_weights,act):
   yp=forward(w,x,act)
   return jsm((fp_fn_weights*y+(1-y)/fp_fn_weights)*(1-2*y)*yp)
@@ -206,8 +211,19 @@ def _calc_cutoff(w,tfpfn,X,Y,act,tol=1e-1):
 
 calc_cutoff=jit(vmap(_calc_cutoff,(0,0,None,None,None),0),static_argnames=['act','tol'])
 
-def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
-               logf=None,adap_cutoff=True,layer_norm=False,start_epoch=1,adapt_weights=False):
+def nn_epochs(k,n_epochs,bs,X,Y,consts,states,X_raw=None,Y_raw=None,act='relu',
+              adap_cutoff=True,logf=None,layer_norm=False,start_epoch=1):
+  if X_raw is None:
+    X_raw,Y_raw=X,Y
+  if isinstance(act,str):
+    act=activations[act]
+  n_batches=len(X)//bs
+  last=n_batches*bs
+  ks=split(k,n_epochs)
+  adapt_weights=consts['lrfpfn'].sum()
+  if adapt_weights:
+    print('Variable weights!!!!!!',file=logf,flush=True)
+
   tfps=consts['tfp']
   tfns=consts['tfn']
   lrfpfns=consts['lrfpfn']
@@ -226,19 +242,6 @@ def _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
       states['fp_fn_weights']*=set_fp_fn_weights(consts,fp,fn)
     print('nn epoch',epoch,file=logf,flush=True)
   return states
-
-def nn_epochs(k,n_epochs,bs,X,Y,consts,states,X_raw=None,Y_raw=None,act='relu',
-              adap_cutoff=True,logf=None,layer_norm=False,start_epoch=1):
-  if X_raw is None:
-    X_raw,Y_raw=X,Y
-  if isinstance(act,str):
-    act=activations[act]
-  n_batches=len(X)//bs
-  last=n_batches*bs
-  ks=split(k,n_epochs)
-  adw=consts['lrfpfn'].sum()
-  if adw:
-    print('Variable weights!!!!!!')
   return _nn_epochs(ks,n_epochs,bs,X,Y,X_raw,Y_raw,consts,states,act,n_batches,last,
                     logf=logf,layer_norm=layer_norm,start_epoch=start_epoch,adapt_weights=adw)
 

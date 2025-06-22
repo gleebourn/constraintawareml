@@ -18,6 +18,8 @@ resamplers_list=list(resamplers)+['']
 
 class Resampler:
   def __init__(self,X,Y,pkl_dir,ds_name,seed,logf=None,p=None):
+    if not isinstance(Y,dict):
+      Y={True:Y}
     self.logf=logf
     self.X={'':{l:X for l in Y} if not isinstance(X,dict) else X}
     self.Y={'':Y}

@@ -1,249 +1,281 @@
 \documentclass{article}
-\usepackage{amsmath}
-\usepackage{amsfonts}
-\usepackage{algpseudocode}
-%\newcommand{\IN}{{\texttt{In}}}
-%\newcommand{\OUT}{{\texttt{Out}}}
-\newcommand{\TYPE}[1][X]{{\texttt{#1}}}
-\newcommand{\TYPEY}{{\TYPE[Y]}}
-\newcommand{\IN}{\TYPE}
-\newcommand{\OUT}{\TYPEY}
-\newcommand{\DIM}{{\texttt{d}}}
-\newcommand{\OUTSMOOTH}{{\texttt{OUT}_{\texttt{NN}}}}
-\newcommand{\TWO}{\{\pm\}}
-\newcommand{\PARS}{{\texttt{W}}}
-\newcommand{\Par}{{w}}
-\newcommand{\PAR}{{W}}
-\newcommand{\BATCH}{{\texttt{B}}}
-\newcommand{\dee}{\textrm{d}}
-
-\newcommand{\GD}{{\texttt{GD}}}
-\newcommand{\NN}{{\texttt{NN}}}
-\newcommand{\siid}{\sim_{\texttt{iid}}}
-
-\newcommand{\INDICES}{{\mathbb{I}}}
-\newcommand{\Feature}{{x}}
-\newcommand{\Target}{{y}}
-\newcommand{\TARGET}{{Y}}
-\newcommand{\FEATURE}{{X}}
-\newcommand{\FeatureD}{{x'}}
-\newcommand{\TargetD}{{y'}}
-
-\NewDocumentCommand \FUNC {O{\Pred} O{x}}{{{#1}({#2})}}
-\NewDocumentCommand \TS {O{\FEATURE} O{t}} {{#1}^{(#2)}}
-\NewDocumentCommand \ind {O{n}}{{\texttt{#1}}}
-\NewDocumentCommand \IND {O{\FEATURE} O{n}}{{#1}_{\ind[#2]}}
-\NewDocumentCommand \REST {O{\FEATURE} O{\BATCH}}{{#1}_{#2}}
-\NewDocumentCommand \ENUM {O{\FEATURE} O{\ind} O{\ROWS} O{\in}}{{\left({#1}_{#2}\right)_{{#2}{#4}{#3}}}}
-
-\newcommand{\CO}{{\hat w}}
-\newcommand{\NNW}{{\tilde w}}
-
-\newcommand{\UC}{{\texttt{C}_{\texttt{FPFN}}}}
-
-\newcommand{\BS}{{P_{\texttt{bs}}}}
-\newcommand{\RAND}{{\texttt{rand}}}
-\newcommand{\SHUFF}{{\texttt{shuff}}}
-\newcommand{\DOM}{{\texttt{dom}}}
-\newcommand{\Time}{{t}}
-\newcommand{\TimeD}{{t'}}
-\newcommand{\TIMES}{{\texttt T}}
-\newcommand{\TIMEIND}[1][t]{{(#1)}}
-\newcommand{\WEIGHTS}{{\texttt W}}
-\newcommand{\ROWS}{{\texttt N}}
-
-\newcommand{\TRN}{{\texttt{Train}}}
-\newcommand{\TST}{{\texttt{Test}}}
-\newcommand{\PRD}{{\texttt{Prod}}}
-
-\newcommand{\RKG}{{\texttt{RKG}}}
-
-\newcommand{\Phase}{{\omega}}
-\newcommand{\PHASE}{{\Omega}}
-\newcommand{\PhaseK}{{\widehat\Phase}}
-\newcommand{\PHASEK}{{\widehat\PHASE}}
-\newcommand{\STAT}{{S}}
-\newcommand{\Stat}{{s}}
-\newcommand{\StatD}{{\Stat'}}
-\newcommand{\SCORE}{{C}}
-\newcommand{\Score}{{c}}
-\newcommand{\ScoreFun}{{\textbf{c}}}
-\newcommand{\Regret}{{r}}
-\newcommand{\Pred}[1][y]{{\hat{#1}}}
-\newcommand{\PredD}[1][y]{{\hat{#1}'}}
-\newcommand{\STATPRED}{\Pred[\STAT]}
-\newcommand{\Predsmooth}[1][y]{{\tilde{#1}}}
-\newcommand{\PRED}{{\Pred[\TARGET]}}
-\newcommand{\PREDSMOOTH}{{\Predsmooth[\TARGET]}}
-\NewDocumentCommand \Marginal{O{{}} O{\Target} O{\Feature} O{\TargetD}}{f_{\left({#2}_{#1}|{#3}_{#1}={#4}\right)}}
-\NewDocumentCommand \Bestguess{O{{}} O{\Target} O{\FeatureD} O{\ScoreFun}}{{{#2}^{*}_{#1}\left({#3}_{#1},{#4}_{#1}\right)}}
-\newcommand{\yP}{{\hat y}}
-\newcommand{\YP}{{\hat \TARGET}}
-\newcommand{\YN}{{\tilde \TARGET}}
-\newcommand{\UPD}{{\texttt{Upd}}}
-\newcommand{\BCE}{{\texttt{BCE}}}
-\newcommand{\UPDSTEP}{{\texttt{Upd}_{\texttt{step}}}}
-\newcommand{\UPDEP}{{\texttt{Upd}_{\texttt{epoch}}}}
-\newcommand{\UPDFIT}{{\texttt{Upd}_{\texttt{fit}}}}
-\newcommand{\Prob}{{\mathbb P}}
-\newcommand{\ProbH}{{\widehat{\mathbb P}}}
-\newcommand{\SGN}{{\texttt{sgn}}}
-
-\newcommand{\XYEP}{{\texttt{Z}_{\texttt{epoch}}}}
-\newcommand{\AB}{{A_\BATCH}}
-\newcommand{\XB}{{\FEATURE_\BATCH}}
-\newcommand{\YB}{{\TARGET_\BATCH}}
-\newcommand{\ZB}{{Z_\BATCH}}
-\newcommand{\YPB}{{\YP_\BATCH}}
-\newcommand{\XTRN}{{\FEATURE_\TRN}}
-\newcommand{\YTRN}{{\TARGET_\TRN}}
-\newcommand{\YPTRN}{{\YP_\TRN}}
-
-\newcommand{\fp}{{\texttt{fp}}}
-\newcommand{\fn}{{\texttt{fn}}}
-\newcommand{\FP}{{FP}}
-\newcommand{\FN}{{FN}}
-\newcommand{\FPB}{{\FP_\BATCH}}
-\newcommand{\FNB}{{\FN_\BATCH}}
-\newcommand{\CFP}{{\texttt{C}_\FP}}
-\newcommand{\CFN}{{\texttt{C}_\FN}}
-\newcommand{\FPE}{{\widehat{\texttt{FP}}}}
-\newcommand{\FNE}{{\widehat{\texttt{FN}}}}
-\newcommand{\Fp}{{\texttt{fp}}}
-\newcommand{\Fn}{{\texttt{fn}}}
-\newcommand{\FS}{\texttt f}
-\newcommand{\FPT}{{\texttt{FP}_\oplus}}
-\newcommand{\FNT}{{\texttt{FN}_\oplus}}
-
-\newcommand{\CTHRESH}{{\texttt{C}}_{\texttt{FPFN}}}
-
-\title{Loss-architecture duality and experimental design}
+\usepackage{gleebourn}
+\title{Information and dynamics for learning}
 \author{George Lee}
 \begin{document}
 
 \maketitle
+\section{Problem formulation}
 
-
-\subsection{Notational conventions}
+\subsection{Modelling user behaviour}
 \begin{itemize}
   \item
-    \texttt{TEXTTT}/$\mathbb{MATHBB}$: Spaces
+    The user $\Usr\in\MEM$ uses a predictive model $\PRED$ with parameters $\Par\in\PARS$
   \item
-    $TEXT$: statistics for a fixed experiment, functions
+    Given a row $(\Feat,\Targ)\in\IN\times\OUT$ consisting of feature $\Feat$ and target $\targ$ we are interested in predictions $\Predsmooth=\PREDSMOOTH(\Par,\Feat)\in\OUTPR$ regarding the value of $\targ$
   \item
-    $text$: time indexes, numbers, RVs, (possibly) random functions
+    User requirements have to be encoded in problem definition and model validation
   \item
-    Timeseries have bracketed superscripts eg $\TS[w]$
+    Generally precise relative costs for different types of error may be unavailable at training - but we would still like to formulate a \textbf{random constraint aware} objective to use as the basis for model training and evaluation
   \item
-    \texttt{texttt}: discrete indices
+    Plan: \textbf{determine explainable objectives} for models in the case of \textbf{incomplete information on user-defined constraints on the relative costs} of different types of error is available
+    \subsection{Classification and regression}
   \item
-    Discretely indexed statistics addressed with subscripts eg $\IND$
+    Intuitively we want a model that makes good predictions, so that in some sense $\Predsmooth\approx\Targ$, but we need to quantify what is meant by $\approx$
   \item
-    $\hat h\hat a\hat t\hat s/\tilde t\tilde i\tilde l\tilde d\tilde e\tilde s$: predictions/continuous predictions
+    Classification and regression typically understood to mean $\OUT$ is a discrete and continuous space respectively
   \item
-    $\INDICES=\{$all possible discrete indices$\}$, that is,
-    $$
-    \INDICES=\mathbb Z^{<\infty}=\bigsqcup_{n\in\mathbb N_0}\mathbb Z^n
-    $$
+    Typically a user might want a model that takes values in the same space as the target, that is, $\OUT=\OUTPR$
   \item
-    If $\BATCH\subseteq\ROWS$ and  $A\in\TYPE^\ROWS$ write $\REST[A]=(\IND[A][b])_{\texttt b\in\BATCH}\in\TYPE^\BATCH$ for the restriction of $A$ to $\BATCH$
-\end{itemize}
-
-
-\section{Problem definition and reformulation}
-\subsection{Underlying dynamics}
-\begin{itemize}
+    Also work with ``predictions'' taking values in other spaces representing information about what $\Targ$ might be - useful eg for finding models that respond to dynamic user constraints
+\subsection{Binary classification}
   \item
-    User will be making inferences and decisions based on observations that are functions of the underlying state $\Phase$ of a system
-  \item
-    Correspondingly any statistic/data arising from the system is a function $\STAT(\Phase)$ of its state
-  \item
-    Observations and predictions made by user $\PhaseK=\ENUM[\PhaseK]$ depend on underlying system $\PhaseK=\PHASEK(\Phase)$
-\end{itemize}
-
-
-\subsection{Inferences from data}
-\begin{itemize}
-  \item
-    Classification and regression: determine likely values of data $\TARGET$ taking discrete and continuous values respectively based on the value of some other data $\FEATURE$
-  \item
-    User works with dataset or stream $(\Feature,\Target)=(\ENUM[\Feature],\ENUM[\Target])$ indexed by $\ind\in\ROWS$
-  \item
-    All statistics available to user may be represented $\Feature=\ENUM[\FEATURE(\PhaseK_{\ind})][][\ROWS][\ind\in]$ and $\Target=\ENUM[\TARGET(\PhaseK_{\ind})][][\ROWS][\ind\in]$
-\end{itemize}
-
-
-\subsection{Formalising user needs}
-\begin{itemize}
-  \item
-    Want to determine and represent constraints as user-explainable classifier optimisation problems
-  \item
-    Probablistic reasoning allows us to determine which continuous regression problems we should be solving
-  \item
-    Select appropriate model architectures and algorithms for these problems
-  \item
-    End user will evaluate performance of a model $\PRED$ with parameters $\Par$ by evaluating its predictions $\Pred=\PRED(\Par,\Feature)$ for feature $\Feature$ against the target $\Target$
-  \item
-    Suppose some statistic $\Score$ measuring performance of the classifier is made at time $t\in\TIMES$
-  \item
-    $\Score$ is a measure of a batch $\BATCH$ of earlier outcomes $\TargetD,\PredD=\REST[\Target],\REST[\Pred]$ which is chosen based on user observations and decisions $\PhaseK$
-      $$
-      \Score=\REST[\SCORE][\PhaseK](\TargetD,\PredD)
-      $$
-  \item
-    If user knows the probabilities of possible outcomes conditional on $\Feature=\FeatureD$ then they should choose $\Pred(\Feature,\SCORE_{\PhaseK})$ that minimises $\SCORE_{\PhaseK}$ in expectation
-  \item
-    For binary classification, this is the choice $\Pred\in\TWO^{\BATCH}$ that minimises
-      $$
-      \mathbb E(\SCORE_{\PhaseK}(\Target,\Pred)|\Feature=\FeatureD)=\sum_{\TargetD\in\TWO^{\BATCH}}\SCORE_{\PhaseK}(\TargetD,\Pred)\mathbb P(\Target=\TargetD|\Feature=\FeatureD)
-      $$
-  \end{itemize}
-  
-
-\subsection{Theoretical characterisation of optimal predictions: marginals}
-  \begin{itemize}
-  \item
-    Have reformulated classification probablistically, allowing us to write down an optimal solution in terms of a probability
+    Model output is on the face of it a single bit of information describing which of the two possible classes in $\OUT=\TWO=\{\POS,\NEG\}$ the target $\Targ$ belongs to
     \item
-      Let $(\Feature,\Target)$ be RVs taking values in $\IN$ and $\OUT$
+      In the probablistic formulation it is given that with all else being equal, a user wishes to decrease false positive and false negative rates, which we define for a fixed target RV $\Targ$ as
+      $$
+      \FP=\Prob(\Pred>\Targ)\text{ and }\FN=\Prob(\Pred<\Targ)
+      $$
     \item
-      Marginal distribution represents best knowledge of what $\Target$ is likely to be if we only know the value of $\Feature$
+      Unless a model is perfect, there is in general no objectively appropriate way to rank it above or below a second model
     \item
-        Write $\Marginal$ for the density/probability that $\Target=\TargetD$ conditional on the observation $\Feature=\FeatureD$
+      An objective function on which to train a probablistic classifier can be selected to take account of a user's likely preferences between different error types, without the need to rely on ad hoc losses or post-hoc parameter tuning
+    \subsection{``Reducing'' classification to regression}
+    \item We consider $\Predsmooth$ taking values in a space $\OUTPR=\Probs(\OUT)$ of distributions on $\OUT$
+    \item
+      A ``discrete'' prediction taking values in $\OUT$ is then obtained from the ``smooth'' prediction according to some discretisation rule $\mathbb R\ni\Predsmooth\mapsto\Pred\in\TWO$
+    \item
+      This is the principle behind classifiers relying on, eg, NNs or decision forests - a discrete prediction must be made according to whether the output of a network or an average of votes is above a particular cutoff value.
+    \item
+      When we consider the problem of training a model given incomplete information on the likely choices of user defined constraint we will encounter its receiver operating characteristic or \textbf{ROC} (or roughly equivalently the area under the curve or \textbf{AUC)} metric
+    \item
+      The ROC is typically described as being a benchmark for ``classifiers'' but as formulated here we will find that it measures the ability of a regression to be used to make classifications over a wide range of possible constraints
+    \subsection{Reducing regression to classification}
+    \item 
+        Conversely, problems formulated as regression problems have to be discretised for the purposes of modelling, with all computation being done on some discretisation of data
+      \item
+        If a learning architecture defined for real values is implemented in hardware, it is a finite binary circuit operating on finite binary data: proliferation of 32 bit or less datatypes in learning indicates that most real world regression problems are happily transformed into classification problems at the cost of a huge number of classes
+        \subsection{Information}
+      \item
+        Describing a float valued algorithm as a classifier isn't necessarily of any practical benefit but emphasises possible conceptual blurring
+      \item
+        We largely think in terms of the information that a learning algorithm is designed to provide
+      \item
+        On the face of it, a binary classifier with 100 floats as input should map $100\times2^{32}$ bits of data to a single bit of data
+
+        \subsection{User defined constraints and their associated user-evaluated statistics}
+    \item
+      Model performance evaluated by a user making some statistical comparison of predictions against actual outcomes
+      \subsection{Mapping user-defined constraints to user-evaluated statistics}
+    \item
+      A practical algorithm's objective function should encode its output's desired properties
+      \subsection{Minimising user-evaluated statistics}
   \item
-    If we know the marginals of $\Target$ given $\Feature$ then we can also calculate the marginals for any statistic $\Stat=\STAT(\Target)$ of $\Target$
-      %with the rule
-      %$$
-      %\Marginal[][\Stat][\Feature][\FeatureD](\StatD)=\int_{\TargetD\in\OUT:\STAT(\TargetD)=\StatD}\Marginal[][\Target][\Feature][\FeatureD](\TargetD)\frac{\dee\STAT(\TargetD)}{\dee\TargetD}\dee\TargetD
-      %$$
-  \end{itemize}
-
-
-\subsection{Perfect knowledge of marginals allows for optimal decision making}
+    Let $\Score$ be a statistic calculated about the performance of a classifier that a user wishes to minimise
+  \item
+    $\Score$ is measured based on some performance of the model on some batch $\BATCH$ of rows $\ENMB[(\Feat_\Ib,\Targ_\Ib)][]$
+  \item
+    Speifically, user selects some function of the predictions $\ENMB[\Pred]=\ENMB[\Pred(\Feat_\Ib)][]$ and corresponding targets $\ENMB[\Targ]$ to evaluate
+  \item
+    $\Score$ is the result of a user selected function $\SCORE_{\Usr}$ of predictions and outcomes being applied it to a batch $\BATCH$:
+      $$
+      \Score=\SCORE_{\Usr}(\ENMB[\Targ],\ENMB[\Pred])
+      $$
+    \item
+      Features and targets may be empirical measurements of an intractable or random system: in general impossible to deterministically ensure $\Score$ will be the minimum value of $\SCORE_{\Usr}$
+    \item
+      Accordingly model $c$ as an RV and relax the problem to minimisation in expectation
+    \item
+      Optimal predictions in this case can be expressed in terms of the distribution of $\REST[\SCORE][\Usr](\REST[\Targ],\REST[\Pred])$
+\subsection{Binary classification is real regression}
+  \item
+    In isolation the distribution of $\Targ$ taking values in $\TWO$ is described by a single number which might be chosen to be
+    \begin{itemize}
+      \item
+        the probability of a positive classification $p=\Prob(\Targ=\POS)\in[0,1]$ or
+      \item
+        the log relative likelihood $\rho=\log\frac{p}{1-p}\in[-\infty,\infty]$
+    \end{itemize}
+  \item
+    If $\OUTPR$ is all distributions on $\OUT$ then $\OUT$ is embedded in $\OUTPR$ by identifying $\POS$ and $\NEG$ with the cases where we have total certainty - these are interval endpoints in this case
+    \item
+      Accordingly, binary classifiers commonly make use of a regression model with a floating point output that is then mapped to a single bit
+      $$
+      \OUTPR\ni\Predsmooth\mapsto\Pred\in\TWO
+      $$
+    \item
+      Regardless of what precisely we might view $\Predsmooth$ as representing, monotonicity of its values with respect to likelihood of being in each class means that $\Pred$ can be described as the result of checking whether $\Predsmooth$ is above some cutoff value:
+      By monotonicity of 
+\subsection{Marginals as objectives}
+  \item
+    Let $(x,y)$ be a batch of one or more rows
+    \item
+      For each possible value $\FeatD$ of $\Feat$ there is a fixed conditional or marginal distribution of possible values $\TargD$ of $\Targ$, written $\Prob(\Targ=\TargD|\Feat=\FeatD)$ which we abbreviate to $\Prob(\TargD|\FeatD)$
+  \item
+    If we know the marginals of $\targ$ given $\Feat$ then we can also calculate the marginals for any statistic $\Stat=\STAT(\targ)$ of $\targ$
+  \item
+    An optimal decision given the feature value $\Feat=\FeatD$ is a minimiser of the linear system
+        \begin{align*}
+          \PredB(\FeatD)\in&\argmin_{\TargD}\mathbb E(\SCORE(\targ,\TargD)|\Feat=\FeatD)\\
+          =&\argmin_{\TargD}\sum_{\TargDD}\SCORE(\TargDD,\TargD)\Prob(\TargDD|\FeatD)
+        \end{align*}
+      \item
+        This is the \textbf{Bayes decision rule} per Fukinaga
+        \item
+          In a case such as classification, all possible cost functions $\SCORE_\Usr$ over a finite number of trials can be assumed to be drawn from a finite dimensional family
+        \item
+          Typically might parameterise such a family for convenience of analysis
+        \item
+          In this case we overload $\SCORE$ to also represent this family, so that $\SCORE_u=\SCORE_\varphi$ for some user selected parameter $\varphi=\Phi(\Usr)$
+\end{itemize}
+\section{A characterisation of statistics for binary classifiers}
+        \subsection{Binary predictions}
   \begin{itemize}
         \item
-      The score for a single binary classification $\SCORE_\PhaseK$ is defined by four numbers for the four possible prediction-target outcomes, can rescale to no costs for correct choice without changing the problem, so just interested in two error rates
+          Any function of the outcomes of a single binary classification $\SCORE_\Usr$ is determined by four numbers for the four possible prediction-target combinations $(\targ,\Pred)\in\TWO^2$
         \item
-          the marginal distribution is equivalent to its corresponding marginal probability $\mathbb P(\Target=+|\Feature=\TargetD)$ of a positive classification
+          For a score that we wish to maximise, we can assume that incorrect classifications have higher costs than correct ones for each fixed outcome
+        \item
+          Translating $\SCORE$ by a constant for a fixed outcome has no effect on predictive decision making
+        \item
+          This allows for a reduction in dimensionality: in our case an intuitive choice is to assume that there are no rewards for correct classifications,
+          $$
+          \REST[\SCORE][\Usr](\POS,\POS)=\REST[\SCORE][\Usr](\NEG,\NEG)=0
+          $$
+        \item
+          This leaves us with a degree of freedom $\COSTPN[(u)]$ for each type of error,
+          $$
+          ~\REST[\SCORE][\Usr](-,+)=\wfp\text{ and }\REST[\SCORE][\Usr](+,-)=\wfn
+          $$
+
+        \item
+          The problem of minimising expectations for a single prediction is invariant under multiplication of $\SCORE$ by a positive number, so that there is no loss of generality in restricting to a family parameterised by the cost proportion $\LCOST\in(0,1)$
+          $$
+          ~\REST[\SCORE][\LCOST](-,+)=\LCOST\text{ and }\REST[\SCORE][\LCOST](+,-)=1-\LCOST
+          $$
+        \item
+          For multiple classifications of varying importance also have cost magnitude $\COSTMAG>0$:
+          $$
+          ~\REST[\SCORE][\LCOST\COSTMAG](-,+)=\COSTMAG\LCOST\text{ and }\REST[\SCORE][\LCOST\COSTMAG](+,-)=\COSTMAG(1-\LCOST)
+          $$
+
+        \item
+          Common rescaling $\RELCOST^2=\frac{1-\lambda}\lambda$ corresponds to ratio of cost of each type of error since
+          $$
+          \frac{\RELCOST^2}{1+\RELCOST^2}\REST[\SCORE][\Usr](-,+)=1\text{ and }\frac{\RELCOST^2}{1+\RELCOST^2}\REST[\SCORE][\Usr](+,-)=\RELCOST^2,
+          $$
+          eg if a false positive costs £$4$ and a false negative costs £$5$ then the relevant statistic for the user is $\beta^2=\tfrac54$
     \item
-      At each step optimal prediction $\Pred\in\TWO$ is that with a smaller value of
+      Bayes decision is contingent on a probability ratio being above $\RELCOST^2=\frac{1-\lambda}\lambda$:
           $$
-          \mathbb E(\SCORE_\PhaseK(\Target,\pm)|\Feature=\FeatureD)=\SCORE_\PhaseK(\mp,\pm)\mathbb P(\Target=+|\Feature=\FeatureD)
+          \PredB=\begin{cases}+\text{ if }\ProbRatB(\FeatD)=\frac{\mathbb P(\targ=+|\Feat=\FeatD)}{\mathbb P(\targ=-|\Feat=\FeatD)}>\RELCOST^2,\\-\text{ otherwise}\end{cases}
           $$
+        \item
+          If $\RELCOST$ is fixed and statistics over batches are formed by summing individual scores the objective is as in the case of a single prediction
+        \item
+          More generally $\RELCOST$ may vary according to known or unknown rules, and model may or may not be privy to the value of $\beta$ in advance of a prediction
+
+          \subsection{Random objectives: relative costs unknown before prediction}
+        \item
+          We now have a notion of optimal solution when the distributions and relative costs for the classifier are fixed - wish to generalise to varying costs
+        \item
+          Still possible to avoid profits
+        \item
+          Allow two degrees of freedom $\COSTP$ and $\COSTN$ to account for some classifications mattering less than others
+        \item
+          If a model's predictions are allowed to depend monotonically on a continuous parameter $\RELCOST$ supplied by a user, the problem is equivalent to one of finding a regression model $\Predsmooth$ such that the prediction made is given by
+          $$
+          \Pred(\Wt,x)=\begin{cases}\POS\text{ if }\Predsmooth(\NNW,x)>\CO=\COF(\RELCOST),\\\NEG\text{ otherwise}\end{cases}
+          $$
+        \item
+          If the user-defined statistic is an RV with a finite expectation but which is unknown before predictions, we can check that the objective becomes the cost function with relative weighting $\mathbb E(\RELCOST|\FeatD)$:
+        \begin{align*}
+          \PredB(\FeatD)=&\argmin_{\TargD}\mathbb E(\SCORE_{\RELCOST}(\targ,\TargD)|\Feat=\FeatD)\\
+          =&\argmin_{\TargD}\sum_{\TargDD}\mathbb E(\SCORE_{\RELCOST}(\TargDD,\TargD)|\Feat=\FeatD)\mathbb P(\TargDD|\FeatD)\\
+          =&\argmin_{\TargD}\sum_{\TargDD}\mathbb E(\RELCOST^{\TargD})1_{\TargD\neq\TargDD}\mathbb P(\TargDD|\FeatD)
+        \end{align*}
+        \item
+          A model for use in this fixed distribution
+          \subsection{Random objectives: relative costs known before prediction}
+        \item
+          Assume that we want predictions to have low time complexity compared to training
+        \item
+          Perfect knowledge of marginals is hard/unnecessary - we want to focus on learning information over the relevant values for the task at hand
+        \item
+          Given random cost proportion and magnitude $\RELCOST\cong(\LCOST,\COSTMAG)$ we can write down expectations for a fixed prediction $\Pred=\TargD$
+          \begin{align*}
+            \EXPECTN(\Score|\FeatD)=&\int_{\RELCOSTS}\EXPECTN(\SCORE_\RELCOSTD(\Targ,\TargD)|\FeatD)\PMF_{\RELCOST}(\RELCOSTD)\dee\RELCOSTD\\
+            =&\Prob(\Targ\neq\TargD|\FeatD)\int_0^{\infty}\RELCOSTD^{-\TargD}\PMF_{\RELCOST}(\RELCOSTD)\dee\RELCOSTD
+          \end{align*}
+        \item
+          For binary classification we have
+          $$
+            \EXPECTN(\SCORE(y,\pm)|\FeatD)=\Prob(\mp|\FeatD)\int_0^{\infty}\RELCOST^{\mp1}\PMF_{\RELCOST}(\RELCOSTD)\dee \RELCOSTD\\
+          $$
+        \item
+          In the absence of uncertainty we recover the expected cost for fixed $\RELCOST$ as expected
+        %\item
+        %  Get Laplace transform like expression for expected costs
+        %  \begin{align*}
+        %    \EXPECTN(\SCORE_{\RELCOST}(\Targ,\pm)|\FeatD)=&\Prob(\mp|\FeatD)\int_{-\infty}^{\infty}\RELCOSTD^{\mp1}\PMF_b(b')\Prob(\NEG|\FeatD)\\
+        %    =&\begin{cases}\int_{-\infty}^{\infty}\PMF_b(b')\dee b'\text{ if }\TargD=+\text{ and }\\
+        %    \Prob(\POS|\FeatD)\int_{-\infty}^{\infty}\PMF_b(b')\dee b'\text{ otherwise}\\\end{cases}\\
+        %    =&\Prob(\mp|\FeatD)I(1-\TargD)
+            %\approx&\Prob(\Targ=-\TargD|\Feat=\FeatD)\int_0^\infty\RELCOSTD^{-\TargD}\frac1{\Theta\RELCOSTD}\left(\PMF_b(0)+\PMF_b'(0)\left(\frac{\log\RELCOSTD}\Theta\right)\right)\dee\RELCOSTD
+          %
+          %\end{align*}
+        \item
+          Low uncertainty corresponds to $\Theta\ll1$, for sufficiently reasonanble $\PMF_b$ we have
+          \begin{align*}
+            I(t)=\int_{-\infty}^\infty e^{tb'}\PMF_b(b')\dee b'=&\int_{|\bar b-b'|<a}e^{tb'}\PMF_b(b')\dee b'+\int_{|\bar b-b'|>a}e^{tb'}\PMF_b(b')\dee b'
+          %
+          \end{align*}
+
+          If nothing is known about possible values of $\RELCOST$ in advance hard to narrow the problem down beyond earning marginals/BCE minimisation
+        \item
+          For $\TargD=-$ we get
+          $$
+          \EXPECTN(\SCORE_{\RELCOST}(\Targ,-))=\int_0^{\infty}\RELCOSTD\Prob(\Targ=+|\Feat=\FeatD)\PMF_{\RELCOST}(\RELCOSTD)\mathrm{d}\RELCOSTD
+          $$
+
+
+          \subsection{Multiple binary predictions}
+        \item
+          Moving to multile predictions
+        \item
+          For a batch of $\ind$ predictions $\SCORE$ is a function of $2^{2\ind}$ possible prediction-target pairs
+        \item
+          In general any learning problem can be cast as non-iid binary classification by encoding the target output as a stream of bits, will largely focus on simpler choices of $\SCORE$
+          \subsection{Fixed cost}
+        \item
+          A each step, apply same rule as in single case
+          \subsection{$\RELCOST$ known}
+          \subsection{Cost parameter unknown but cost weighting known before making prediction}
+        \item
+          \subsection/itera
+      \item
+        When multiple predictions are scored at once, the simplest assumption is of a fixed relative cost, so that the score is just a sum
+        $$
+        \REST[\SCORE][\RELCOST](\targ,\TargD)=\sum_{\ind\in\BATCH}\REST[\SCORE][\RELCOST](\IND[\targ],\IND[\TargD]).
+        $$
+        If we can guarantee that the underlying function and costs are fixed, this is an appropriate starting point for offline experimental validation of a model
+      \item
+        More general additive scoring has variable weighting $w$ and $\RELCOST$
+        $$
+        \REST[\SCORE][ab](\targ,\TargD)=\sum_{\ind\in\BATCH}\IND[\Weight]\REST[\SCORE][\IND[a]\IND[b]](\IND[\targ],\IND[\TargD])
+        $$
+      \item
+        If the distributions of $a$ and $b$ are iid and known, but their values will not be known until after the predictions, then taking expectations of this more complicated looking sum we find that $\mathbb E(a)$ and $\mathbb b$ can be substituted for offline validation of a model
       \end{itemize}
 
 
-\subsection{Optimal regression targets for offline learning}
+\subsection{Optimal regression targets for assuming fixed distributions}
   \begin{itemize}
   \item
-    If all we know is that mistakes will be bad,
-      \begin{itemize}
-        \item
-          impossible to refine problem beyond the fact that good knowledge of the marginals will allow probablistic optimisation of stats on the fly
-        \item
-          User may attempt to learn the marginals - equivalent to minimising AUC(ROC)
+    If all we know is that mistakes will be bad, then it's impossible to refine problem beyond the fact that good knowledge of the marginals will allow probablistic optimisation of stats on the fly
+  \item
+    Perfect knowledge of the marginals corresponds to the best possible score for the AUC metric
       \end{itemize}
-  \end{itemize}
   
   
     \subsection{Preemptive learning when $C$ can be forecast}
@@ -251,12 +283,188 @@
   \item
     If it is at least possible to predict likely values for relative cost of $\FP$ versus $\FN$ may be possible to restrict attention to some function of the ROC
   \item
-    Sufficient to learn marginals to high precision only over the range relevant to likely cost ratios $\frac{\SCORE_\PhaseK(\pm,\mp)}{\SCORE_\PhaseK(\mp,\pm)}$ and imbalances $\mathbb P(+)$
+    Sufficient to learn marginals to high precision only over the range relevant to likely cost ratios $\frac{\SCORE_\Usr(\pm,\mp)}{\SCORE_\Usr(\mp,\pm)}$ and imbalances $\mathbb P(+)$
   \item
     Any other choice of target will be distributed according to some function of the marginals
   \item
+          \end{itemize}
+          \section{Nerd stuff}
+\subsection{Underlying dynamics}
+\begin{itemize}
+  \item
+    User makes inferences and decisions based on partial observations of underlying state of a system in state $\Und\sim(\UNI,\mathbb P,\sigma)$ with evolution rule
+    $$
+    \EV:\TIMEDELTAS\rightarrow\UNI\rightarrow\UNI,~(\TimeDelta,\Und)\mapsto\BTEV(\Und)=\EV(\TimeDelta,\Und)
+    $$
+  \item
+    We may take $\TIMES\subseteq\SZ$ and $\BTEV=\EV^\TimeDelta$ for some fixed dynamics $\EV:\UNI\rightarrow\UNI$ (eg by passing to a suspension or orbit spaces)
+  \item
+    In general these dynamics may be very complex and intractable, but idea is to have a nice formal framework
+  \item
+    The orbit of $\Und$ over time is obtained by repeated application of this time evolution operator
+    $$
+    \Und\mapsto\sigma(\Und)\mapsto\sigma^2(\Und)\mapsto\cdots
+    $$
+  \item
+    Practically functional dependence is a good way of understanding behaviour of coupled systems system, formally allows for better theoretical analysis
+  \item
+    Any pertinent statistic/data is a function of this system's state
+  \item
+    Write $\OBS(\omega)$ for the information a user reads from a system in state $\omega$
+  \item
+    The timeseries of data read by a user or model is then given by $\Obs=\left(\OBS(\EV^t(\Und))\right)_{\Time\in\TIMES}$, write $\Obs_{<t}$ for its truncation to times less than $t$
+  \item
+    Decisions or predictions $u$ made by a user or model then represented by a fixed function of past observations
+    $$
+    \TS[\Usr]=\USR(\Obs_{<\Time})\text{ for }\Time\in\TIMES
+    $$
+  \item
+    Stochastic users and algorithms modelled by allowing $\Obs$ to include random state
+\end{itemize}
+
+
+\subsection{Inferences from data}
+\begin{itemize}
+  \item
+    Classification and regression: determine\
+  \begin{itemize}
+  \item
+    likely values of data $\Targ$
+  \item
+    taking values in a discrete and continuous space $\OUT$ respectively
+  \item
+    based on the value of some other data $\Feat$ taking values in $\IN$
+\end{itemize}
+  \item
+    User works with dataset or stream
+    $$
+    (\Feat,\targ)=(\ENUM[\Feat],\ENUM[\targ])
+    $$
+  \item
+    Each row is some function of past observations
+    $$
+    (\Feat,\targ)=(\ENUM[\Feat],\ENUM[\targ])=\left(\ENUM[\FEAT(\Obs_{\ind})][][\ROWS][\ind\in],\ENUM[\TARG(\Obs_{\ind})][][\ROWS][\ind\in]\right)
+    $$
+\end{itemize}
+
+\subsection{Notational conventions}
+guidelines - formally RVs can be identified as functions of a fixed random source, statistics are just functions of data etc but such type hinting hopefully aids legibility
+\begin{itemize}
+  \item
+    \texttt{TEXTTT}/$\mathbb{MATHBB}$: Spaces
+  \item
+    $TEXT$: constant numbers and functions for a fixed experiment or dynamical system
+  \item
+    $text$: continuous valued possibly random data and indices
+  \item
+    \texttt{texttt}: discrete possibly random valued data and indices
+  \item
+    $\hat h\hat a\hat t\hat s/\tilde t\tilde i\tilde l\tilde d\tilde e\tilde s$: predictions/continuous predictions
+  \item
+    Write $\BATCH^\ROWS$ for the space of maps from $\BATCH$ to $\ROWS$
+  %  $$
+  %  \INDICES=\mathbb Z^{<\infty}=\bigsqcup_{n\in\mathbb N_0}\mathbb Z^n
+  %  $$
+  \item
+    If $\BATCH\subseteq\ROWS$ and  $A\in\TYPE[A]^\ROWS$ write $\REST[A]=(\IND[A][b])_{\texttt b\in\BATCH}\in\TYPE[A]^\BATCH$ for the restriction of $A$ to $\BATCH$
+\end{itemize}
+Further syntactic sugar - again room for more than one reasonable choice of notation in many cases
+\begin{itemize}
+  \item
+    $t\mapsto\TS$ indicates that $\Feat$ is a timeseries representing some dynamically varying information over time indices $t$
+  \item
+    $\ind\mapsto\IND$ emphasises that $\Feat$ is a collection of data with row or memory indices $\ind$ which may be readable or writable by a user
+  \item
+    $\Usr\mapsto\Feat(\Usr)$ provides no such hints
+  \item
+    Let $\FEAT:\A\rightarrow\B$ be a map
+    \begin{itemize}
+      \item Write $\LS$ for finite lists of elements of $\A$
+      \item Write $\LS[\FEAT]:\LS\rightarrow\LS[\B]$ for $\FEAT$ applied elementwise
+      \item If subtraction is defined write $\DIFF\A=\{a-a':a,a'\in\A\}$
+      \item Write $\Probs(\A)=\{\PMF:\A\rightarrow[0,1]:\sum_{a\in \A}\PMF(a)=1\}$ for probability distributions on $\A$
+    \end{itemize}
+\end{itemize}
+\subsection{Discrete and continuous structures}
+      \begin{itemize}
+        \item
+          Working with floats or ints on a computer typically
+        \item
+          Write $\NA n={\X Z}_n=\{0,\cdots,n-1\}$ for the discrete interval of nonnegative integers less than $n$
+        \item
+          Ordered, group structure from modular (clock) arithmetic
+        \item
+          $\NA{(ab)}$ is in correspondence with $\NA{a}\times\NA{b}$ as a set, but only as a group if $a$ and $b$ are coprime, via the identification
+          $$
+          \varphi_b:k\mapsto(\lfloor\tfrac kb\rfloor,k\textrm{mod}b)
+          $$
+        \item
+          $(\NA a)^b$ is thus in correspondence as a set with $\NA{(a^b)}$ via the identification $c\mapsto\sum_{k=0}^{b-1}c_ka^k$
+        \item
+          Write $\NM n=\DG{\NA n}$ for the same set but viewed as its dual group of multiplicative transformations
+        \item
+          %Each element then represents a multiplicative map $\chi:\NA n\rightarrow\X T$ with $\chi(a)\chi(b)=\chi(a+b)$ for all $a,b\in\NM n$,
+          Computation and storage of elements done identically to $\NA n$ for a fixed representation - useful for scaling and rotational transformations
+        \item
+          Number of ways of embedding the set as the rotations of a plane correspond to number of possible generators in $\NA n$ that we can map to the primitive root $e^{\tfrac{2\pi i}{n}}$ to
+        \item
+          Finite group vs scalings of $\mathbb R$, hence no nicer representation, get overflows etc
+        \item
+          Typically in computational settings might have datatypes
+          \begin{itemize}
+            \item
+              A bit array $\NA{2^\NA n}$ has elementwise multiplication and addition mod $2$
+            \item
+              Integer type and its associated multiplication and addition operations $\UINT n=\NA{2^n}$, with $\uint=\UINT{32}$ and $\ulong=\UINT{64}$
+            \item
+              Floats incorporate multiplicative structure: let $\GEOM{n,p}=\NM{2^n}$ represented by the set $\{\texttt{p}^{\texttt{k}}:k\in\UINT{n}\}$
+            \item
+              signed integers $\INT{n}=\GEOM1\cdot\UINT{n-1}$ have the same additive structure as $\UINT n$ but the multiplicative structure of the dihedral group of order $2^{n-1}$
+            \item
+              A float type can then be written $\FLT m n=\INT{m}\times\GEOM{n}$
+          \end{itemize}
+      \end{itemize}
     
-  \end{itemize}
+      \section{Codes}
+      \subsection{Codes and probabilities}
+      \begin{itemize}
+        \item
+Let $\IN$ be a set that we might encode using character set $\TA$, and let $a$ and $b\in\LS$ 
+        \item
+          write $\LEN a$ for the length of $a$ and $a\CC b$ for concatenation of $a$ with $b$
+        \item
+          Let $\CONC:\LS[\LS[\cdot]]\rightarrow\LS[\cdot]$ map a list of lists to its concatenation $\CONC(\Feat)=\Feat_1\CC\cdots\CC\Feat_{\LEN{\Feat}}$
+        \item
+          $\CONC$ can be extended further to the concatenation of infinitely many lists $\CONC:\LS[\cdot]^{\mathbb N}\rightarrow\left(\cdot\right)^{\SN}$
+        \item
+          If $b=(a_{\ind})_{\ind<l}$ for some $l\in\mathbb N$ then $b$ is a prefix of $a$, write $b\SSTR a$
+        \item Some useful spaces
+          \begin{itemize}
+            \item
+              Lossy encodings $\LOSSY(\IN)=\{\ENC:\IN\rightarrow\LS[\T C]\text{ for some space }\T C=\ALPH(\ENC)\}$
+            \item
+              Lossless encodings $\CODE(\IN)=\{\ENC\in\LOSSY(\IN):\ENC\text{ is injective}\}$
+            \item
+              Prefix-free codes $\PFC(\IN)=\{\ENC\in\CODE(\IN):\ENC(\Feat)\SSTR\ENC(\FeatD)\implies \Feat=\FeatD\}$
+            \item
+              Exhaustive codes
+              $$
+              \PFO(\IN)=\{\ENC\in\PFC(\IN):\IN^{\SN}\xrightarrow{\LS[\ENC]}\LS[\ALPH(\ENC)]^{\SN}\xrightarrow{\mu}\ALPH(\ENC)^{\SN}\text{ is surjective}\}
+              $$
+          \end{itemize}
+        \item
+          If we know that $E\in\CODE(\IN)$ 
+
+      \end{itemize}
+      \subsection{ANS}
+      \begin{itemize}
+        \item
+          Given numerators $a_1,\cdots,a_k\in\X Z$ of a distribution of probabilities $p_k=\tfrac{a_i}{A}$ there is an encoding scheme that uses the maps above
+        \item
+          Encode then decode
+        \item
+          Start with state initialised to $(n,c)=(0,0)$
+      \end{itemize}
   \subsection{Experiment I}
   \begin{itemize}
     \item
@@ -274,7 +482,6 @@
           No resampling and cost-derived loss
       \end{itemize}
   \end{itemize}
-
 %
 %\subsection{Offline and online decision making}
 %  \begin{itemize}
@@ -299,13 +506,13 @@
 %  \item
 %  To make the problem well defined, need to properly specify $\FPE$ and $\FNE$
 %    \item
-%      In application: model used to predict labels $\TARGET_i$ of a steam of real world observation $\FEATURE_i$.
+%      In application: model used to predict labels $\Targ_i$ of a steam of real world observation $\Feat_i$.
 %    \item
 %      User could take many different approaches, assume based on a finite batch $\BATCH$ of predictions $\STATPRED_B(\FPE_B,\FNE_B)$
 %    \item
 %      We can always assume that errors are bad, so that $\STATPRED_B$ is increasing in the values $\FPE_B$ and $\FNE_B$.
 %    \item
-%      Offline setting: will be fed rows and labels $(\FEATURE_i,\TARGET_i)$ sampled according to
+%      Offline setting: will be fed rows and labels $(\Feat_i,\Targ_i)$ sampled according to
 %  \end{itemize}
 %  
 %  

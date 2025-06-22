@@ -28,25 +28,6 @@ ap=ap.parse_args()
 ap.nn_times=tuple(ap.nn_times)
 ap.resamplers=['' if rs=='none' else rs for rs in ap.resamplers]
 
-#params={'nn':[dict(lr_ad=la,reg=rl*la,lrfpfn=lf,bias=b,n_epochs=100,start_width=sw,
-#                   end_width=ew,depth=3,bs=128,act='relu',init='glorot_normal',
-#                   eps=1e-8,beta1=.9,beta2=.999,layer_norm=layer_norm)\
-#              for la,rl,lf,b,layer_norm,sw,ew in\
-#              product([.001],[1e-2],[.005],[0.],[False],[128],[32])],
-#        'sk':[dict(max_depth=i,regressor=rg,
-#                   **({'n_jobs':-1} if rg=='RandomForestRegressor' else {}))\
-#              for i,rg in product([14],['RandomForestRegressor'])]}
-#found: 64->.->.->.->32 seemed to work well...
-#params={'nn':[dict(lr_ad=1e-3,reg=1e-5,lrfpfn=5e-3,bias=0.,times=(128,),
-#                   start_width=sw,end_width=ew,depth=d,bs=128,act='relu',adap_thresh=adt,
-#                   init='glorot_normal',eps=1e-8,beta1=.9,beta2=.999,layer_norm=False)\
-#               for sw,ew,d,adt in product([64],[32],[4],[True,False])],'sk':[]}
-#              for sw,ew,d in product([128,64],[32,16],[3,4,5])],'sk':[]}
-
-#params={'nn':[],
-#        'sk':[dict(max_depth=i,regressor='RandomForestClassifier',
-#                   class_weight=(1,1),n_jobs=-1) for i in [12,14]]}
-
 params={'nn':[dict(lr_ad=1e-3,reg=1e-5,lrfpfn=5e-3,bias=0.,times=ap.nn_times,
                    start_width=sw,end_width=ew,depth=d,bs=128,act='relu',adap_thresh=adt,
                    init='glorot_normal',eps=1e-8,beta1=.9,beta2=.999,layer_norm=False)\
