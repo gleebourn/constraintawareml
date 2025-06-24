@@ -85,7 +85,7 @@ def unsw(csv_train=Path.home()/'data'/'UNSW_NB15_training-set.csv',
   if verbose:
     print('New x_train.min(),x_test.min():',x_train.min(),x_test.min(),file=logf)
     print('New x_train.max(),x_test.max():',x_train.max(),x_test.max(),file=logf)
-    print('Differing columns:',f_to_str(list(diff_cols)),file=logf)
+    print('Differing columns:',list(diff_cols),file=logf)
     print('Common cols:',*common_cols,file=logf)
   return (x_train,y_train),(x_test,y_test),(_df_train,_df_test),sc if rescale else None #=='standard' else rescale)
 
