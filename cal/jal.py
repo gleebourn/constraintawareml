@@ -1,272 +1,393 @@
-from jax.numpy import array,log,argsort,cumsum,flip,argmin,argmax
-from jax.nn import relu
-from jax.random import split,key,permutation,bits
+from itertools import product
+from time import perf_counter
+from typing import NamedTuple,Sequence,Callable
+
+from numpy import array as nparr,frompyfunc,log2
+from numpy.typing import NDArray
+
 from jax import grad,jit
+from jax.numpy import array,log,argsort,cumsum,flip,argmin,argmax,diff
+from jax.lax import scan
+from jax.nn import sigmoid,relu
+from jax.random import split,key,permutation,bits
+
+from flax.nnx import relu
+from flax.linen import Module,Dense
+from optax import adam,apply_updates
+from optax.losses import sigmoid_binary_cross_entropy
 
 from matplotlib.pyplot import plot,show,xscale,yscale,imshow,hist,\
                               title,xlabel,ylabel
-from time import perf_counter
-from flax.nnx import relu
-from flax.linen import Module,Dense
-from typing import Sequence
-from optax import adam,apply_updates
-from optax.losses import sigmoid_binary_cross_entropy
-from jax.lax import scan
-from jax.nn import sigmoid
-from collections import namedtuple
+
 from cal.rs import resamplers_list,Resampler
 
-@jit
-def shuffle_xy(k,x,y):
+def shuffle_and_batch(k,x,y,bs):
+  l=len(y)
   shuff=permutation(k,len(y))
-  xy=x[shuff],y[shuff]
-  return xy
-
-def get_reshuffled(k,X_trn,Y_trn,n_batches,bs,last):
-  X,Y=shuffle_xy(k,X_trn,Y_trn)
-  return X[0:last].reshape(n_batches,bs,-1),Y[0:last].reshape(n_batches,bs)
-
-get_reshuffled=jit(get_reshuffled,static_argnames=['n_batches','bs','last'])
-
-def shuffle_batched(k,X,Y,bs):
-  l=len(Y)
+  x,y=x[shuff],y[shuff]
   n_batches=l//bs
-  return get_reshuffled(k,X,Y,n_batches,bs,bs*n_batches)
+  last=n_batches*bs
+  return x[0:last].reshape(n_batches,bs,-1),y[0:last].reshape(n_batches,bs)
 
-FPFNComplex=namedtuple('FPFNComplex',['cutoff','fp_rate','fn_rate'])
+shuffle_and_batch=jit(shuffle_and_batch,static_argnames='bs')
 
-def fp_fn_complex(preds,targs):
-  preds=preds.reshape(-1)
-  targs=targs.reshape(-1)
-  prediction_indices_by_likelihood=argsort(preds)
+type Cutoff=float
+type CostRatio=float
+type CostVal=float
+type Likelihood=float
 
-  targs=targs[prediction_indices_by_likelihood]
+intupstr=lambda t:'('+(','.join((str(e) for e in t)))+')'
+
+def fmt_list_trunc(l,trunc):
+  return '\n'+('\n'.join((l if len(l)<= trunc else l[:(trunc+1)//2]+'...'+l[-trunc//2:]) if trunc else l))+'\n'
+  #return '('+(','.join((l if len(l)<= trunc else l[:(trunc+1)//2]+'...'+l[-trunc//2:]) if trunc else l))+')'
+
+def format_typey_list(arrays,labels,trunc,lambdas=None):
+  if lambdas is None:
+    lambdas=[str for _ in arrays]
+  entries=[intupstr([lam(l) for lam,l in zip(lambdas,ll)]) for ll in zip(*arrays)]
+  return '\n'+intupstr(labels)+':'+fmt_list_trunc(entries,trunc)
+
+lj=lambda s:str(s).ljust(15)
+
+class Errors:
+  def __init__(self,*errs):
+    assert len(errs)==len(self.error_types),'Error arrays not in correspondence with error types!'
+    self.e=array(errs)
+
+  @property
+  def error_types(self): raise NotImplementedError('Need to specify error types')
+
+  def str(self,trunc=None):
+    return format_typey_list(self.e,self.error_types,trunc)
+
+  def __str__(self):
+    return self.str(trunc=10)
+
+  def __repr__(self):
+    return '\n=='+self.__name__+'=='+self.__str__()
+
+  def __getitem__(self,key):
+    return type(self)(*self.e[:,key])
+
+  def __len__(self):
+    return self.e.shape[1]
+
+class BinaryErrors(Errors):
+  error_types=('fp','fn')
+
+  @property
+  def fp(self):
+    return self.e[0]
+
+  @property
+  def fn(self):
+    return self.e[1]
+
+class ErrorFiltration(NamedTuple):
+  cutoff:NDArray[float]
+  e:BinaryErrors#NDArray[ClassifierError]
+
+  def subfiltration(self,cost_rats:[CostRatio]=None,cutoffs:[Cutoff]=None):
+    assert not(cost_rats==cutoffs==None), 'Need to specify how subfiltration is obtained'
+    if cost_rats: #find best cutoff for given ratio
+      inds=nparr([self.get_cutoff_index(c) for c in cost_rats])
+    else: #find indices of given cutoff
+      inds=nparr([argmax(self.cutoff>c) for c in cutoffs])
+    return ErrorFiltration(self.cutoff[inds],self.e[inds])
+
+  def get_cutoff_index(self,cost_rat:CostRatio)->int:
+    return argmin(self.e.fp+cost_rat*self.e.fn)
     
-  d_err_test=(1/len(targs))
+  def results(self,cost_rats:NDArray[CostRatio],
+              cutoffs:NDArray[Cutoff]=None)->tuple:
+    if cutoffs is None:
+      if len(self.fp)>len(cost_rats):
+        return self.subfiltration(cost_rats=cost_rats).results(cost_rats=cost_rats)
+      return self,self.costs(cost_rats)
+    else:
+      return self.subfiltration(cutoffs=cutoffs).results(cost_rats=cost_rats)
+
+  def costs(self,cost_rats:[CostRatio])->[CostVal]:
+    cost_rats=nparr(cost_rats)
+    assert len(cost_rats)==len(self.e)
+    
+    return (self.e.fn*cost_rats+self.e.fp)/(cost_rats**.5)
+
+  def str(self,trunc=None):
+    return format_typey_list((self.cutoff,self.e),('class cutoffs','error rates'),trunc,lambdas=(lj,str))
+
+  def __str__(self):
+    return self.str(trunc=10)
+
+  def __repr__(self):
+    return '\n==ErrorFiltration=='+self.__str__()
+    #return 'ErrorFiltration'+self.__str__()
+
+  @classmethod
+  def from_predictions(self,preds:NDArray[Likelihood],targs:nparr):
+    preds=preds.reshape(-1)
+    targs=targs.reshape(-1)
+    sort_by_preds=argsort(preds)
   
-  fn_rates=cumsum(targs)*d_err_test
-  fp_rates=flip(cumsum(flip(~targs)))*d_err_test
-  return FPFNComplex(preds[prediction_indices_by_likelihood],fp_rates,fn_rates)
+    targs=targs[sort_by_preds]
+    error_increment=(1/len(targs))
+    
+    fn_rates=cumsum(targs)*error_increment
+    fp_rates=flip(cumsum(flip(~targs)))*error_increment
+    return self(cutoff=preds[sort_by_preds],e=BinaryErrors(fp_rates,fn_rates))#,dtype=ClassifierError))
 
-Results=namedtuple('Results',['fpfn_train','fpfn_test','cutoff','res_by_cost_rat'])
+class TT(NamedTuple):
+  train:float
+  test:float
 
-def optimal_cutoff(fpfn,cost_ratio):
-  i=argmin(fpfn.fp_rate+cost_ratio*fpfn.fn_rate)
-  return fpfn.fp_rate[i],fpfn.fn_rate[i],fpfn.cutoff[i]
+class RatRes(NamedTuple):
+  rat:CostRatio
+  res:TT
 
-def get_rates(fpfn,cutoff):
-  i=argmax(fpfn.cutoff>cutoff)
-  return fpfn.fp_rate[i],fpfn.fn_rate[i]
+  @classmethod
+  def n(self,a,b,c):
+    return self(a,TT(b,c))
 
-def results(preds_train,targs_train,preds_test,targs_test,cost_ratios):
-  fpfn_train,fpfn_test=fp_fn_complex(preds_train,targs_train),fp_fn_complex(preds_test,targs_test)
-  cutoff={}
-  expected_cost_test={}
-  for cr in cost_ratios:
-    fpr,fnr,co=optimal_cutoff(fpfn_train,cr)
-    cutoff[cr]=co
-    fpr_test,fnr_test=get_rates(fpfn_test,co)
-    expected_cost_test[cr]=fpr,fnr,fpr_test,fnr_test,(fpr_test+cr*fnr_test)/(cr**.5)
-  return Results(fpfn_train,fpfn_test,cutoff,expected_cost_test)
+class Results(NamedTuple):
+  cost_rats:NDArray[CostRatio]
+  costs_train:NDArray[float]
+  costs_test:NDArray[float]
+  cutoffs:NDArray[Cutoff]
 
+  def __iter__(self):
+    return (RatRes.n(cr,tr,te) for cr,tr,te in zip(self.cost_rats,self.costs_train,self.costs_test))
+
+  @classmethod
+  def from_predictions(self,preds_train,targs_train,preds_test,targs_test,cost_rats,n_epochs=0):
+    f_train,f_test=ErrorFiltration.from_predictions(preds_train,targs_train),ErrorFiltration.from_predictions(preds_test,targs_test)
+    #f_train,costs_train=f_train.results(cost_rats=cost_rats) #use the training set to select cutoffs
+    #f_test,costs_test=f_test.results(cost_rats=cost_rats,cutoffs=cutoffs) #apply cutoffs to test set
+    f_train=f_train.subfiltration(cost_rats=cost_rats)
+    f_test=f_test.subfiltration(cutoffs=f_train.cutoff)
+    return self(cost_rats,f_train.costs(cost_rats),f_test.costs(cost_rats),f_train.cutoff)
+
+  def str(self,trunc=None):
+    return format_typey_list((self.cost_rats,self.costs_train,self.costs_test,self.cutoffs),
+                             ('cost ratio','E(cost|train)','E(cost|test)','class cutoff'),trunc,lambdas=(lj,lj,lj,lj))
+      
+  def __str__(self):
+    return self.str(trunc=10)
+      
+  def __repr__(self):
+    return '\n==Results=='+self.__str__()
+    #return 'Results'+self.__str__()
+    
+class NNState(NamedTuple):
+  time:int #in epochs in easy case
+  state:object #adam etc hyperparams
+  param:object #nn weights
+
+class UpdateRule(NamedTuple):
+  lr:float
+  bs:int
+  loss_par:tuple
+  
+  def __str__(self):
+    return '(lr:'+str(self.lr)+' bs:'+str(self.bs)+' loss_par:'+str(self.loss_par)+')'
+
+  def __repr__(self):
+    return 'UpdateRule'+self.__str__()
+
+class UpdateRuleImplementation:
+  def __init__(self,loss:Callable,forward:Callable,rules:dict={},log:Callable=print):
+    self.loss=loss
+    self.forward=forward
+    self.rules=rules
+    self.log=log
+
+  def epochs(self,ur,nns,x,y,n_epochs,k):
+    if not ur in self.rules:
+      if ur.loss_par is None:
+        dl=grad(lambda param,x,y:self.loss(self.forward(param,x).reshape(-1),y,).sum())
+      else:
+        dl=grad(lambda param,x,y:self.loss(self.forward(param,x).reshape(-1),y,ur.loss_par).sum())
+      ad=adam(learning_rate=ur.lr).update
+      def step(state_param,x_y):
+        x,y=x_y
+        s,p=state_param
+        g=dl(p,x,y)
+        upd,state=ad(g,s)
+        param=apply_updates(p,upd)
+        return (state,param),None
+        
+      def steps(nns:NNState,x_b,y_b):
+        s,p=scan(step,(nns.state,nns.param),(x_b,y_b))[0]
+        return NNState(state=s,param=p,time=nns.time+1)
+
+      steps=jit(steps)
+    
+      def _epochs(nns,x,y,n_epochs,k):
+        t0=perf_counter()
+        for e,l in enumerate(split(k,n_epochs),1):
+          self.log('Running epoch',e,'of',n_epochs,'...',end='\r')
+          x_batched,y_batched=shuffle_and_batch(l,x,y,ur.bs)
+          nns=steps(nns,x_batched,y_batched)
+        t=perf_counter()-t0
+        self.log('Completed',n_epochs,'epochs in',t,'seconds')
+        return nns
+      self.rules[ur]=_epochs#jit(_epochs,static_argnames='n_epochs')
+    return self.rules[ur](nns,x,y,n_epochs,k)
+
+class TrainingCheckpoint(NamedTuple):
+  n_epochs:int
+  ur:UpdateRule
+  rs:str
+  def __str__(self):
+    return '(n_epochs:'+str(self.n_epochs)+' ur:'+str(self.ur)+\
+           ' rs:'+(str(self.rs) if self.rs else 'None')+')'
+
+  def __repr__(self):
+    return 'TrainingCheckpoint'+self.__str__()
+
+class Outcome(NamedTuple):
+  checkpoint:TrainingCheckpoint
+  res:TT
+
+  def __lt__(self,other):
+    return self.res.test<other.res.test
+
+  def __str__(self):
+    return '('+str(self.checkpoint)+'~>'+str(self.res)+')'
+
+  def __repr__(self):
+    return 'Outcome'+self.__str__()
+
+class TrainingRule(NamedTuple):
+  n_epochs:tuple
+  ur:UpdateRule
+  rs:str
+  
+  def train(self,uri:UpdateRuleImplementation,nns:NNState,ds,k):
+    x,y=ds.get_resampled(True,self.rs)
+    snapshots=[]
+    last=0
+    for l,current_epoch,next_checkpoint in zip(split(k,len(self.n_epochs)),(0,)+self.n_epochs,self.n_epochs):
+      nns=uri.epochs(self.ur,nns,x,y,next_checkpoint-current_epoch,l)
+      snapshots.append(nns)
+    return snapshots
+  def __str__(self):
+    return '(n_epochs:'+intupstr(self.n_epochs)+' ur:'+str(self.ur)+\
+           ' rs:'+(str(self.rs) if self.rs else 'None')+')'
+
+  def __repr__(self):
+    return 'TrainingRule'+self.__str__()
+
+  def to_checkpoints(self):
+    return [TrainingCheckpoint(e,self.ur,self.rs) for e in self.n_epochs]
+      
 class NN(Module):
   features:Sequence[int]
-  
   def setup(self):
     self.layers=[Dense(f) for f in self.features]
-    
   def __call__(self,x):
     x=self.layers[0](x)
     for l in self.layers[1:]:
       x=l(relu(x)) # in general no restruction on float output of NN - treat as log relative likelihood
     return x
 
-  
 class NNPL:
-  #Saving and loading resampled data seems to be causing problems not sure why, bit annoying!
   def __init__(self,x_train,y_train,x_test,y_test,cost_rats,ds_name,plot_title,
-               loss=sigmoid_binary_cross_entropy,x_dt=None,y_dt=None,
-               rs_dir=None,bs=128,lr=1e-4,features=[128,64,32,1],seed=0,lo=print,
-               n_epochs=100,loss_param=None):#[256,128,64,1]
+               n_epochs=(1,2,4,8,16,32,64),bs=128,lr=1e-3,rs=[''],loss_param=[None],
+               loss=sigmoid_binary_cross_entropy,x_dt=None,y_dt=None,resampler=None,
+               rs_dir=None,features=(128,64,32,1),seed=1729,lg=print):#[256,128,64,1]
     self.x_train=array(x_train,dtype=x_dt)
     if y_dt is None:
       y_dt=bool #self.x_train.dtype
     self.y_train=array(y_train,dtype=y_dt)
     self.x_test=array(x_test,dtype=x_dt)
     self.y_test=array(y_test,dtype=y_dt)
+    
     self.p=self.y_train.mean()
     self.p_test=self.y_test.mean()
-    self.bs=bs
-    self.n_epochs=n_epochs
-    self.lr=lr
-    self.loss=loss
+    
+    self.nn=NN(features=features)
+
+    self.set_parametric_loss(loss)
+    self.update_rules=set()
+    self.training_rules=set()
+    if lr:
+      self.add_training_rules(lr,bs,loss_param,rs,n_epochs)
+    self.results={}
     
     self.key=key(seed)
-    self.m=NN(features=features)
-    
-    self.init_param=self.m.init(self.getk(),self.x_train[0])
-    
-    self.t=adam(learning_rate=self.lr)
-    
-    self.init_state=self.t.init(self.init_param)
-    
+
     self.cost_rats=cost_rats
     
-    self.state={}
-    self.param={}
-    self.log=lo
+    self.log=lg
     self.ds_name=ds_name
     self.rs_dir=rs_dir
-    self.pred_train={}
-    self.pred_test={}
 
-    self.epochs_time={}
-    self.update_rules={}
+    self.trained={}
     self.res={}
     
     self.plot_title=plot_title
     
-    self.rs=Resampler(self.x_train,self.y_train,self.rs_dir,self.ds_name,int(bits(self.getk())))
+    self.rs=Resampler(self.x_train,self.y_train,self.rs_dir,self.ds_name,int(bits(self.getk()))) if\
+            resampler is None else resampler
 
+  def add_training_rules(self,lr=False,bs=False,loss_param=False,rs=False,n_epochs=False):
+    if isinstance(lr,float):lr=[lr]
+    if isinstance(bs,int):bs=[bs]
+    if isinstance(rs,str):rs=[rs]
+    if isinstance(n_epochs,int):n_epochs=(2**i for i in range(int(1+log2(n_epochs))))
+    if loss_param is None or isinstance(loss_param,tuple):loss_param=[loss_param]# want to allow passing None for loss function with no params
+    if lr:self.lr=lr
+    if bs:self.bs=bs
+    if loss_param:self.loss_param=loss_param
+    if rs:self.rs=rs
+    if n_epochs:self.n_epochs=n_epochs
+    self.update_rules.update({UpdateRule(l,b,p) for l,b,p in product(self.lr,self.bs,self.loss_param)})
+    self.training_rules.update({TrainingRule(ur=ur,rs=r,n_epochs=n_epochs) for r,ur in product(self.rs,self.update_rules)})
+
+  def set_parametric_loss(self,loss):
+    self.loss=loss
+    self.uri=UpdateRuleImplementation(loss=self.loss,forward=self.nn.apply)
     
-  def updates(self,x_batched,y_batched,rs='',loss_param=None):
-    if not loss_param in self.update_rules:
-      if loss_param is None:
-        loss=self.loss
-      else:
-        loss=self.loss(loss_param)
-      dl=grad(lambda par,feat,targ:loss(self.m.apply(par,feat),targ).sum())
+  def mk_nns(self,lr):
+    param=self.nn.init(self.getk(),self.x_train[0])
+    return NNState(0,adam(learning_rate=lr).init(param),param)
 
-      def update(state_param,x_y):
-        state,param=state_param
-        x,y=x_y
-        g=dl(param,x,y)
-        upd,state=self.t.update(g,state)
-        param=apply_updates(param,upd)
-        return (state,param),0
-      self.update_rules[loss_param]=jit(lambda state_param,x_b,y_b:scan(update,state_param,(x_b,y_b))[0])
-      
-    update_rule=self.update_rules[loss_param]
-    y_batched=y_batched.astype(x_batched.dtype)
-    self.state[rs,loss_param],self.param[rs,loss_param]=update_rule((self.state[rs,loss_param],
-                                                                     self.param[rs,loss_param]),
-                                                                    x_batched,y_batched)
+  def train(self,tr_rule):
+    if tr_rule in self.trained:
+      self.log('Already trained',tr_rule,'?!')
+      return
+    self.trained[tr_rule]=tr_rule.train(self.uri,self.mk_nns(tr_rule.ur.lr),self.rs,self.getk()) # evaluate weights at varying times
+    self.log('Training complete for',len(self.trained),'of',len(self.training_rules),'rules')
 
-  def mk_preds(self,rs='',loss_param=None):
-    self.pred_train[rs,loss_param]=self.predict_cts(self.x_train,rs=rs,loss_param=loss_param).reshape(-1)
-    self.pred_test[rs,loss_param]=self.predict_cts(self.x_test,rs=rs,loss_param=loss_param).reshape(-1)
+  def train_all(self):
+    self.log('Training according to all',len(self.training_rules),'rules...')
+    [self.log(r) for r in self.training_rules]
+    [self.train(tr) for tr in self.training_rules]
     
-  def fit(self,rs='',loss_param=None):
-    if not rs in self.state:
-      self.state[rs,loss_param]=self.init_state
-      self.param[rs,loss_param]=self.init_param
-    self.epochs(rs=rs,loss_param=loss_param)
-    self.results(rs=rs,loss_param=loss_param)
-
-  def epochs(self,rs='',n=None,loss_param=None):
-    x,y=self.rs.get_resampled(True,rs)
-    self.log('Resampling took',self.rs.get_t(True,rs),'seconds')
-    
-    if n is None:
-      n=self.n_epochs
-    t0=perf_counter()
-    for e in range(n):
-      self.log('Running epoch',e+1,'of',n,'...',end='\r')
-      x_batched,y_batched=shuffle_batched(self.getk(),x,y,self.bs)
-      self.updates(x_batched,y_batched,rs,loss_param=loss_param)
-    self.epochs_time[rs,loss_param]=perf_counter()-t0
-    self.log('Completed',n,'epochs in',self.epochs_time[rs,loss_param],'seconds')
-    self.log('Getting fp-fn characteristic')
-    self.mk_preds(rs=rs,loss_param=loss_param)
-    #assert self.pred_train[rs,loss_param].min()<self.pred_train[rs,loss_param].max(),\
-    #       'Uh oh:'+str(self.pred_train[rs,loss_param].min())+'=='+str(self.pred_train[rs,loss_param].max())
-
-  def predict_cts(self,x,rs='',loss_param=None):
-    if not (rs,loss_param) in self.param:
-      self.param[rs,loss_param]=self.init_param
-    return self.m.apply(self.param[rs,loss_param],x)
+  def update_res(self):
+    for tr,nns in [(tr,nns) for tr,nns in self.trained.items() if not tr in self.res]:
+      r=[]
+      for nn in nns:
+        pred_train,pred_test=self.nn.apply(nn.param,self.x_train),self.nn.apply(nn.param,self.x_test)
+        r.append(Results.from_predictions(pred_train,self.y_train,pred_test,self.y_test,self.cost_rats))
+      self.res[tr]=r
   
   def getk(self):
     self.key,k=split(self.key)
     return k
 
-  def predict_bin(self,x,cost_ratio,rs='',loss_param=None): # NN output is relative likelihood so take log
-    pred=self.predict_cts(x,rs=rs,loss_param=loss_param)
-    if cutoff_rule=='bayes':
-      cutoff=-log(cost_ratio)#inverse_sigmoid(cost_ratio)
-    elif cutoff_rule=='optimal':
-      cutoff=self.get_optimal_cutoff(cost_ratio)
-      
-    return pred>cutoff
-  
-  def results(self,rs='',loss_param=None):
-    preds_train=self.predict_cts(self.x_train,rs=rs,loss_param=loss_param)
-    preds_test=self.predict_cts(self.x_test,rs=rs,loss_param=loss_param)
-    self.res[rs,loss_param]=r=results(preds_train,self.y_train,preds_test,self.y_test,self.cost_rats)
-    return r
-  
-  def report(self,rs=None,loss_param=None,compare_cost_ratio=None,header=True,topk=None,
-             rs_vs_raw=False,plot_res=False):
-    lj=lambda x:str(x).ljust(13)
-    if header:
-      self.log(lj('cost_ratio')+lj('fp_train')+lj('fn_train')+lj('fp_test')+\
-               lj('fn_test')+lj('E(cost|test)')+lj('resampler')+lj('loss param'))
-
-    if compare_cost_ratio is None:
-      compare_cost_ratio=list(self.cost_rats)
-    if rs is None:
-      rs=list({r for r,p in self.res})
-    if loss_param is None:
-      loss_param=list({p for r,p in self.res})
-
-    if not isinstance(compare_cost_ratio,list):
-      compare_cost_ratio=[compare_cost_ratio]
-    if not isinstance(rs,list):
-      rs=[rs]
-    if not isinstance(loss_param,list):
-      loss_param=[loss_param]
-
-    res_all=[]
-    for c in compare_cost_ratio:
-      rep_raw=[]
-      rep_rs=[]
-      for r in rs:
-        for p in loss_param:
-          try:
-            (fp,fn,fp_test,fn_test,cst)=self.res[r,p].res_by_cost_rat[c]
-          except KeyError:
-            self.log('resampler and loss param',r,p,'not found')
-            continue
-          s=lj(str(c))
-          s+=lj(fp)+lj(fn)
-          s+=lj(fp_test)+lj(fn_test)
-          s+=lj(cst)
-          s+=lj(r)
-          s+=lj(str(p))
-          (rep_rs if r else rep_raw).append((cst,s,(r,p)))
-      if rs_vs_raw:
-        print()
-        print('===================== cost(fn)/cost(fp)=',c,'=====================')
-        rep=sorted(sorted(rep_raw)[:topk]+sorted(rep_rs)[:topk])
-      else:
-        rep=sorted(rep_raw+rep_rs)[:topk]
-      [self.log(s[1]) for s in rep]
-      res_all+=rep
-    if plot_res:
-      [self.plot(rs=r,loss_param=p) for r,p in [x[2] for x in res_all]]
-  
-  def plot(self,rs='',loss_param=None):
-    show()
-    r=self.res[rs,loss_param]
-    plot(r.fpfn_train.fp_rate,r.fpfn_train.fn_rate)
-    plot([0,1-self.p],[self.p,0])
-    title(self.plot_title+' (resampler:'+(rs if rs else 'None')+') (loss params:'+str(loss_param)+')')
-    xlabel('False positives')
-    ylabel('False negatives')
-    show()
-
-    hist(r.fpfn_train.cutoff,label='Raw NN outputs',bins=100)
-    show()
+  def leaderboard(self):
+    res_all={}
+    
+    for rule,res_rule in self.res.items():
+      for checkpoint,res_checkpoint in zip(rule.to_checkpoints(),res_rule):
+        for res_rat in res_checkpoint:
+          res_all[res_rat.rat]=res_all.pop(res_rat.rat,[])+[Outcome(checkpoint,res_rat.res)]
+    for cr,res in res_all.items():
+      res.sort()
+      print('==== cost ratio:',cr,'====')
+      [print(r) for r in res]
 
 def make_fp_perturbed_bce(beta):
   if beta:
@@ -277,10 +398,8 @@ def make_fp_perturbed_bce(beta):
   else:
     return sigmoid_binary_cross_entropy
 
-def make_fp_fn_perturbed_bce(ab):
-  a,b=ab
+def fp_fn_perturbed_bce(pred,targ,param):
+  a,b=param
   l_pos=(lambda r: -sigmoid(r*a)/a) if a else (lambda r:-log(sigmoid(r))) #loss if y=+
   l_neg=(lambda r: -sigmoid(-r*b)/b) if b else (lambda r:-log(sigmoid(-r))) #lloss if y=-
-  def pet_bce(pred,targ):
-    return targ*l_pos(pred)+(1-targ)*l_neg(pred)
-  return pet_bce
+  return targ*l_pos(pred)+(1-targ)*l_neg(pred)

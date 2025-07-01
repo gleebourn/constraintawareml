@@ -22,4 +22,4 @@ b/*
 doc/snippets/*
 resampled/*
 modeval*
-.ipynb_checkpoints/*
+**/.ipynb_checkpoints/*
